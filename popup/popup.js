@@ -48,7 +48,7 @@ let editingKeyPointIndex = -1; // 编辑中的要点索引，-1 表示新增模�
 let events = []; // 事件列表：[{ id, keyPointText, content, time, status }]
 let editingEventId = null; // 编辑中的事件 ID，null 表示新增模式
 let eventFilterKeyPoint = ''; // 事件按要点筛选值，'' 表示全部
-let autoResizeWindow = false; // 切换组合时专属窗口自动伸缩
+let autoResizeWindow = true; // 切换组合时专属窗口自动伸缩
 let defaultPortfolio = '持仓'; // 打开插件时默认显示的组合，默认「持仓」
 let hideKeyPoints = false; // 隐藏首页「要点管理」图标
 let enableTrash = true; // 启用垃圾池功能（默认开启）
@@ -593,6 +593,26 @@ async function handleImport(file) {
 
     // 刷新当前页面状态
     await initState();
+    // 重新读取 sync 设置到本地变量（导入写的 autoResizeWindow 等不会自动同步）
+    await new Promise(r => chrome.storage.sync.get(['autoResizeWindow', 'hideKeyPoints', 'enableTrash', 'refreshOnOpen', 'enableQuickImport', 'quickImportInStockWindow', 'enableAi', 'keepMonitoringOnClose', 'keepRefreshOnClose', 'defaultPortfolio', 'pageSize', 'selectorName', 'dataSource'], (result) => {
+        autoResizeWindow = result.autoResizeWindow !== false;
+        hideKeyPoints = !!result.hideKeyPoints;
+        enableTrash = result.enableTrash !== false;
+        refreshOnOpen = result.refreshOnOpen !== false;
+        enableQuickImport = result.enableQuickImport !== false;
+        quickImportInStockWindow = result.quickImportInStockWindow !== false;
+        enableAi = result.enableAi !== false;
+        keepMonitoringOnClose = !!result.keepMonitoringOnClose;
+        keepRefreshOnClose = !!result.keepRefreshOnClose;
+        if (result.pageSize) pageSize = result.pageSize;
+        if (result.selectorName) { selectorName = result.selectorName; selectorEl.value = selectorName; }
+        if (result.dataSource) dataSourceSelectEl.value = result.dataSource;
+        applyKeyPointsVisibility();
+        applyTrashVisibility();
+        applyAiVisibility();
+        updateQuickImportVisibility();
+        r();
+    }));
     renderStockList();
     refreshCombos();
     loadKeyPoints();
@@ -661,7 +681,7 @@ async function initState() {
 initState().then(() => {
     // 加载全局设置（默认组合、自动伸缩、垃圾池开关、打开刷新、一键导入），应用默认组合后再做首次渲染
     chrome.storage.sync.get(['defaultPortfolio', 'autoResizeWindow', 'hideKeyPoints', 'enableTrash', 'refreshOnOpen', 'enableQuickImport', 'quickImportInStockWindow', 'enableAi', 'keepMonitoringOnClose', 'keepRefreshOnClose'], (result) => {
-        autoResizeWindow = !!result.autoResizeWindow;
+        autoResizeWindow = result.autoResizeWindow !== false;
         hideKeyPoints = !!result.hideKeyPoints;
         enableTrash = result.enableTrash !== false; // 默认开启
         refreshOnOpen = result.refreshOnOpen !== false; // 默认开启

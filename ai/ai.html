@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <title>AI 助手</title>
+    <link rel="stylesheet" href="ai.css">
+</head>
+
+<body class="ai-body">
+    <header class="ai-header">
+        <!-- 会话管理：切换 + 新建 + 改名 + 删除 + 清空 -->
+        <select id="sessionSelect" class="session-select" title="切换会话"></select>
+        <button type="button" id="newSessionBtn" class="ai-text-btn" title="新建会话">＋</button>
+        <button type="button" id="renameSessionBtn" class="ai-text-btn" title="重命名当前会话">改名</button>
+        <button type="button" id="deleteSessionBtn" class="ai-text-btn" title="删除当前会话">删除</button>
+        <button type="button" id="clearChatBtn" class="ai-text-btn" title="清空当前会话消息">清空</button>
+        <button type="button" id="openAiSettingsBtn" class="ai-text-btn" title="设置">设置</button>
+    </header>
+
+    <!-- 工作目录授权状态条（主目录 + 附加目录；由 ai.js 渲染） -->
+    <div class="dir-status-bar" id="dirStatusBar"></div>
+
+    <!-- 消息流 -->
+    <div class="messages" id="messagesEl">
+        <!-- 悬浮「滚动到底部」按钮：生成中上滚阅读后不自动跳底，可随时点击返回最新 -->
+        <button type="button" id="scrollDownBtn" class="scroll-down-btn" title="滚动到底部" hidden>↓</button>
+    </div>
+
+    <!-- 输入区 -->
+    <div class="composer">
+        <!-- 粘贴/待发送图片预览（可删除） -->
+        <div id="pastePreviews" class="paste-previews" hidden></div>
+        <!-- 新对话快捷意图气泡：输入内容后点击即可直接执行 -->
+        <div class="intent-bubbles" id="intentBubbles">
+            <button type="button" class="intent-bubble" data-intent="keypoint" title="将输入内容保存为一条交易要点">＋ 增加要点</button>
+            <button type="button" class="intent-bubble" data-intent="event" title="将输入内容保存为一条预测事件">＋ 增加事件</button>
+            <button type="button" class="intent-bubble" data-intent="stock" title="买入→加入【持仓】，卖出→移到【观察】">＋ 增加股票</button>
+        </div>
+        <textarea id="chatInput" rows="3" placeholder="输入消息，Enter 发送 / Shift+Enter 换行（可粘贴截图）"></textarea>
+        <div class="composer-actions">
+            <!-- 上传文件到工作目录并加载到上下文；未设置工作目录时置灰 -->
+            <button type="button" id="uploadBtn" class="ai-text-btn" title="上传文件到工作目录">📎</button>
+            <input type="file" id="uploadInput" multiple hidden>
+            <span class="composer-hint">Enter 发送，Shift+Enter 换行；可让我切换组合、查看持仓/要点/事件与工作目录文件</span>
+            <button type="button" id="sendBtn" class="ai-btn primary">发送</button>
+            <button type="button" id="stopBtn" class="ai-btn" hidden>停止</button>
+        </div>
+    </div>
+
+    <!-- 内嵌设置弹窗：与插件弹窗「全局设置」同 storage.sync 键，自动同步 -->
+    <div class="ai-overlay" id="aiSettingsOverlay" style="display:none">
+        <div class="ai-settings-model">
+            <div class="ai-close-btn" id="closeAiSettingsBtn" title="关闭">×</div>
+            <h4>AI 设置</h4>
+            <div class="ai-settings-item">
+                <label for="aiProviderSelect">接口配置（可多份，切换立即生效）</label>
+                <div class="ai-provider-row">
+                    <select id="aiProviderSelect" class="ai-settings-input"></select>
+                    <button type="button" id="aiProviderAddBtn" class="ai-text-btn" title="新增配置">＋</button>
+                    <button type="button" id="aiProviderDelBtn" class="ai-text-btn" title="删除当前配置">删除</button>
+                </div>
+            </div>
+            <div class="ai-settings-item">
+                <label for="aiProviderName">配置名称</label>
+                <input type="text" id="aiProviderName" class="ai-settings-input" placeholder="如 DeepSeek / OpenAI">
+            </div>
+            <div class="ai-settings-item">
+                <label for="aiBaseUrl">Base URL</label>
+                <input type="text" id="aiBaseUrl" class="ai-settings-input" placeholder="https://api.deepseek.com">
+            </div>
+            <div class="ai-settings-item">
+                <label for="aiApiKey">API Key</label>
+                <input type="password" id="aiApiKey" class="ai-settings-input" placeholder="sk-...">
+            </div>
+            <div class="ai-settings-item">
+                <label for="aiModel">模型</label>
+                <input type="text" id="aiModel" class="ai-settings-input" placeholder="deepseek-chat">
+            </div>
+            <div class="ai-settings-item">
+                <label for="aiSupportsVision">
+                    <input type="checkbox" id="aiSupportsVision"> 当前模型支持视觉（图片输入）
+                </label>
+            </div>
+            <!-- 全局设置分隔线 -->
+            <div class="ai-settings-divider">
+                <span class="ai-divider-label">全局设置</span>
+            </div>
+            <div class="ai-settings-item">
+                <label for="aiMaxToolIterations">工具调用轮数上限（1-50）</label>
+                <input type="number" id="aiMaxToolIterations" class="ai-settings-input" min="1" max="50" placeholder="18">
+            </div>
+            <div class="ai-settings-item">
+                <label for="aiDefaultVisionProvider">默认使用的视觉模型</label>
+                <select id="aiDefaultVisionProvider" class="ai-settings-input"></select>
+            </div>
+            <p class="ai-settings-desc">支持任何 OpenAI 兼容 /v1/chat/completions 端点</p>
+        </div>
+    </div>
+
+    <script type="module" src="ai.js"></script>
+</body>
+
+</html>

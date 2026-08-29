@@ -1,0 +1,1974 @@
+/* 隐藏视口滚动条（滚轮滚动不受影响，弹窗内容区保留自有细滚动条）：
+   经典滚动条只占右侧宽度，会带来三个问题——
+   (1) 列表/垃圾池行数不同致滚动条出现/消失，整页左右移动约一个滚动条宽；
+   (2) 首页右边距比左边多一个滚动条宽，左右不对称；
+   (3) fixed 遮罩盖不住滚动条槽，编辑页右侧露出白边。
+   scrollbar-width: none 后内容宽度恒定且左右对称（Chrome 121+） */
+html,
+body {
+  scrollbar-width: none;
+}
+
+body {
+  width: 100%;
+  max-width: 680px;
+  box-sizing: border-box;
+  /* 清除 UA 默认 8px margin（否则底部多出 8px），三边 padding 补回原视觉间距；
+     底部留 6px：列表页内容到持仓组合行下方 6px 为止 */
+  margin: 0;
+  padding: 23px 23px 6px;
+  font-family: Arial, sans-serif;
+  overflow-x: hidden;
+}
+
+.quick-open {
+  display: flex;
+  margin-bottom: 14px;
+  align-items: center;
+  position: relative;
+}
+
+.quick-open span {
+  width: 10%;
+  display: block;
+  font-weight: bold;
+}
+
+.quick-open textarea {
+  width: 60%;
+}
+
+.quick-open textarea::placeholder {
+  color: #888888a5;
+}
+
+.quick-open > div {
+  position: absolute;
+  top: 0;
+  right: 0;
+}
+
+.last-update-time {
+  margin-top: 10px;
+  float: right;
+  font-size: 14px;
+}
+
+.form-group {
+  margin-bottom: 20px;
+}
+
+/* 列表面板是页尾内容，底部空白由 body 的 6px 统一提供 */
+.list-panel {
+  margin-bottom: 0;
+}
+
+.container {
+  display: flex;
+  justify-content: space-between;
+}
+
+/* 工具栏：左对齐成一排，消除中间空洞 */
+.toolbar {
+  justify-content: flex-start;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+/* 工具栏间距：图标按钮间收紧到 2px */
+.toolbar-actions {
+  flex: 1;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 2px;
+}
+
+/* 「+」留在左侧，开始/停止右浮动 */
+.toolbar-actions .create-link {
+  margin-right: auto;
+}
+
+.container-split {
+  display: flex;
+  gap: 20px;
+}
+
+.container-split > div {
+  width: 50%;
+}
+
+.stock-data {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr); /* 四列等宽 */
+}
+
+.stock-data span {
+  text-align: center;
+  font-size: 16px;
+}
+
+/* 开关式控件组：胶囊轨道 + 双段切换，激活段为绿色滑块。
+   股票/垃圾池视图切换、开始/停止监控共用；激活态由 .active 类标记 */
+.switch-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  background: #edf0f2;
+  border: 1px solid #dfe3e7;
+  border-radius: 6px;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.04);
+}
+
+.switch-group button {
+  height: 24px;
+  padding: 0 14px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: #8a919a;
+  font-size: 13px;
+  line-height: 22px;
+  cursor: pointer;
+  transition:
+    background-color 0.2s ease,
+    color 0.2s ease,
+    box-shadow 0.2s ease;
+}
+
+.switch-group button:not(:disabled):not(.active):hover {
+  background: #e1e5e9;
+  color: #5f666d;
+}
+
+.switch-group button.active {
+  background: #4caf50;
+  color: #fff;
+  box-shadow: 0 1px 4px rgba(46, 125, 50, 0.4);
+}
+
+.switch-group button.active:hover {
+  background: #43a047;
+}
+
+/* 停止段激活（运行中）为红色，区别于启动的绿色 */
+#stopBtn.active {
+  background: #f44336;
+  box-shadow: 0 1px 4px rgba(198, 40, 40, 0.4);
+}
+
+#stopBtn.active:hover {
+  background: #e53935;
+}
+
+.switch-group button:disabled {
+  background: transparent;
+  color: #aab1b8;
+  cursor: default;
+}
+
+.switch-group button:focus-visible {
+  outline: 2px solid #81c784;
+  outline-offset: 1px;
+}
+
+/* 定高确保 select 与 number input 盒高完全一致（两者内禀行高不同） */
+.small-input {
+  width: 140px;
+  height: 30px;
+}
+
+/* 选择器下拉框 */
+#selectorName {
+  width: 120px;
+}
+
+label {
+  display: block;
+  margin-bottom: 5px;
+  font-weight: bold;
+}
+
+/* select 与 input 共用盒模型，保证同行控件高度/圆角一致 */
+input,
+select {
+  width: 100%;
+  padding: 6px;
+  box-sizing: border-box;
+}
+
+/* 统一输入控件外观：细边框 + 圆角 + 绿色聚焦光圈（按钮/复选框除外） */
+input:not([type="button"]):not([type="checkbox"]),
+select,
+textarea {
+  border: 1px solid #dfe3e7;
+  border-radius: 4px;
+  background: #fff;
+  transition:
+    border-color 0.2s ease,
+    box-shadow 0.2s ease;
+}
+
+input:not([type="button"]):not([type="checkbox"]):focus,
+select:focus,
+textarea:focus {
+  border-color: #4caf50;
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(76, 175, 80, 0.15);
+}
+
+input:not([type="button"]):not([type="checkbox"]):disabled {
+  background: #f5f6f7;
+  color: #999;
+}
+
+/* 统一工具栏按钮尺寸（开始/停止/视图切换/添加） */
+button {
+  box-sizing: border-box;
+  text-align: center;
+  background-color: #4caf50;
+  color: white;
+  border: none;
+  border-radius: 3px;
+}
+
+button:disabled {
+  background-color: #cccccc;
+}
+
+.tool-btn {
+  width: auto;
+  height: 26px;
+  padding: 0 12px;
+  line-height: 24px;
+  font-size: 13px;
+  border-radius: 3px;
+  box-sizing: border-box;
+  cursor: pointer;
+}
+
+.edit {
+  width: 18px;
+  height: auto;
+  cursor: pointer;
+}
+
+.edit:hover {
+  transform: translateY(-2px);
+  transition: transform 0.2s;
+}
+
+/* 添加按钮：与工具栏按钮同尺寸的 pill */
+.create-link {
+  width: auto;
+  height: 26px;
+  padding: 0 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #4caf50;
+  border-radius: 3px;
+  background: none;
+  color: #4caf50;
+  font-size: 18px;
+  line-height: 1;
+  box-sizing: border-box;
+  cursor: pointer;
+}
+
+.create-link:hover {
+  background: #4caf50;
+  color: #fff;
+}
+
+/* 快速打开「一键导入」按钮：与添加按钮同风格的绿边 pill */
+.quick-import-btn {
+  flex: none;
+  height: 26px;
+  padding: 0 10px;
+  margin-left: 8px;
+  border: 1px solid #4caf50;
+  border-radius: 3px;
+  background: none;
+  color: #4caf50;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  white-space: nowrap;
+  align-self: center;
+  box-sizing: border-box;
+}
+
+.quick-import-btn:hover {
+  background: #4caf50;
+  color: #fff;
+}
+
+.warn {
+  color: red;
+  font-size: larger;
+  font-weight: bold;
+}
+
+.overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  padding: 16px;
+  box-sizing: border-box;
+  background-color: rgba(0, 0, 0, 0.4);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 999;
+}
+
+.stock-model {
+  background: white;
+  width: 70%;
+  max-height: 100%;
+  padding: 28px 20px 18px;
+  border-radius: 10px;
+  position: relative;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.22);
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* 弹窗内容滚动区：外壳(含关闭按钮)不滚动，内容超出时仅此处上下滚动；
+   横向一律裁切，避免任何子元素撑出水平滚动条 */
+.stock-model-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 4px;
+}
+
+.stock-model-body::-webkit-scrollbar {
+  width: 8px;
+}
+
+.stock-model-body::-webkit-scrollbar-thumb {
+  background: #c8ccd0;
+  border-radius: 4px;
+}
+
+.stock-model-body::-webkit-scrollbar-thumb:hover {
+  background: #a9aeb3;
+}
+
+.stock-model-body::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* 关闭按钮：圆形 hover 底 */
+.close-btn {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  color: #999;
+  transition:
+    background-color 0.2s ease,
+    color 0.2s ease;
+}
+
+.close-btn:hover {
+  background: #f0f2f5;
+  color: #333;
+}
+
+.stock-model form {
+  display: flex;
+  flex-direction: column;
+  margin-top: 12px;
+}
+
+.stock-model form input {
+  margin-bottom: 5px;
+}
+
+/* 身份头：名称 + 代码 + 现价 */
+.stock-identity {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+/* 股票名称：只读展示（抓取自动更新），超长省略号截断；
+   min-width 保底可见字数，过大则短名称右侧留白 */
+.stock-name {
+  flex: 0 1 auto;
+  max-width: 45%;
+  min-width: 4.5em;
+  font-size: 18px;
+  font-weight: bold;
+  color: #222;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.code-tag {
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  background: #f0f2f5;
+  color: #555;
+  border-radius: 10px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+/* 身份头分隔符：代码与现价之间 */
+.identity-sep {
+  flex: 0 0 auto;
+  color: #999;
+}
+
+/* 最新刷新时间：挂在「当日情况」标题右上角，不带年 */
+.last-update-at {
+  margin-left: auto;
+  font-size: 12px;
+  font-weight: normal;
+  color: #8a919a;
+}
+
+/* 身份头现价：涨跌配色 + 加粗，紧跟创建时间之后，视觉上微下移对齐 */
+.header-price {
+  flex: 0 0 auto;
+  margin-top: 4px;
+  font-size: 18px;
+  font-weight: bold;
+}
+
+/* 目标涨跌幅：单列两行（≤ 一行、≥ 一行）。
+   旧版 ≤/≥ 并排导致提醒框超出弹窗宽度两倍、出现横向滚动，改为竖排 */
+.target-percent-div {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 6px;
+  font-size: 14px;
+}
+
+.tp-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.tp-row input {
+  flex: 1 1 0;
+  min-width: 0;
+  width: auto;
+  margin-bottom: 0;
+}
+
+/* 涨跌幅输入定宽居中 */
+.tp-row .tp-percent {
+  flex: 0 0 78px;
+  width: 78px;
+  text-align: center;
+}
+
+/* 目标价输入定宽，不再 flex 撑满整行（避免输入框过长超出弹窗） */
+.tp-row .target-price-input {
+  flex: 0 0 120px;
+  width: 120px;
+}
+
+/* 阈值符号徽章：≤ 跌提醒绿色、≥ 涨提醒红色 */
+.tp-sym {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: bold;
+}
+
+.sym-le {
+  background: #e6f7f2;
+  color: #00b894;
+}
+
+.sym-ge {
+  background: #fdecea;
+  color: #e02424;
+}
+
+/* 当日情况/导入以来容器：不再整体套阴影，改为卡片纵向堆叠 */
+.last-monitor {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0 0 12px;
+}
+
+.last-monitor .detail-section {
+  margin-bottom: 0;
+}
+
+/* 表格容器 */
+.stock-table-container {
+  margin: 20px auto;
+  background: #fff;
+  border-radius: 4px;
+  overflow: hidden;
+  box-shadow:
+    0 1px 2px 0 rgba(0, 0, 0, 0.3),
+    0 2px 6px 2px rgba(0, 0, 0, 0.15);
+}
+
+/* 表格样式 */
+.stock-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+/* 表头样式 */
+.stock-table thead {
+  background-color: #f8f9fa;
+  color: #333;
+}
+
+.stock-table th {
+  padding: 10px 6px;
+  text-align: left;
+  font-weight: 600;
+  font-size: 14px;
+  overflow: hidden;
+}
+
+/* 表格内容样式 */
+.stock-table tbody tr {
+  border-bottom: 1px solid #e5e5e5;
+  transition: background-color 0.2s;
+}
+
+.stock-table tbody tr:hover {
+  background-color: #f1f3f5;
+}
+
+.stock-table td {
+  padding: 10px 6px;
+  font-size: 14px;
+  color: #333;
+  overflow: hidden;
+}
+
+/* 名称列：长名称省略号截断，给复制图标留位 */
+.stock-table td:first-child {
+  white-space: nowrap;
+}
+
+/* 操作列居中 */
+.stock-table td:last-child {
+  text-align: center;
+}
+
+.action-icons {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.stock-link {
+  color: #1a73e8;
+  text-decoration: none;
+  cursor: pointer;
+  display: inline-block;
+  max-width: calc(100% - 22px);
+  vertical-align: middle;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stock-link:hover {
+  text-decoration: underline;
+}
+
+/* 涨跌幅颜色 */
+.rise {
+  color: #e02424; /* 红色表示上涨 */
+}
+
+.fall {
+  color: #00b894; /* 绿色表示下跌 */
+}
+
+.save-input {
+  padding: 8px 16px;
+  border: none;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+/* 编辑弹窗按钮：上排(删除+垃圾池) 下排(保存) */
+.edit-actions-top {
+  display: flex;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.edit-actions-top .save-input {
+  flex: 1;
+  height: 30px;
+  padding: 0 10px;
+  font-size: 13px;
+}
+
+.edit-actions-bottom {
+  margin-top: 10px;
+}
+
+.edit-actions-bottom .save-input {
+  width: 100%;
+  height: 34px;
+}
+
+.btn-embossed {
+  background: #4caf50;
+  color: #fff;
+}
+
+.btn-embossed:hover {
+  background: #43a047;
+}
+
+.del-embossed {
+  background: #fff;
+  color: #fb0000;
+  border: 1px solid #fb0000;
+}
+
+.del-embossed:hover {
+  background: #fb0000;
+  color: #fff;
+}
+
+.btn-embossed:active,
+.del-embossed:active {
+  box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+/* 表格页脚：首行持仓组合标签 + 分页栏，次行组合卡片 */
+.table-footer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 2px 2px 0;
+}
+
+/* 首行：持仓组合 + 分页栏（推到右侧） */
+.footer-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 分页区域：作为导入导出按钮的定位锚点，推到行尾 */
+.pagination-area {
+  position: relative;
+  display: flex;
+  align-items: center;
+  margin-left: auto;
+}
+
+/* 导入导出按钮组：绝对定位于分页栏左侧 16px */
+.pagination-area > .io-buttons {
+  position: absolute;
+  right: 100%;
+  margin-right: 16px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.combo-label {
+  font-size: 12px;
+  color: #8a919a;
+  white-space: nowrap;
+}
+
+/* 导入导出图标钮：持仓组合标签后 */
+.io-icon-btn {
+  width: auto;
+  height: auto;
+  padding: 2px;
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+
+.io-icon-btn img {
+  display: block;
+  width: 16px;
+  height: 16px;
+  opacity: 0.6;
+}
+
+.io-icon-btn:hover img {
+  opacity: 1;
+}
+
+/* 组合切换 chip */
+.combo-switches {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin-top: 8px;
+}
+
+.combo-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border: 1px solid #ddd;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: normal;
+  cursor: pointer;
+  user-select: none;
+  margin: 0;
+}
+
+.combo-chip input {
+  width: auto;
+  margin: 0;
+}
+
+.combo-chip.active {
+  border-color: #4caf50;
+  background: #e8f5e9;
+  color: #2e7d32;
+}
+
+/* 组合删除钮：默认弱化，hover 变红 */
+.combo-del {
+  margin-left: 2px;
+  padding: 0 2px;
+  color: #bbb;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.combo-del:hover {
+  color: #fb0000;
+}
+
+/* 组合新建钮：默认弱化，hover 变绿 */
+.combo-add {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  color: #bbb;
+  font-size: 16px;
+  font-weight: bold;
+  line-height: 1;
+  cursor: pointer;
+  border: 1px dashed #ccc;
+  border-radius: 10px;
+  margin-left: 4px;
+}
+
+.combo-add:hover {
+  color: #4caf50;
+  border-color: #4caf50;
+}
+
+/* 切换组合按钮：与其他操作图标一致（18px，无框，hover 上浮） */
+.move-combo-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: auto;
+  cursor: pointer;
+  vertical-align: middle;
+  transition: transform 0.2s;
+}
+
+.move-combo-btn:hover {
+  transform: translateY(-2px);
+}
+
+.move-combo-btn .dots-icon {
+  font-size: 16px;
+  line-height: 1;
+  color: #333;
+  font-weight: bold;
+}
+
+/* 切换组合下拉框 */
+.move-combo-dropdown {
+  background: #fff;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  z-index: 1000;
+  min-width: 80px;
+  padding: 4px 0;
+}
+
+.move-combo-dropdown.empty {
+  padding: 8px 12px;
+  color: #999;
+  font-size: 12px;
+  text-align: center;
+}
+
+.move-combo-item {
+  padding: 6px 12px;
+  cursor: pointer;
+  font-size: 13px;
+  color: #333;
+}
+
+.move-combo-item:hover {
+  background: #e8f5e9;
+  color: #2e7d32;
+}
+
+/* 视图切换（股票列表 / 垃圾池） */
+.view-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+/* 标题定宽，避免「股票列表/垃圾池」字数不同导致右侧切换按钮左右移动：
+   字号缩到 14px 后 4 字（股票列表）恰为原字号 3 字（垃圾池）的宽度，
+   按钮位置恒等于垃圾池视图时的位置 */
+.view-header h3 {
+  margin: 0;
+  font-size: 14px;
+  width: 4em;
+  white-space: nowrap;
+}
+
+/* 分页栏 */
+.pagination-bar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  padding: 0;
+  font-size: 13px;
+  flex-wrap: wrap;
+}
+
+.pagination-bar button {
+  width: auto;
+  height: auto;
+  padding: 2px 10px;
+  background: #f0f0f0;
+  color: #333;
+  border: 1px solid #ddd;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.pagination-bar button:disabled {
+  opacity: 0.4;
+  cursor: default;
+  background: #f0f0f0;
+}
+
+.pagination-bar label {
+  display: inline;
+  margin: 0;
+  font-weight: normal;
+}
+
+.page-size-input {
+  width: 50px;
+  text-align: center;
+  padding: 2px;
+}
+
+/* 涨跌幅表头：排序钮换行到文字下方 */
+.th-percent {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+
+.sort-row {
+  display: inline-flex;
+  gap: 2px;
+}
+
+/* 排序切换 */
+.sort-toggle {
+  cursor: pointer;
+  font-size: 12px;
+  opacity: 0.45;
+  user-select: none;
+}
+
+.sort-toggle.active {
+  opacity: 1;
+  font-weight: bold;
+  color: #4caf50;
+}
+
+/* 涨跌幅双行（当日 / 导入以来） */
+.percent-dual {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.4;
+}
+
+.percent-dual .import-percent {
+  font-size: 12px;
+  opacity: 0.75;
+}
+
+/* 详情页分区：浅灰卡片，标题带绿色竖条 */
+.detail-section {
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  background: #f7f8fa;
+  border: 1px solid #eef1f4;
+  border-radius: 6px;
+}
+
+.detail-section h5 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: #333;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.detail-section h5::before {
+  content: "";
+  width: 3px;
+  height: 12px;
+  background: #4caf50;
+  border-radius: 2px;
+}
+
+/* 数据区两层结构：首行为表头（弱化小字），次行为数值（加粗） */
+.detail-section .stock-data span {
+  font-size: 14px;
+  font-weight: bold;
+  color: #333;
+  padding: 2px 0;
+}
+
+.detail-section .stock-data:first-of-type span {
+  font-size: 12px;
+  font-weight: normal;
+  color: #8a919a;
+  padding: 0;
+}
+
+/* 详情页去掉现价列后，当日/导入以来两栏改为 3 列 */
+.last-monitor .stock-data {
+  grid-template-columns: repeat(3, 1fr);
+}
+
+/* 提醒区改为纵向 flex + gap 统一间距：切换当日/导入以来时
+   两状态内容高度完全一致，避免弹窗居中布局上下抖动 */
+.alert-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* 提醒区头部：标题居左、维度切换居右 */
+.alert-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.alert-head h5 {
+  margin: 0;
+}
+
+/* 维度切换：轻量分段控件（浅灰轨道 + 白底活动段），区别于工具栏的绿色开关 */
+.alert-dim-switch {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 2px;
+  padding: 2px;
+  background: #e8ebee;
+  border-radius: 10px;
+}
+
+.alert-dim-switch button {
+  height: 20px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: #8a919a;
+  font-size: 12px;
+  line-height: 20px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background-color 0.2s ease,
+    color 0.2s ease;
+}
+
+.alert-dim-switch button.active {
+  background: #fff;
+  color: #2e7d32;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
+}
+
+/* 间距由 .alert-section 的 gap 统一提供，组自身不再带外边距 */
+.alert-section .target-group {
+  margin-bottom: 0;
+}
+
+/* 详情页内联数字输入框 */
+.inline-number-input {
+  width: 100%;
+  max-width: 96px;
+  padding: 2px 4px;
+  box-sizing: border-box;
+  text-align: center;
+  font-size: 14px;
+}
+
+/* 目标价联动输入框 */
+.target-price-input {
+  padding: 4px;
+  font-size: 13px;
+  color: #666;
+}
+
+.target-price-input:disabled {
+  background: #f5f5f5;
+  color: #bbb;
+}
+
+/* 垃圾池按钮（橙色） */
+.trash-embossed {
+  background: #fff;
+  color: #e67e22;
+  border: 1px solid #e67e22;
+}
+
+.trash-embossed:hover {
+  background: #e67e22;
+  color: #fff;
+}
+
+/* 复制图标 */
+.copy-icon {
+  width: 14px;
+  height: 14px;
+  cursor: pointer;
+  margin-left: 5px;
+  vertical-align: middle;
+  opacity: 0.5;
+}
+
+.copy-icon:hover,
+.copy-icon.copied {
+  opacity: 1;
+}
+
+/* 文档图标按钮 */
+.doc-icon-btn {
+  cursor: pointer;
+  padding: 3px 4px;
+  border-radius: 4px;
+  transition: background 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+
+.doc-icon-btn:hover {
+  background: #f1f3f5;
+}
+
+/* 工具栏图标（刷新/要点/设置，统一规格） */
+.doc-icon {
+  width: 15px;
+  height: 15px;
+  display: block;
+}
+
+/* 全局设置图标与右侧「开始」按钮间增加间距（在 gap 2px 基础上再加 6px） */
+#openSettingsBtn {
+  margin-right: 6px;
+}
+
+/* AI 分析入口置于工具栏行尾，绿边框与「+」按钮一致；padding/margin 紧凑 */
+#openAiChatBtn {
+  margin-left: 4px;
+}
+
+.ai-chat-btn {
+  display: inline-flex;
+  align-items: center;
+  color: #2196f3; /* AI 分析图标浅蓝色 */
+  background: #fff;
+  border: 1px solid #d5d8dc; /* 灰色边框 */
+  padding: 0 6px;
+}
+
+.ai-chat-btn span {
+  color: #333; /* 文字黑色 */
+}
+
+.ai-chat-btn:hover {
+  background: #f5f7fa;
+}
+
+.ai-chat-btn .ic {
+  width: 14px;
+  height: 14px;
+  vertical-align: -2px;
+  margin-right: 3px;
+}
+
+/* 监控启停单按钮：灰色边框；未运行绿色，运行中红色；文字黑色 */
+.start-stop-btn {
+  display: inline-flex;
+  align-items: center;
+  color: #4caf50; /* ▶ 图标 绿色 */
+  background: #fff;
+  border: 1px solid #d5d8dc; /* 灰色边框 */
+  padding: 0 6px; /* 左右内边距紧凑 */
+  margin-left: 2px;
+}
+
+.start-stop-btn .ic {
+  width: 14px;
+  height: 14px;
+  margin-right: 3px;
+}
+
+/* 文字恒为黑色（图标颜色由按钮 color 控制） */
+.start-stop-btn .btn-label {
+  color: #333;
+}
+
+.start-stop-btn:hover {
+  background: #f5f7fa;
+}
+
+.start-stop-btn .ic-stop {
+  display: none;
+}
+
+.start-stop-btn.running {
+  color: #e53935; /* ■ 图标 红色（边框保持灰色） */
+}
+
+.start-stop-btn.running .ic-play {
+  display: none;
+}
+
+.start-stop-btn.running .ic-stop {
+  display: inline-block;
+}
+
+/* 要点管理弹窗 */
+.keypoints-model {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 500px;
+  max-height: 80vh;
+  background: #fff;
+  border-radius: 8px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+  z-index: 10000;
+  padding: 20px;
+  overflow-y: auto;
+}
+
+.keypoints-model h4 {
+  margin: 0 0 15px 0;
+  font-size: 16px;
+  color: #333;
+}
+
+.keypoints-model .close-btn {
+  position: absolute;
+  top: 10px;
+  right: 15px;
+  font-size: 24px;
+  cursor: pointer;
+  color: #999;
+  line-height: 1;
+}
+
+.keypoints-model .close-btn:hover {
+  color: #333;
+}
+
+.keypoints-input-area {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 15px;
+}
+
+.keypoint-text-input {
+  flex: 1;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  font-size: 13px;
+}
+
+.keypoint-weight-input {
+  width: 60px;
+  height: 32px;
+  padding: 0 8px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  font-size: 13px;
+}
+
+.keypoint-add-btn {
+  height: 32px;
+  padding: 0 16px;
+  background: #4caf50;
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.keypoint-add-btn:hover {
+  background: #45a049;
+}
+
+.keypoints-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.keypoint-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  background: #f9f9f9;
+  border-radius: 4px;
+  border: 1px solid #eee;
+}
+
+.keypoint-item:hover {
+  background: #f0f9f0;
+  border-color: #4caf50;
+}
+
+.keypoint-seq {
+  font-weight: bold;
+  color: #666;
+  min-width: 20px;
+}
+
+.keypoint-text {
+  flex: 1;
+  font-size: 13px;
+  color: #333;
+  cursor: pointer;
+}
+
+.keypoint-text:hover {
+  color: #2196f3;
+  text-decoration: underline;
+}
+
+.keypoint-weight {
+  font-size: 12px;
+  color: #999;
+  padding: 2px 8px;
+  background: #e0e0e0;
+  border-radius: 10px;
+}
+
+.keypoint-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.keypoint-action-btn {
+  padding: 4px 10px;
+  border: none;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.keypoint-edit-btn {
+  background: #2196f3;
+  color: #fff;
+}
+
+.keypoint-edit-btn:hover {
+  background: #0b7dda;
+}
+
+.keypoint-delete-btn {
+  background: #f44336;
+  color: #fff;
+}
+
+.keypoint-delete-btn:hover {
+  background: #da190b;
+}
+
+/* 标签页切换 */
+.tab-switch {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 15px;
+  border-bottom: 2px solid #e0e0e0;
+  padding-bottom: 8px;
+}
+
+.tab-btn {
+  padding: 8px 16px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 14px;
+  color: #666;
+  border-radius: 4px 4px 0 0;
+  transition: all 0.2s;
+}
+
+.tab-btn:hover {
+  background: #f0f0f0;
+}
+
+.tab-btn.active {
+  background: #4caf50;
+  color: #fff;
+}
+
+/* 事件管理样式 */
+.events-input-area {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 130px;
+  gap: 8px;
+  margin-bottom: 15px;
+}
+
+.event-keypoint-select,
+.event-date-input {
+  width: 100%;
+  height: 32px;
+  min-width: 0;
+  padding: 0 10px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  font-size: 13px;
+}
+
+.event-keypoint-select {
+  grid-column: 1;
+}
+
+.event-date-input {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.event-content-input {
+  grid-column: 1;
+  width: 100%;
+  height: 32px;
+  min-width: 0;
+  padding: 0 10px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  font-size: 13px;
+}
+
+.event-add-btn {
+  grid-column: 2;
+  grid-row: 2;
+  height: 32px;
+  padding: 0 16px;
+  background: #2196f3;
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.event-add-btn:hover {
+  background: #0b7dda;
+}
+
+.events-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+.event-item {
+  position: relative; /* 要点标签绝对定位的参照 */
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 12px 14px;
+  background: #fff;
+  border: 1px solid #e6ebee;
+  border-radius: 10px;
+  box-shadow: 0 2px 8px rgba(35, 55, 70, 0.06);
+  transition:
+    border-color 0.2s,
+    box-shadow 0.2s,
+    transform 0.2s;
+}
+
+.event-item:hover {
+  border-color: #8bc995;
+  box-shadow: 0 4px 12px rgba(35, 55, 70, 0.1);
+  transform: translateY(-1px);
+}
+
+.event-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  /* 标签已绝对定位到右上角，不再占文档流，时间与内容间距不受其影响 */
+}
+
+.event-time {
+  min-width: 0;
+  color: #8994a0;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.event-keypoint-tag {
+  /* 绝对定位于卡片右上角（对齐卡片 padding），不占文档流；
+     超过约 8 个汉字（1em ≈ 1 中文字宽）即换行显示 */
+  position: absolute;
+  top: 12px;
+  right: 14px;
+  z-index: 1;
+  max-width: 11em;
+  padding: 3px 8px;
+  color: #398b4c;
+  background: #eaf7ed;
+  border-radius: 5px;
+  font-size: 11px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.event-content-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.event-content-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.event-content {
+  flex: 1;
+  min-width: 0;
+  color: #303b46;
+  font-size: 13px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.event-row-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+  flex-wrap: nowrap;
+  white-space: nowrap;
+}
+
+.event-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  color: #687078;
+  background: transparent;
+  border: 0;
+  border-radius: 3px;
+  line-height: 1;
+  cursor: pointer;
+  transition:
+    transform 0.2s,
+    border-color 0.2s;
+}
+
+.event-icon-btn svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.event-icon-btn:hover {
+  color: #687078;
+  transform: translateY(-2px);
+}
+
+.event-status {
+  padding: 3px 10px;
+  border-radius: 10px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.event-status.pending {
+  background: #fff3cd;
+  color: #856404;
+}
+
+.event-status.accurate {
+  background: #d4edda;
+  color: #155724;
+}
+
+.event-status.wrong {
+  background: #f8d7da;
+  color: #721c24;
+}
+
+.event-status.archived {
+  padding: 5px 9px;
+  background: #e9ecef;
+  color: #6c757d;
+  border-radius: 6px;
+  font-size: 11px;
+}
+
+/* 归档后按状态区分：准确=浅绿，误判=灰（覆盖上面统一的灰色） */
+.event-status.accurate.archived {
+  background: #d4edda;
+  color: #155724;
+}
+
+.event-status.wrong.archived {
+  background: #e9ecef;
+  color: #6c757d;
+}
+
+.event-status-select {
+  width: 50%;
+  min-width: 76px;
+  height: 28px;
+  padding: 0 4px;
+  color: #856404;
+  background: #fff8e5;
+  border: 1px solid #f0d98a;
+  border-radius: 6px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.events-filter-area {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0 10px;
+  padding: 8px 10px;
+  background: #f7f9fa;
+  border: 1px solid #edf0f2;
+  border-radius: 8px;
+}
+
+.events-filter-label {
+  color: #666;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.event-filter-control {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  min-width: 0;
+  gap: 4px;
+}
+
+.event-filter-select {
+  flex: 1;
+  min-width: 0;
+  height: 30px;
+  padding: 0 8px;
+  color: #475462;
+  background: #fff;
+  border: 1px solid #dce3e7;
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+/* 筛选行右侧的准确率 */
+.event-accuracy {
+  white-space: nowrap;
+  height: 30px;
+  line-height: 30px;
+  padding: 0 10px;
+  color: #155724;
+  background: #fff;
+  border: 1px solid #dce3e7;
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.clear-event-filter-btn {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  color: #8b969f;
+  background: transparent;
+  border: 0;
+  border-radius: 50%;
+  font-size: 18px;
+  line-height: 24px;
+  cursor: pointer;
+}
+
+.clear-event-filter-btn:hover {
+  color: #f44336;
+  background: #fee;
+}
+
+.event-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.event-actions {
+  display: flex;
+  flex: 1;
+  gap: 2px;
+  flex-wrap: nowrap;
+  justify-content: flex-end;
+  white-space: nowrap;
+}
+
+.event-item.archived,
+.event-item:has(.event-status.archived) {
+  background: #fafbfb;
+  box-shadow: none;
+  opacity: 0.78;
+}
+
+@media (min-width: 520px) {
+  .events-list {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: start;
+  }
+}
+
+/* 全局设置弹窗 */
+.settings-model {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 420px;
+  max-width: calc(100vw - 40px);
+  max-height: calc(100vh - 80px);
+  overflow-y: auto; /* 内容超长时可滚动 */
+  box-sizing: border-box;
+  background: #fff;
+  border-radius: 8px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+  z-index: 10000;
+  padding: 20px;
+}
+
+.settings-model h4 {
+  margin: 0 0 15px 0;
+  font-size: 16px;
+  color: #333;
+}
+
+.settings-model .close-btn {
+  position: absolute;
+  top: 10px;
+  right: 15px;
+  font-size: 24px;
+  cursor: pointer;
+  color: #999;
+  line-height: 1;
+}
+
+.settings-model .close-btn:hover {
+  color: #333;
+}
+
+.settings-item {
+  margin-bottom: 12px;
+}
+
+.settings-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 14px;
+  color: #333;
+}
+
+.settings-toggle input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+}
+
+.toggle-label {
+  user-select: none;
+}
+
+.settings-desc {
+  margin: 6px 0 0 24px;
+  font-size: 12px;
+  color: #888;
+  line-height: 1.5;
+}
+
+/* 全局设置里的组合下拉框 */
+.settings-select {
+  width: 100%;
+  height: 32px;
+  padding: 0 8px;
+  margin-top: 6px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  font-size: 13px;
+  background: #fff;
+  cursor: pointer;
+}
+
+/* 全局设置里的文本输入框（API Key） */
+.settings-input {
+  width: 100%;
+  height: 32px;
+  padding: 0 8px;
+  margin-top: 6px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  font-size: 13px;
+  background: #fff;
+  box-sizing: border-box;
+}
+
+.settings-input:focus {
+  border-color: #2196f3;
+  outline: none;
+}
+
+/* API Key 组：作为「数据获取方式」的子项，缩进显示、标题字号缩小 */
+.api-key-group {
+  margin-left: 24px;
+}
+
+.api-key-group .toggle-label {
+  font-size: 11px;
+  color: #555;
+}
+
+/* API Key 输入行：输入框 + 外部跳转图标 */
+.settings-input-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.settings-input-row .settings-input {
+  flex: 1;
+  min-width: 0;
+  margin-top: 0;
+}
+
+.api-key-link {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  line-height: 1;
+  color: #2196f3;
+  text-decoration: none;
+  border: 1px solid #dce3e7;
+  border-radius: 4px;
+  background: #fff;
+  transition: background 0.2s;
+}
+
+.api-key-link:hover {
+  background: #e3f2fd;
+}
+
+/* 全局设置里的按钮（添加定时任务） */
+.settings-btn {
+  margin-top: 8px;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid #2196f3;
+  color: #2196f3;
+  background: #fff;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  transition: background 0.2s;
+}
+
+.settings-btn:hover {
+  background: #e3f2fd;
+}
+
+.settings-btn:disabled {
+  color: #bbb;
+  border-color: #ddd;
+  background: #f5f5f5;
+  cursor: not-allowed;
+}
+
+/* 导出选择弹窗按钮：占满宽度、左对齐、可换行，便于阅读两项说明 */
+.export-choice-btn {
+  width: 100%;
+  height: auto;
+  padding: 9px 12px;
+  white-space: normal;
+  text-align: left;
+}
+
+/* cron 定时任务列表 */
+.cron-job-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.cron-job-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cron-expr-input {
+  flex: 1;
+  min-width: 0;
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  font-size: 13px;
+  font-family: Consolas, "Courier New", monospace;
+}
+
+.cron-expr-input:focus {
+  border-color: #2196f3;
+  outline: none;
+}
+
+.cron-enable {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: #555;
+  cursor: pointer;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.cron-enable input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  cursor: pointer;
+}
+
+.cron-del-btn {
+  width: 24px;
+  height: 24px;
+  border: none;
+  background: none;
+  color: #999;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.cron-del-btn:hover {
+  color: #e53935;
+  background: #fdecea;
+}
+
+.settings-desc code {
+  background: #f5f5f5;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 12px;
+  font-family: Consolas, "Courier New", monospace;
+}

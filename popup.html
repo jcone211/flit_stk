@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <title>同花顺问财</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+    <div class="quick-open">
+        <span>快速打开</span>
+        <textarea id="quickOpen" rows="2" placeholder="输入股票名称，Enter键打开网页(任意字符分隔)"></textarea>
+        <button type="button" id="quickImportBtn" class="quick-import-btn" style="display:none"
+            title="将输入内容按快速打开逻辑建组导入">一键导入</button>
+        <div>
+            <div>上次更新时间</div>
+            <div id="lastUpdateTime" class="last-update-time">-</div>
+        </div>
+    </div>
+    <div class="form-group container">
+        <div>
+            <label for="selectorName"><span>选择器名称&nbsp;<span class="warn">*</span></span></label>
+            <select class="small-input" id="selectorName">
+                <option value="wc1">同花顺问财</option>
+                <option value="xq1">雪球</option>
+                <option value="api">调用 API 直取（不打开页面）</option>
+            </select>
+        </div>
+        <div>
+            <label for="interval">刷新间隔(秒)&nbsp;<span class="warn">*</span></label>
+            <input type="number" class="small-input" id="interval" min="30" value="60">
+        </div>
+
+    </div>
+    <div class="form-group list-panel">
+        <div class="container toolbar">
+            <div class="view-header">
+                <h3 id="viewTitle">股票列表</h3>
+                <div class="switch-group" id="viewSwitchGroup">
+                    <button id="viewListBtn" class="tool-btn active">股票</button>
+                    <button id="viewTrashBtn" class="tool-btn">垃圾池</button>
+                </div>
+            </div>
+            <div class="container toolbar-actions">
+                <div class="create-link tool-btn" id="addStock">+</div>
+                <div class="tool-btn doc-icon-btn" id="refreshAllBtn" title="一键刷新全部组合的全部股票"><img src="icons/refresh.svg"
+                        alt="一键刷新" class="doc-icon"></div>
+                <div class="tool-btn doc-icon-btn" id="openKeyPointsBtn" title="要点管理"><img src="icons/keypoints.svg"
+                        alt="要点管理" class="doc-icon"></div>
+                <div class="tool-btn doc-icon-btn" id="openSettingsBtn" title="全局设置"><img src="icons/settings.svg"
+                        alt="全局设置" class="doc-icon"></div>
+                <!-- 监控启停单按钮：未运行 [▶ 开始监控]（橙），运行中 [■ 停止监控]（红），白底 -->
+                <button id="startStopBtn" class="tool-btn start-stop-btn" title="开始/停止监控">
+                    <svg class="ic ic-play" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                        <path d="M8 5v14l11-7z" />
+                    </svg>
+                    <svg class="ic ic-stop" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                        <rect x="6" y="6" width="12" height="12" rx="1.5" />
+                    </svg>
+                    <span class="btn-label">开始监控</span>
+                </button>
+                <!-- AI 分析：独立功能入口，置于行尾，白底简约星芒图标 -->
+                <button id="openAiChatBtn" class="tool-btn ai-chat-btn" title="AI 分析">
+                    <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                        stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M12 4l1.8 5.2L19 11l-5.2 1.8L12 18l-1.8-5.2L5 11l5.2-1.8z" />
+                        <path d="M19 3v3M17.5 4.5h3" />
+                    </svg>
+                    <span>AI分析</span>
+                </button>
+            </div>
+        </div>
+        <div class="stock-table-container">
+            <table class="stock-table">
+                <colgroup>
+                    <col style="width:24%">
+                    <col style="width:14%">
+                    <col style="width:13%">
+                    <col style="width:13%">
+                    <col style="width:17%">
+                    <col style="width:19%">
+                </colgroup>
+                <thead>
+                    <tr>
+                        <th>名称</th>
+                        <th>初始价</th>
+                        <th>昨收</th>
+                        <th>现价</th>
+                        <th class="th-percent">
+                            <span>涨跌幅</span>
+                            <span class="sort-row">
+                                <span class="sort-toggle" data-field="percent" title="按当日涨跌幅排序">⇅</span>
+                                <span class="sort-toggle" data-field="importPercent" title="按导入以来涨跌幅排序">⇅</span>
+                            </span>
+                        </th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <!-- 股票列表数据显示区域 -->
+                <tbody id="stockTable"></tbody>
+            </table>
+        </div>
+        <div class="table-footer">
+            <!-- 首行：持仓组合标签 + 分页栏（导入导出按钮绝对定位于分页栏左侧） -->
+            <div class="footer-row">
+                <span id="comboLabel" class="combo-label">持仓组合</span>
+                <div class="pagination-area">
+                    <div class="io-buttons">
+                        <button id="exportBtn" class="io-icon-btn" title="导出全部数据"><img src="icons/export.svg"
+                                alt="导出"></button>
+                        <button id="importBtn" class="io-icon-btn" title="导入全部数据"><img src="icons/import.svg"
+                                alt="导入"></button>
+                        <input type="file" id="importFileInput" accept=".json,application/json" style="display:none">
+                    </div>
+                    <div id="paginationBar" class="pagination-bar"></div>
+                </div>
+            </div>
+            <!-- 次行：组合卡片 -->
+            <span id="comboSwitches" class="combo-switches"></span>
+        </div>
+    </div>
+
+    <!-- 要点管理弹窗 -->
+    <div class="overlay" id="keyPointsOverlay" style="display:none">
+        <div class="keypoints-model">
+            <div class="close-btn" id="closeKeyPointsBtn" title="关闭">×</div>
+            <h4>要点与事件管理</h4>
+            <!-- 标签页切换 -->
+            <div class="tab-switch">
+                <button type="button" id="tabKeyPointsBtn" class="tab-btn active">要点列表</button>
+                <button type="button" id="tabEventsBtn" class="tab-btn">事件记录</button>
+            </div>
+            <!-- 要点列表标签页 -->
+            <div id="tabKeyPointsContent">
+                <div class="keypoints-input-area">
+                    <input type="text" id="keyPointText" placeholder="输入要点内容" class="keypoint-text-input">
+                    <input type="number" id="keyPointWeight" placeholder="权重" min="1" max="99"
+                        class="keypoint-weight-input">
+                    <button id="addKeyPointBtn" class="keypoint-add-btn">添加</button>
+                </div>
+                <div class="keypoints-list" id="keyPointsList">
+                    <!-- 要点列表动态渲染 -->
+                </div>
+            </div>
+            <!-- 事件记录标签页 -->
+            <div id="tabEventsContent" style="display:none">
+                <div class="events-input-area">
+                    <select id="eventKeyPointSelect" class="event-keypoint-select">
+                        <option value="">选择关联要点</option>
+                    </select>
+                    <input type="text" id="eventContent" placeholder="事件内容" class="event-content-input">
+                    <input type="date" id="eventDate" class="event-date-input">
+                    <button id="addEventBtn" class="event-add-btn">添加</button>
+                </div>
+                <div class="events-filter-area">
+                    <label class="events-filter-label" for="eventFilterSelect">按要点筛选</label>
+                    <div class="event-filter-control">
+                        <select id="eventFilterSelect" class="event-filter-select">
+                            <option value="">全部要点</option>
+                        </select>
+                        <button type="button" id="clearEventFilterBtn" class="clear-event-filter-btn"
+                            title="清除筛选">×</button>
+                    </div>
+                    <span id="eventAccuracy" class="event-accuracy" title="准确率 = 已归档且准确的 / 已归档"></span>
+                </div>
+                <div class="events-list" id="eventsList">
+                    <!-- 事件列表动态渲染 -->
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 全局设置弹窗 -->
+    <div class="overlay" id="settingsOverlay" style="display:none">
+        <div class="settings-model">
+            <div class="close-btn" id="closeSettingsBtn" title="关闭">×</div>
+            <h4>全局设置</h4>
+            <!-- 顶部：数据获取方式 -->
+            <div class="settings-item">
+                <label class="settings-toggle" for="dataSourceSelect">
+                    <span class="toggle-label">数据获取方式</span>
+                </label>
+                <select id="dataSourceSelect" class="settings-select">
+                    <option value="adata">调用 API 直取（新浪/腾讯）</option>
+                    <option value="xiaoshi">调用 API 直取（小石大数据）</option>
+                    <option value="refresh">刷新页面获取</option>
+                </select>
+            </div>
+            <!-- API Key：紧跟数据获取方式，缩进显示（仅选「小石大数据」时可见，新浪/腾讯公开接口无需 Key） -->
+            <div class="settings-item api-key-group" id="apiKeyGroup" style="display:none">
+                <label class="settings-toggle" for="apiKeyInput">
+                    <span class="toggle-label">API Key（小石大数据）</span>
+                </label>
+                <div class="settings-input-row">
+                    <input type="text" id="apiKeyInput" class="settings-input" placeholder="填写批量行情接口的 API Key">
+                    <a class="api-key-link" href="https://www.shizixi.com/" target="_blank" rel="noopener"
+                        title="去小石大数据获取 API Key">↗</a>
+                </div>
+            </div>
+            <!-- 定时全量刷新 -->
+            <div class="settings-item">
+                <span class="toggle-label">定时全量刷新（cron，最多 3 个）</span>
+                <div id="cronJobList" class="cron-job-list"></div>
+                <button type="button" id="addCronJobBtn" class="settings-btn">+ 添加定时任务</button>
+                <p class="settings-desc">到点自动刷新全部组合股票（09:15-11:30、13:00-15:00），可自行编写 cron 或与 AI 对话直接修改</p>
+            </div>
+            <!-- 默认组合 -->
+            <div class="settings-item">
+                <label class="settings-toggle" for="defaultPortfolioSelect">
+                    <span class="toggle-label">默认展示组合</span>
+                </label>
+                <select id="defaultPortfolioSelect" class="settings-select"></select>
+                <p class="settings-desc">选择后，每次打开弹窗将自动切换到该组合</p>
+            </div>
+            <!-- 所有勾选项放最下面 -->
+            <div class="settings-item">
+                <label class="settings-toggle">
+                    <input type="checkbox" id="refreshOnOpenToggle" checked>
+                    <span class="toggle-label">打开插件时全部更新</span>
+                </label>
+                <p class="settings-desc">打开插件时自动刷新全部股票数据</p>
+            </div>
+            <!-- 启用 AI 分析：置于快速导入开关上方；API 配置在 AI 窗口内编辑，此处仅留开关 -->
+            <div class="settings-item">
+                <label class="settings-toggle">
+                    <input type="checkbox" id="enableAiToggle" checked>
+                    <span class="toggle-label">启用 AI 分析功能</span>
+                </label>
+                <p class="settings-desc">取消勾选后，首页工具栏将不再显示 AI 分析入口</p>
+            </div>
+            <div class="settings-item">
+                <label class="settings-toggle">
+                    <input type="checkbox" id="enableQuickImportToggle" checked>
+                    <span class="toggle-label">启用一键导入功能</span>
+                </label>
+                <p class="settings-desc">快速打开输入框有内容时显示「一键导入」按钮</p>
+            </div>
+            <div class="settings-item">
+                <label class="settings-toggle">
+                    <input type="checkbox" id="showKeyPointsToggle" checked>
+                    <span class="toggle-label">启用要点管理功能</span>
+                </label>
+                <p class="settings-desc">取消勾选后，首页工具栏将不再显示要点管理入口</p>
+            </div>
+            <div class="settings-item">
+                <label class="settings-toggle">
+                    <input type="checkbox" id="enableTrashToggle" checked>
+                    <span class="toggle-label">启用垃圾池功能</span>
+                </label>
+                <p class="settings-desc">关闭后隐藏「垃圾池」视图与「加入垃圾池」入口，已入垃圾池的股票暂不可见</p>
+            </div>
+            <div class="settings-item">
+                <label class="settings-toggle">
+                    <input type="checkbox" id="keepMonitoringOnCloseToggle">
+                    <span class="toggle-label">关闭插件后继续监控</span>
+                </label>
+                <p class="settings-desc">开始监控不随插件关闭停止</p>
+            </div>
+            <div class="settings-item">
+                <label class="settings-toggle">
+                    <input type="checkbox" id="keepRefreshOnCloseToggle">
+                    <span class="toggle-label">关闭插件后继续全量刷新</span>
+                </label>
+                <p class="settings-desc">定时全量刷新不随插件关闭停止</p>
+            </div>
+            <div class="settings-item">
+                <label class="settings-toggle">
+                    <input type="checkbox" id="autoResizeWindowToggle">
+                    <span class="toggle-label">切换组合时，浏览器窗口自动伸缩</span>
+                </label>
+                <p class="settings-desc">开启后，切换组合时插件弹窗将根据股票数量自动调整高度</p>
+            </div>
+            <div class="settings-item">
+                <label class="settings-toggle">
+                    <input type="checkbox" id="quickImportInStockWindowToggle" checked>
+                    <span class="toggle-label">快速打开和一键导入功能，页面打开逻辑不同</span>
+                </label>
+                <p class="settings-desc">勾选时一键导入在最小化专属窗口打开、快速打开在普通页面打开；取消后统一在普通页面打开</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- 一键导入组合选择弹窗 -->
+    <div class="overlay" id="quickImportComboOverlay" style="display:none">
+        <div class="settings-model">
+            <div class="close-btn" id="closeQuickImportComboBtn" title="关闭">×</div>
+            <h4>一键导入到组合</h4>
+            <div class="settings-item">
+                <label class="settings-toggle" for="quickImportComboSelect">
+                    <span class="toggle-label">选择已有组合</span>
+                </label>
+                <select id="quickImportComboSelect" class="settings-select"></select>
+            </div>
+            <div class="settings-item">
+                <label class="settings-toggle" for="quickImportComboInput">
+                    <span class="toggle-label">或输入新组合名（不超过4字）</span>
+                </label>
+                <input type="text" id="quickImportComboInput" class="settings-input" placeholder="留空则使用上方选择的组合">
+            </div>
+            <button type="button" id="confirmQuickImportComboBtn" class="settings-btn">确定导入</button>
+        </div>
+    </div>
+
+    <!-- 导出选择弹窗 -->
+    <div class="overlay" id="exportChoiceOverlay" style="display:none">
+        <div class="settings-model">
+            <div class="close-btn" id="closeExportChoiceBtn" title="关闭">×</div>
+            <h4>导出数据</h4>
+            <div class="settings-item">
+                <button type="button" id="exportDefaultBtn" class="settings-btn export-choice-btn">导出默认数据</button>
+                <p class="settings-desc">含全部组合 / 要点 / 事件 / 设置及 AI 对话与记忆；不含任何 API Key，对话图片 /
+                    文件以「[用户上传图片：xx.png]」「[用户上传文件：xx.pdf]」占位文本代替</p>
+            </div>
+            <div class="settings-item">
+                <button type="button" id="exportSensitiveBtn" class="settings-btn export-choice-btn">导出包含 API Key
+                    的敏感数据</button>
+                <p class="settings-desc">额外含小石 / AI 接口的 API Key；对话图片 / 文件同样以占位文本代替，不携带原始数据</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- 添加编辑股票div -->
+    <div class="overlay" id="stockEditOverlay">
+        <div id="stockModel" class="stock-model">
+            <div class="close-btn" title="关闭">×</div>
+            <div class="stock-model-body">
+                <div class="stock-identity">
+                    <span id="stockName" class="stock-name">待抓取</span>
+                    <span id="stockCode" class="code-tag">-</span>
+                    <span class="identity-sep">-</span>
+                    <span id="headerCurrentPrice" class="header-price">-</span>
+                </div>
+                <div class="last-monitor" id="lastMonitor">
+                    <div class="detail-section">
+                        <h5>当日情况<span id="lastUpdateAt" class="last-update-at"></span></h5>
+                        <div class="stock-data">
+                            <span>昨收</span>
+                            <span>涨跌幅</span>
+                            <span>当日目标价</span>
+                        </div>
+                        <div class="stock-data">
+                            <span id="startPrice">-</span>
+                            <span id="percent">-</span>
+                            <span id="targetPrice">-</span>
+                        </div>
+                    </div>
+                    <div class="detail-section">
+                        <h5>导入以来</h5>
+                        <div class="stock-data">
+                            <span>初始价</span>
+                            <span>涨跌幅</span>
+                            <span>导入目标价</span>
+                        </div>
+                        <div class="stock-data">
+                            <span><input type="number" id="importPriceInput" class="inline-number-input" step="0.01"
+                                    placeholder="首次抓取自动填入"></span>
+                            <span id="importPercent">-</span>
+                            <span id="importTargetPrice">-</span>
+                        </div>
+                    </div>
+                </div>
+                <form>
+                    <div id="stockUrlGroup">
+                        <label for="stockUrl">网址&nbsp;<span class="warn">*</span></label>
+                        <input type="text" id="stockUrl" placeholder="网址">
+                    </div>
+                    <div class="detail-section alert-section">
+                        <div class="alert-head">
+                            <h5>股价提醒（满足任一即通知）</h5>
+                            <!-- 当日/导入以来两组阈值折叠为一组，切换填写，缩短弹窗高度 -->
+                            <div class="alert-dim-switch">
+                                <button type="button" id="alertDimDailyBtn" class="active">当日</button>
+                                <button type="button" id="alertDimImportBtn">导入以来</button>
+                            </div>
+                        </div>
+                        <div class="target-group" id="dailyTargetGroup">
+                            <div class="target-percent-div">
+                                <div class="tp-row">
+                                    <span class="tp-sym sym-le">&le;</span>
+                                    <input type="number" id="targetPercentLe" class="tp-percent" placeholder="涨跌幅%">
+                                    <input type="number" id="dailyLePriceInput" class="target-price-input" step="0.01"
+                                        placeholder="目标价" title="目标价，与涨跌幅联动">
+                                </div>
+                                <div class="tp-row">
+                                    <span class="tp-sym sym-ge">&ge;</span>
+                                    <input type="number" id="targetPercentGe" class="tp-percent" placeholder="涨跌幅%">
+                                    <input type="number" id="dailyGePriceInput" class="target-price-input" step="0.01"
+                                        placeholder="目标价" title="目标价，与涨跌幅联动">
+                                </div>
+                            </div>
+                        </div>
+                        <div class="target-group" id="importTargetGroup" style="display:none">
+                            <div class="target-percent-div">
+                                <div class="tp-row">
+                                    <span class="tp-sym sym-le">&le;</span>
+                                    <input type="number" id="importTargetPercentLe" class="tp-percent"
+                                        placeholder="涨跌幅%">
+                                    <input type="number" id="importLePriceInput" class="target-price-input" step="0.01"
+                                        placeholder="目标价" title="目标价，与涨跌幅联动">
+                                </div>
+                                <div class="tp-row">
+                                    <span class="tp-sym sym-ge">&ge;</span>
+                                    <input type="number" id="importTargetPercentGe" class="tp-percent"
+                                        placeholder="涨跌幅%">
+                                    <input type="number" id="importGePriceInput" class="target-price-input" step="0.01"
+                                        placeholder="目标价" title="目标价，与涨跌幅联动">
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="edit-actions-top" id="editActionsTop">
+                        <input type="button" id="delStock" class="save-input del-embossed" value="删除">
+                        <input type="button" id="trashToggleBtn" class="save-input trash-embossed" value="加入垃圾池">
+                    </div>
+                    <div class="edit-actions-bottom">
+                        <input type="button" id="saveStock" class="save-input btn-embossed" value="保存">
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <script type="module" src="./popup/popup.js"></script>
+</body>
+
+</html>

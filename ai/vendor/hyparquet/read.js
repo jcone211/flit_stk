@@ -1,0 +1,263 @@
+/**
+ * @import {AsyncRowGroup, BaseParquetReadOptions, DecodedArray, ParquetReadOptions, SchemaElement} from '../src/types.js'
+ */
+
+import { columnsNeededForFilter, matchFilter } from './filter.js'
+import { parquetMetadataAsync, parquetSchema } from './metadata.js'
+import { parquetPlan, prefetchAsyncBuffer, prefetchBloomFilters, prefetchPageIndexes } from './plan.js'
+import { assembleAsync, asyncGroupToRows, readRowGroup } from './rowgroup.js'
+import { concat } from './utils.js'
+
+/**
+ * Read parquet data rows from a file-like object.
+ * Reads the minimal number of row groups and columns to satisfy the request.
+ *
+ * Returns a void promise when complete.
+ * Errors are thrown on the returned promise.
+ * Data is returned in callbacks onComplete, onChunk, onPage, NOT the return promise.
+ * See parquetReadObjects for a more convenient API.
+ *
+ * @param {ParquetReadOptions} options read options
+ * @returns {Promise<void>} resolves when all requested rows and columns are parsed, all errors are thrown here
+ */
+export async function parquetRead(options) {
+  // load metadata if not provided
+  options.metadata ??= await parquetMetadataAsync(options.file, options)
+
+  const { rowStart = 0, rowEnd, columns, onChunk, onComplete, rowFormat, filter, filterStrict = true } = options
+
+  // Filter requires object format to match column names
+  if (filter && rowFormat !== 'object') {
+    throw new Error('parquet filter requires rowFormat: "object"')
+  }
+
+  // Include filter columns in the read plan
+  const filterColumns = columnsNeededForFilter(filter)
+  if (filterColumns.length) {
+    const schemaColumns = parquetSchema(options.metadata).children.map(c => c.element.name)
+    const missingColumns = filterColumns.filter(c => !schemaColumns.includes(c))
+    if (missingColumns.length) {
+      throw new Error(`parquet filter columns not found: ${missingColumns.join(', ')}`)
+    }
+  }
+  let readColumns = columns
+  let requiresProjection = false
+  if (columns && filter) {
+    const missingFilterColumns = filterColumns.filter(c => !columns.includes(c))
+    if (missingFilterColumns.length) {
+      readColumns = [...columns, ...missingFilterColumns]
+      requiresProjection = true
+    }
+  }
+
+  // read row groups with expanded columns
+  let readOptions = readColumns !== columns ? { ...options, columns: readColumns } : options
+  readOptions = await withBloomFilters(readOptions)
+  readOptions = await withPageIndexes(readOptions)
+  const asyncGroups = parquetReadAsync(readOptions)
+
+  // skip assembly if no onComplete or onChunk, but wait for reading to finish
+  if (!onComplete && !onChunk) {
+    await awaitAllColumns(asyncGroups)
+    return
+  }
+
+  // assemble struct columns
+  const schemaTree = parquetSchema(options.metadata)
+  const assembled = asyncGroups.map(arg => assembleAsync(arg, schemaTree, options.parsers))
+
+  // onChunk emit all chunks (don't await). Rejection is surfaced by awaitAllColumns below.
+  if (onChunk) {
+    for (const asyncGroup of assembled) {
+      for (const asyncColumn of asyncGroup.asyncColumns) {
+        asyncColumn.data.then(({ data, skipped }) => {
+          let rowStart = asyncGroup.groupStart + skipped
+          for (const columnData of data) {
+            onChunk({
+              columnName: asyncColumn.pathInSchema[0],
+              columnData,
+              rowStart,
+              rowEnd: rowStart + columnData.length,
+            })
+            rowStart += columnData.length
+          }
+        }, () => {})
+      }
+    }
+  }
+
+  // onComplete transpose column chunks to rows
+  if (onComplete) {
+    // wait for all reads to settle so a sibling rejection cannot leak
+    await awaitAllColumns(assembled)
+    // loosen the types to avoid duplicate code
+    /** @type {any[]} */
+    const rows = []
+    for (const asyncGroup of assembled) {
+      // filter to rows in range (the plan may have narrowed the selection to
+      // a sub-range of the group via page index pushdown)
+      const selectStart = asyncGroup.selectStart ?? Math.max(rowStart - asyncGroup.groupStart, 0)
+      const selectEnd = asyncGroup.selectEnd ?? Math.min((rowEnd ?? Infinity) - asyncGroup.groupStart, asyncGroup.groupRows)
+      // transpose column chunks to rows in output
+      const groupData = rowFormat === 'object' ?
+        await asyncGroupToRows(asyncGroup, selectStart, selectEnd, readColumns, 'object') :
+        await asyncGroupToRows(asyncGroup, selectStart, selectEnd, columns, 'array')
+
+      // Apply filter and projection
+      if (filter) {
+        // eslint-disable-next-line no-extra-parens
+        for (const row of /** @type {Record<string, any>[]} */ (groupData)) {
+          if (matchFilter(row, filter, filterStrict)) {
+            if (requiresProjection && columns) {
+              for (const col of filterColumns) {
+                if (!columns.includes(col)) delete row[col]
+              }
+            }
+            rows.push(row)
+          }
+        }
+      } else {
+        concat(rows, groupData)
+      }
+    }
+    onComplete(rows)
+  } else {
+    // wait for all async groups to finish (complete takes care of this)
+    await awaitAllColumns(assembled)
+  }
+}
+
+/**
+ * Await every column promise across the given row groups via Promise.allSettled
+ * so no rejection escapes as an unhandledRejection. Throws the first rejection.
+ *
+ * @param {AsyncRowGroup[]} asyncGroups
+ * @returns {Promise<void>}
+ */
+async function awaitAllColumns(asyncGroups) {
+  const all = asyncGroups.flatMap(g => g.asyncColumns.map(c => c.data))
+  const results = await Promise.allSettled(all)
+  const failed = results.find(r => r.status === 'rejected')
+  if (failed) throw failed.reason
+}
+
+/**
+ * @param {ParquetReadOptions} options read options
+ * @returns {AsyncRowGroup[]}
+ */
+export function parquetReadAsync(options) {
+  if (!options.metadata) throw new Error('parquet requires metadata')
+  // TODO: validate options (start, end, columns, etc)
+
+  // prefetch byte ranges
+  const plan = parquetPlan(options)
+  options.file = prefetchAsyncBuffer(options.file, plan)
+
+  // read row groups
+  return plan.groups.map(groupPlan => readRowGroup(options, plan, groupPlan))
+}
+
+/**
+ * Reads a single column from a parquet file.
+ *
+ * @param {BaseParquetReadOptions} options
+ * @returns {Promise<DecodedArray>}
+ */
+export async function parquetReadColumn(options) {
+  if (options.columns?.length !== 1) {
+    throw new Error('parquetReadColumn expected columns: [columnName]')
+  }
+  options.metadata ??= await parquetMetadataAsync(options.file, options)
+  const asyncGroups = parquetReadAsync(await withBloomFilters(options))
+
+  // assemble struct columns
+  const schemaTree = parquetSchema(options.metadata)
+  const assembled = asyncGroups.map(arg => assembleAsync(arg, schemaTree, options.parsers))
+
+  // wait for all reads to settle so a sibling rejection cannot leak
+  await awaitAllColumns(assembled)
+
+  /** @type {DecodedArray} */
+  const columnData = []
+  for (const rg of assembled) {
+    const { data } = await rg.asyncColumns[0].data
+    for (const chunk of data) {
+      concat(columnData, chunk)
+    }
+  }
+  return columnData
+}
+
+/**
+ * Conditionally fetch bloom filters and attach them (and the per-column schema
+ * elements they require) to options so parquetPlan can use them for row-group
+ * pruning. Returns options unchanged when there's no filter or the user has
+ * disabled bloom pushdown.
+ *
+ * @param {BaseParquetReadOptions} options
+ * @returns {Promise<BaseParquetReadOptions>}
+ */
+async function withBloomFilters(options) {
+  if (!options.useBloomFilters) return options
+  if (!options.filter || !options.metadata) return options
+  const schemaTree = parquetSchema(options.metadata)
+  /** @type {Record<string, SchemaElement>} */
+  const schemaElements = {}
+  for (const child of schemaTree.children) schemaElements[child.element.name] = child.element
+  const bloomFiltersByGroup = await prefetchBloomFilters({
+    file: options.file,
+    metadata: options.metadata,
+    filter: options.filter,
+    filterStrict: options.filterStrict,
+  })
+  // eslint-disable-next-line no-extra-parens
+  return /** @type {BaseParquetReadOptions} */ ({ ...options, bloomFiltersByGroup, schemaElements })
+}
+
+/**
+ * Conditionally fetch page indexes (column index + offset index) for filter
+ * columns and attach per-group candidate row ranges and page locations to
+ * options so parquetPlan can skip pages that cannot match the filter.
+ * Returns options unchanged when there's no filter or the user has not
+ * enabled page index pushdown.
+ *
+ * @param {BaseParquetReadOptions} options
+ * @returns {Promise<BaseParquetReadOptions>}
+ */
+async function withPageIndexes(options) {
+  if (!options.usePageIndex) return options
+  if (!options.filter || !options.metadata) return options
+  const { pageRangesByGroup, pageLocationsByGroup } = await prefetchPageIndexes({
+    file: options.file,
+    metadata: options.metadata,
+    filter: options.filter,
+    filterStrict: options.filterStrict,
+    rowStart: options.rowStart,
+    rowEnd: options.rowEnd,
+    columns: options.columns,
+    // @ts-expect-error bloomFiltersByGroup/schemaElements are attached by withBloomFilters
+    bloomFiltersByGroup: options.bloomFiltersByGroup,
+    // @ts-expect-error bloomFiltersByGroup/schemaElements are attached by withBloomFilters
+    schemaElements: options.schemaElements,
+    parsers: options.parsers,
+  })
+  const readOptions = { ...options, pageRangesByGroup, pageLocationsByGroup }
+  return readOptions
+}
+
+/**
+ * This is a helper function to read parquet row data as a promise.
+ * It is a wrapper around the more configurable parquetRead function.
+ *
+ * @param {Omit<ParquetReadOptions, 'onComplete'>} options
+ * @returns {Promise<Record<string, any>[]>} resolves when all requested rows and columns are parsed
+ */
+export function parquetReadObjects(options) {
+  return new Promise((onComplete, reject) => {
+    parquetRead({
+      ...options,
+      rowFormat: 'object', // force object output
+      onComplete,
+    }).catch(reject)
+  })
+}

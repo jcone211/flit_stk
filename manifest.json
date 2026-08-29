@@ -1,0 +1,42 @@
+{
+  "manifest_version": 3,
+  "name": "同花顺问财",
+  "version": "1.9.0",
+  "description": "同花顺问财数据监听",
+  "permissions": [
+    "storage",
+    "unlimitedStorage",
+    "windows",
+    "alarms",
+    "notifications",
+    "tabs",
+    "scripting",
+    "offscreen"
+  ],
+  "host_permissions": [
+    "*://*.iwencai.com/*",
+    "*://*.xueqiu.com/*",
+    "https://api.shizixi.com/*",
+    "https://hq.sinajs.cn/*",
+    "https://qt.gtimg.cn/*",
+    "https://*/*",
+    "http://*/*"
+  ],
+  "action": {
+    "default_icon": {
+      "16": "icons/icon.png",
+      "48": "icons/icon.png",
+      "128": "icons/icon.png"
+    }
+  },
+  "background": {
+    "service_worker": "background/background.js",
+    "type": "module"
+  },
+  "content_scripts": [],
+  "icons": {
+    "16": "icons/icon.png",
+    "48": "icons/icon.png",
+    "128": "icons/icon.png"
+  }
+}

@@ -84,6 +84,9 @@ export async function streamAiChat(opts, emit) {
         return;
     }
 
+    // HTTP 响应已正常建立，但首个内容块可能仍需等待供应商生成。
+    emit({ type: 'ready' });
+
     if (!stream) {
         try {
             await handleNonStream(resp, emit);

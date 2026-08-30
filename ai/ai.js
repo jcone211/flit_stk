@@ -1269,6 +1269,8 @@ function handlePortMessage(message) {
     if (!p) return;
     if (message.type === 'AI_CHAT_CHUNK') {
         p.onChunk(message.delta);
+    } else if (message.type === 'AI_CHAT_READY') {
+        p.onReady?.();
     } else if (message.type === 'AI_CHAT_DONE') {
         pending.delete(message.requestId);
         clearTimeout(p.timeoutId);
@@ -1296,6 +1298,7 @@ function sendRound(apiMessages, tools, { stream = true, provider = activeProvide
         }, REQUEST_TIMEOUT_MS);
         pending.set(requestId, {
             timeoutId,
+            onReady: () => showWaitingAssistant(),
             onChunk: (delta) => { content += delta; appendToCurrentAssistant(delta); },
             resolve: (r) => resolve({ ...r, content }),
         });
@@ -1351,13 +1354,19 @@ async function runAgentLoop(initialMessages, initialToolGroups = []) {
     const apiMessages = initialMessages || chatMessages.map(m => ({ role: m.role, content: m.content }));
     activeToolGroups = new Set(initialToolGroups);
     const requestProvider = selectRequestProvider(apiMessages);
+    if (!String(requestProvider.apiKey || '').trim()) {
+        appendMessage('error', '请设置一个供应商 API Key');
+        return;
+    }
     const switchedForVision = requestProvider.id !== activeProvider().id;
     if (switchedForVision) appendMessage('system', `检测到图片，已临时切换到视觉模型「${requestProvider.name || requestProvider.model}」处理本次请求`);
     for (let round = 0; round < maxToolIterations; round++) {
         currentAssistantEl = null; // 每轮新建气泡（工具往返后流式内容不能追加到上一轮气泡）
+        removeWaitingAssistant();
         const requestMessages = [buildSystemPrompt(), ...apiMessages];
         const tools = [TOOL_GROUP_DEF, ...getLoadedToolDefs()];
         let result = await sendRound(requestMessages, tools, { stream: true, provider: requestProvider });
+        removeWaitingAssistant();
         if (!result.ok) {
             if (result.aborted) {
                 // 用户主动停止：保留已生成的部分文本
@@ -1394,9 +1403,7 @@ async function runAgentLoop(initialMessages, initialToolGroups = []) {
             continue;
         }
         // 无工具调用：最终回复落库（commitAssistant 仅供停止/失败路径使用，此处直接入列）
-        chatMessages.push({ role: 'assistant', content: result.content, ts: Date.now(), uid: genUid('m') });
-        trimChat();
-        saveChat();
+        commitAssistant(result.content);
         if (result.finish_reason === 'length') {
             appendActionButton('继续生成', continueGeneration);
         }
@@ -1409,10 +1416,12 @@ async function runAgentLoop(initialMessages, initialToolGroups = []) {
 // 把已渲染的部分内容写入会话历史（停止/失败路径）；返回条目供重试清理定位
 function commitAssistant(content) {
     if (!content) return null;
-    const entry = { role: 'assistant', content, ts: Date.now(), uid: genUid('m') };
+    const entry = currentAssistantEntry || { role: 'assistant', content: '', ts: Date.now(), uid: genUid('m') };
+    entry.content = content;
     chatMessages.push(entry);
     trimChat();
     saveChat();
+    currentAssistantEntry = null;
     return entry;
 }
 
@@ -1706,13 +1715,30 @@ function appendMessage(role, content, entry) {
 
 let currentAssistantEl = null;
 let currentAssistantRaw = ''; // 流式累积的原始文本（每次 delta 到达后整体重渲染 Markdown）
+let currentAssistantEntry = null;
+let waitingAssistantEl = null;
+
+function showWaitingAssistant() {
+    removeWaitingAssistant();
+    waitingAssistantEl = appendMessage('assistant', '');
+    waitingAssistantEl.classList.add('msg-assistant-waiting');
+    waitingAssistantEl.innerHTML = '<span class="typing-dots"><i></i><i></i><i></i></span>';
+}
+
+function removeWaitingAssistant() {
+    if (!waitingAssistantEl) return;
+    waitingAssistantEl.remove();
+    waitingAssistantEl = null;
+}
 
 function beginAssistant() {
-    currentAssistantEl = appendMessage('assistant', '');
+    currentAssistantEntry = { role: 'assistant', content: '', ts: Date.now(), uid: genUid('m') };
+    currentAssistantEl = appendMessage('assistant', '', currentAssistantEntry);
     currentAssistantRaw = '';
 }
 
 function appendToCurrentAssistant(delta) {
+    removeWaitingAssistant();
     if (!currentAssistantEl) beginAssistant();
     currentAssistantRaw += delta;
     currentAssistantEl.innerHTML = mdToHtml(currentAssistantRaw);
@@ -1882,11 +1908,11 @@ async function refreshDirStatus() {
 // ---------------- 文件上传（复制到主工作目录/llm_context_files + 加载到上下文） ----------------
 const LLM_CONTEXT_FILES_DIR = 'llm_context_files';
 
-// 上传按钮状态：未设置工作目录时置灰并提示
+// 上传按钮状态：文件选择器始终可打开；未设置工作目录时，选中文件后再提示授权
 function renderUploadState() {
     const ok = workspaceHandles.length > 0;
-    uploadBtn.disabled = !ok;
-    uploadBtn.title = ok ? '上传文件到 llm_context_files 并加载到上下文' : '请先设置工作目录后再上传文件';
+    uploadBtn.disabled = false;
+    uploadBtn.title = ok ? '上传文件到 llm_context_files 并加载到上下文' : '选择文件后需先设置工作目录';
 }
 
 // 目标文件名防重名：已存在则追加 _1/_2…（保留扩展名）。目录不存在时自动创建。
@@ -1929,11 +1955,12 @@ async function handleUploadFiles(files) {
     }
     if (parts.length === 0) return;
     await ensureChat();
-    chatMessages.push({ role: 'user', content: parts, ts: Date.now(), uid: genUid('m') });
+    const userEntry = { role: 'user', content: parts, ts: Date.now(), uid: genUid('m') };
+    chatMessages.push(userEntry);
     trimChat();
     deferAutoTitleForVisionInput(parts);
     saveChat();
-    appendMessage('user', parts);
+    appendMessage('user', parts, userEntry);
     appendMessage('system',
         files.length + ' 个文件已保存到工作目录/' + LLM_CONTEXT_FILES_DIR
         + (imageCount ? `，其中 ${imageCount} 张图片已作为视觉输入传给模型` : '，文件内容未打印，可让 AI 用 read_file 读取'));
@@ -2197,8 +2224,9 @@ async function handleSend() {
         }
         content = parts;
     }
-    appendMessage('user', content);
-    chatMessages.push({ role: 'user', content, ts: Date.now(), uid: genUid('m') });
+    const userEntry = { role: 'user', content, ts: Date.now(), uid: genUid('m') };
+    appendMessage('user', content, userEntry);
+    chatMessages.push(userEntry);
     trimChat();
     deferAutoTitleForVisionInput(content);
     saveChat();
@@ -2262,7 +2290,7 @@ async function continueGeneration() {
     chatMessages.push({ role: 'user', content: '请继续', ts: Date.now(), uid: genUid('m') });
     trimChat();
     saveChat();
-    appendMessage('user', '请继续');
+    appendMessage('user', '请继续', chatMessages[chatMessages.length - 1]);
     currentAssistantEl = null;
     setGenerating(true);
     try {
@@ -2295,20 +2323,21 @@ function bindEvents() {
     deleteSessionBtn.addEventListener('click', deleteSession);
     clearChatBtn.addEventListener('click', clearSession);
     // 文件上传
-    uploadBtn.addEventListener('click', async () => {
-        if (!workspaceHandles.length) {
-            alert('请先设置工作目录：点击窗口顶部「选择目录」授权后即可上传文件');
-            return;
-        }
-        await reauthorizePendingInGesture(); // 权限失效时手势内弹授权框
-        const perm = await workspacePermission(workspaceHandles[0].handle);
-        if (perm !== 'granted') { alert('工作目录权限未授予，无法上传'); return; }
+    uploadBtn.addEventListener('click', () => {
+        // 必须在同步的用户点击处理中触发，否则浏览器不会打开文件选择器。
         uploadInput.click();
     });
     uploadInput.addEventListener('change', async (e) => {
         const files = Array.from(e.target.files || []);
         e.target.value = ''; // 允许重复上传同一文件
-        if (files.length) await handleUploadFiles(files);
+        if (!files.length) return;
+        try {
+            await reauthorizePendingInGesture();
+            await handleUploadFiles(files);
+        } catch (err) {
+            console.error('[thswc:ai] 文件上传失败:', err);
+            appendMessage('error', '文件上传失败：' + (err.message || err));
+        }
     });
     // 剪贴板图片粘贴预览
     bindPastePreview();

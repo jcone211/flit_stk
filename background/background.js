@@ -7,6 +7,11 @@ import { landCapturedDocument, landApiQuotes, setLandingNotifier } from './landi
 
 // 默认组合（不可删除、不可重命名）
 const DEFAULT_PORTFOLIOS = ['默认', '持仓', '观察'];
+const DEFAULT_CRON_JOBS = [
+    { id: 'default-morning', expr: '*/3 9-11 * * 1-5', enabled: true },
+    { id: 'default-afternoon', expr: '*/3 13-14 * * 1-5', enabled: true },
+    { id: 'default-close', expr: '5 15 * * 1-5', enabled: true },
+];
 
 // 诊断日志开关：排查完成后置 false 可停止周期性刷屏
 const DEBUG = false;
@@ -144,14 +149,21 @@ chrome.windows.onRemoved.addListener((closedWindowId) => {
 // 初始化：先做幂等迁移，再加载设置，并补排 cron 定时器
 function init() {
     ensureMigrated().then(() => {
-        chrome.storage.sync.get(['refreshInterval', 'selectorName', 'keepRefreshOnClose'], (result) => {
+        chrome.storage.sync.get(['refreshInterval', 'selectorName', 'keepRefreshOnClose', 'cronJobs'], (result) => {
+            if (!Array.isArray(result.cronJobs)) {
+                chrome.storage.sync.set({ cronJobs: DEFAULT_CRON_JOBS }, () => {
+                    if (result.keepRefreshOnClose !== false) {
+                        scheduleCronAlarms();
+                    }
+                });
+            }
             if (result.refreshInterval) {
                 refreshInterval = result.refreshInterval;
             }
             if (result.selectorName) {
                 selectorName = result.selectorName;
             }
-            if (result.keepRefreshOnClose !== false) {
+            if (Array.isArray(result.cronJobs) && result.keepRefreshOnClose !== false) {
                 scheduleCronAlarms(); // SW 冷启动时 cron 一次性 alarm 由浏览器托管不丢，此处仅兜底补排
             }
         });
@@ -577,6 +589,8 @@ function handleAiChatMessage(port, msg) {
         }, (event) => {
             if (event.type === 'chunk') {
                 post({ type: 'AI_CHAT_CHUNK', requestId: msg.requestId, delta: event.delta });
+            } else if (event.type === 'ready') {
+                post({ type: 'AI_CHAT_READY', requestId: msg.requestId });
             } else if (event.type === 'done') {
                 aiChatRequests.delete(msg.requestId);
                 clearTimeout(timer);

@@ -273,6 +273,36 @@ body.ai-body {
     /* Markdown 渲染：块级元素由 mdToHtml 生成，无需 pre-wrap（代码块由 pre 保持换行） */
 }
 
+.msg-assistant-waiting {
+    min-width: 46px;
+    min-height: 34px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.typing-dots {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.typing-dots i {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: #8c959f;
+    animation: typing-dot 1.2s ease-in-out infinite;
+}
+
+.typing-dots i:nth-child(2) { animation-delay: .15s; }
+.typing-dots i:nth-child(3) { animation-delay: .3s; }
+
+@keyframes typing-dot {
+    0%, 60%, 100% { opacity: .35; transform: translateY(0); }
+    30% { opacity: 1; transform: translateY(-3px); }
+}
+
 /* ---------------- Markdown 块级元素（AI 回复安全渲染） ---------------- */
 .msg p {
     margin: 2px 0;

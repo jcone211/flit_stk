@@ -13,6 +13,10 @@
 </p>
 
 <p align="center">
+  浏览器装好即用，<b>零服务端零配置</b>。解决两个日常痛点：手机设多个股价提醒太麻烦，工作时切手机分心；股票分组少，操作繁琐。
+</p>
+
+<p align="center">
   📌 <b>v1.9.0</b> · 本项目源于
   <a href="https://github.com/jcone211/web_auto_refresh">web_auto_refresh</a>，
   于 2026.8.29 迁移重构为全新项目，持续迭代中。

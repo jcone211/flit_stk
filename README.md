@@ -1,8 +1,39 @@
-# flit stk · 导入即用 · 无后端轻量级量化工作前台
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="icons/icon128.png">
+    <img src="icons/icon128.png" alt="flit stk" width="128" height="128">
+  </picture>
+</p>
 
-> 📌 **v1.9.0** · 本项目源于 [web_auto_refresh](https://github.com/jcone211/web_auto_refresh)，于 2026.8.29 迁移重构为全新项目，持续迭代中。**⭐ 觉得好用？点个 Star 支持持续更新！**
+<h1 align="center">flit stk · 量化盯盘</h1>
 
-浏览器装好即用，**零服务端零配置**。解决两个日常痛点：手机设多个股价提醒太麻烦，工作时切手机分心；股票分组少，操作繁琐。
+<p align="center">
+  导入即用的无后端轻量级量化工作前台 · Chrome 扩展（Manifest V3）<br>
+  <b>零服务端零配置</b> · 浏览器装好即用
+</p>
+
+<p align="center">
+  📌 <b>v1.9.0</b> · 本项目源于
+  <a href="https://github.com/jcone211/web_auto_refresh">web_auto_refresh</a>，
+  于 2026.8.29 迁移重构为全新项目，持续迭代中。
+  <br>
+  ⭐ <b>觉得好用？点个 Star 支持持续更新！</b>
+</p>
+
+<p align="center">
+  <a href="https://github.com/jcone211/flit_stk/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/jcone211/flit_stk?style=social"/></a>
+  <a href="https://github.com/jcone211/flit_stk/network/members"><img alt="Forks" src="https://img.shields.io/github/forks/jcone211/flit_stk?style=social"/></a>
+  <a href="./LICENSE"><img alt="License" src="https://img.shields.io/badge/License-MIT-blue"/></a>
+</p>
+
+<p align="center">
+  <a href="#-最实用的量化功能">功能</a> ·
+  <a href="#-快速开始">快速开始</a> ·
+  <a href="#-快速实操">快速实操</a> ·
+  <a href="#-详细文档">详细文档</a>
+</p>
+
+---
 
 ## ✨ 最实用的量化功能
 

@@ -144,11 +144,11 @@
         <div class="ai-settings-model workspace-setup-model">
             <div class="ai-close-btn" id="closeBridgeSetupBtn" title="关闭">×</div>
             <h4 id="bridgeSetupTitle">设置桥接目录</h4>
-            <p class="workspace-setup-desc">选择包含本地 HTTP 服务文件的 flit_bridge 目录。</p>
+            <p class="workspace-setup-desc">先填写桥接目录的绝对路径，再点击下方按钮选择同一目录并授权。</p>
             <label for="bridgeDirFullPath">桥接目录绝对路径</label>
             <input type="text" id="bridgeDirFullPath" class="ai-settings-input" placeholder="如 D:\ai\flit_bridge"
                 autocomplete="off">
-            <p class="workspace-setup-note">服务默认监听 http://127.0.0.1:17321，请先运行 start-server.ps1。</p>
+            <p class="workspace-setup-note">请选择包含 server.js 和 start-server.ps1 的 flit_bridge 目录。</p>
             <div id="bridgeSetupError" class="workspace-setup-error"></div>
             <div class="workspace-setup-actions">
                 <button type="button" id="cancelBridgeSetupBtn" class="ai-text-btn">取消</button>
@@ -161,11 +161,11 @@
         <div class="ai-settings-model workspace-setup-model">
             <div class="ai-close-btn" id="closeBridgeSetupBtn" title="关闭">×</div>
             <h4 id="bridgeSetupTitle">设置桥接目录</h4>
-            <p class="workspace-setup-desc">先填写桥接目录的绝对路径，再点击下方按钮选择同一目录并授权。</p>
+            <p class="workspace-setup-desc">选择包含本地 HTTP 服务文件的 flit_bridge 目录。</p>
             <label for="bridgeDirFullPath">桥接目录绝对路径</label>
             <input type="text" id="bridgeDirFullPath" class="ai-settings-input" placeholder="如 D:\ai\flit_bridge"
                 autocomplete="off">
-            <p class="workspace-setup-note">请选择包含 server.js 和 start-server.ps1 的 flit_bridge 目录。</p>
+            <p class="workspace-setup-note">服务默认监听 http://127.0.0.1:17321，请先运行 start-server.ps1。</p>
             <div id="bridgeSetupError" class="workspace-setup-error"></div>
             <div class="workspace-setup-actions">
                 <button type="button" id="cancelBridgeSetupBtn" class="ai-text-btn">取消</button>

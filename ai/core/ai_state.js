@@ -13,7 +13,15 @@ export const MAX_MESSAGES = 100;
 export const MAX_MESSAGE_CHARS = 10000;
 export const MAX_MEMORY_ITEMS = 50;
 export const MAX_TOOL_RESULT_CHARS = 20000;
-export const REQUEST_TIMEOUT_MS = 120000;
+// 单轮 LLM 请求超时：滑动空闲 + 硬上限双档。
+// 思考型模型可能长时间只输出 reasoning_content（无正文 delta），固定总超时会误杀，
+// 故每收到一个 delta（正文或思考）就重置空闲计时；空闲满 45s 判无响应，300s 为硬上限兜底。
+export const REQUEST_IDLE_TIMEOUT_MS = 45000;
+export const REQUEST_MAX_TIMEOUT_MS = 300000;
+// SW keepalive：请求在途时定时 ping 后台，port 消息本身即重置 MV3 service worker 的 30s 空闲回收计时
+export const KEEPALIVE_INTERVAL_MS = 20000;
+// 思考过程面板只渲染尾部字符，长思考不拖慢 DOM（完整文本进 DEBUG 日志）
+export const THINKING_TAIL_CHARS = 1200;
 export const CHAT_KEY = 'aiChats';
 export const MEMORY_KEY = 'aiMemory';
 export const DEFAULT_AI_BASE_URL = 'https://api.deepseek.com';
@@ -47,6 +55,12 @@ export const state = {
     currentAssistantRaw: '',
     currentAssistantEntry: null,
     waitingAssistantEl: null,
+    thinkingEl: null,
+    thinkingRaw: '',
+    thinkingBody: null,
+    thinkingLabel: null,
+    // port 是否可用（chrome.runtime.connect 成功即 true，onDisconnect 置 false）
+    portAlive: false,
 };
 
 // DOM 引用（赋值即生效）
@@ -80,6 +94,7 @@ export const aiSupportsVisionInput = document.getElementById('aiSupportsVision')
 export const aiMaxToolIterationsInput = document.getElementById('aiMaxToolIterations');
 export const aiDefaultVisionProviderSelect = document.getElementById('aiDefaultVisionProvider');
 export const aiDebugModeInput = document.getElementById('aiDebugMode');
+export const aiDisableThinkingInput = document.getElementById('aiDisableThinking');
 export const debugInfoBtn = document.getElementById('debugInfoBtn');
 
 // Storage 封装

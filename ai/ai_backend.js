@@ -13,11 +13,12 @@
  * @param {Array}    opts.messages
  * @param {Array}    [opts.tools] - OpenAI function schema 数组
  * @param {boolean}  [opts.stream=true] - false 走非流式（页面降级用）
+ * @param {boolean}  [opts.disableThinking=false] - true 时注入「关闭思考」的 OpenAI 兼容字段（enable_thinking / chat_template_kwargs）
  * @param {AbortSignal} opts.signal
- * @param {(e:{type:'chunk'|'done'|'error'|'aborted', ...}) => void} emit
+ * @param {(e:{type:'chunk'|'reasoning'|'done'|'error'|'aborted', ...}) => void} emit
  */
 export async function streamAiChat(opts, emit) {
-    const { baseUrl, apiKey, model, messages, tools, signal, stream = true } = opts;
+    const { baseUrl, apiKey, model, messages, tools, signal, stream = true, disableThinking = false } = opts;
 
     let url;
     let resolvedEndpoint = '';
@@ -52,6 +53,12 @@ export async function streamAiChat(opts, emit) {
     if (tools && tools.length > 0) {
         body.tools = tools;
         body.tool_choice = 'auto';
+    }
+    // 关闭思考：用户显式勾选后才注入（未知字段严格校验的端点不会因此受影响）。
+    // 兼容两种写法：DashScope/火山类看 enable_thinking，vLLM/SGLang 类看 chat_template_kwargs。
+    if (disableThinking) {
+        body.enable_thinking = false;
+        body.chat_template_kwargs = { enable_thinking: false };
     }
 
     let resp;
@@ -118,6 +125,10 @@ export async function streamAiChat(opts, emit) {
         if (!choice) return;
         if (choice.delta) {
             if (choice.delta.content) emit({ type: 'chunk', delta: choice.delta.content });
+            // 思考型模型（qwen3 / deepseek-r1 / glm 等）先逐 token 输出 reasoning_content，
+            // 不解析就会看起来「只有空气泡在转圈」，且会被空闲超时误杀
+            const reasoning = choice.delta.reasoning_content || choice.delta.reasoning;
+            if (reasoning) emit({ type: 'reasoning', delta: typeof reasoning === 'string' ? reasoning : JSON.stringify(reasoning) });
             if (Array.isArray(choice.delta.tool_calls)) {
                 for (const tc of choice.delta.tool_calls) {
                     const idx = tc.index ?? 0;
@@ -174,6 +185,8 @@ async function handleNonStream(resp, emit) {
         return;
     }
     const content = choice.message && choice.message.content;
+    const reasoning = choice.message && (choice.message.reasoning_content || choice.message.reasoning);
+    if (reasoning) emit({ type: 'reasoning', delta: typeof reasoning === 'string' ? reasoning : JSON.stringify(reasoning) });
     if (content) emit({ type: 'chunk', delta: content });
     const tool_calls = Array.isArray(choice.message && choice.message.tool_calls)
         ? choice.message.tool_calls.map(tc => ({

@@ -56,7 +56,7 @@ chrome.runtime.onConnect.addListener((port) => {
             for (const [requestId, entry] of aiChatRequests) {
                 if (entry.port === port) {
                     entry.controller.abort();
-                    aiChatRequests.delete(requestId);
+                    settleAiChatRequest(entry, requestId);
                 }
             }
         });
@@ -560,21 +560,41 @@ function createAiChatWindow() {
     });
 }
 
-// AI 对话流式请求表：requestId -> { controller, port, timeoutFired }
-// 用户停止 / 窗口关闭 / 120s 超时均经 AbortController 中止，页面端收 ABORTED/ERROR 收尾
+// AI 对话流式请求表：requestId -> { controller, port, touch, timeoutFired }
+// 用户停止 / 窗口关闭 / 超时均经 AbortController 中止，页面端收 ABORTED/ERROR 收尾
+// 超时改为「滑动空闲 + 硬上限」：思考型模型可长时间只吐 reasoning，固定 120s 总超时会误杀；
+// 页面侧 45s/300s 先超时并下发 aiChatStop，SW 侧 60s/360s 仅作页面窗口挂起/崩溃时的兜底
 const aiChatRequests = new Map();
-const AI_CHAT_TIMEOUT_MS = 120000;
+const AI_CHAT_IDLE_TIMEOUT_MS = 60000;
+const AI_CHAT_MAX_TIMEOUT_MS = 360000;
 
-// AI 窗口 port 消息分发：aiChatStream 发起 LLM 流式代理，aiChatStop 中止在途请求
+// 收尾：移出请求表并清空两个计时器（幂等）
+function settleAiChatRequest(entry, requestId) {
+    if (!entry) return;
+    aiChatRequests.delete(requestId);
+    clearTimeout(entry.idleTimer);
+    clearTimeout(entry.maxTimer);
+}
+
+// AI 窗口 port 消息分发：aiChatStream 发起 LLM 流式代理，aiChatStop 中止在途请求，
+// aiChatPing 为页面 keepalive（回 PONG；port 消息本身即重置 SW 的 30s 空闲回收计时）
 function handleAiChatMessage(port, msg) {
     if (msg.action === 'aiChatStream') {
         const controller = new AbortController();
         const entry = { controller, port, timeoutFired: false };
         aiChatRequests.set(msg.requestId, entry);
-        const timer = setTimeout(() => {
-            entry.timeoutFired = true;
+        entry.touch = () => {
+            clearTimeout(entry.idleTimer);
+            entry.idleTimer = setTimeout(() => {
+                entry.timeoutFired = 'idle';
+                controller.abort();
+            }, AI_CHAT_IDLE_TIMEOUT_MS);
+        };
+        entry.maxTimer = setTimeout(() => {
+            entry.timeoutFired = 'max';
             controller.abort();
-        }, AI_CHAT_TIMEOUT_MS);
+        }, AI_CHAT_MAX_TIMEOUT_MS);
+        entry.touch();
         const post = (payload) => {
             try { port.postMessage(payload); } catch { /* 窗口已关闭 */ }
         };
@@ -585,31 +605,40 @@ function handleAiChatMessage(port, msg) {
             messages: msg.messages,
             tools: msg.tools,
             stream: msg.stream !== false, // 页面降级非流式时传 false
+            disableThinking: msg.disableThinking === true,
             signal: controller.signal,
         }, (event) => {
+            if (event.type === 'chunk' || event.type === 'reasoning' || event.type === 'ready') {
+                entry.touch(); // 滑动空闲：上游有任何活动就重新排空闲计时
+            }
             if (event.type === 'chunk') {
                 post({ type: 'AI_CHAT_CHUNK', requestId: msg.requestId, delta: event.delta });
+            } else if (event.type === 'reasoning') {
+                post({ type: 'AI_CHAT_REASONING', requestId: msg.requestId, delta: event.delta });
             } else if (event.type === 'ready') {
                 post({ type: 'AI_CHAT_READY', requestId: msg.requestId });
             } else if (event.type === 'done') {
-                aiChatRequests.delete(msg.requestId);
-                clearTimeout(timer);
+                settleAiChatRequest(entry, msg.requestId);
                 post({ type: 'AI_CHAT_DONE', requestId: msg.requestId, finish_reason: event.finish_reason, tool_calls: event.tool_calls });
             } else if (event.type === 'error') {
-                aiChatRequests.delete(msg.requestId);
-                clearTimeout(timer);
+                settleAiChatRequest(entry, msg.requestId);
                 post({ type: 'AI_CHAT_ERROR', requestId: msg.requestId, message: event.message, retriable: event.retriable });
             } else if (event.type === 'aborted') {
-                aiChatRequests.delete(msg.requestId);
-                clearTimeout(timer);
+                settleAiChatRequest(entry, msg.requestId);
                 // 超时中止与用户停止区分：超时给可重试错误，用户停止给 ABORTED
-                if (entry.timeoutFired) {
-                    post({ type: 'AI_CHAT_ERROR', requestId: msg.requestId, message: '请求超时（120s），请重试', retriable: true });
+                if (entry.timeoutFired === 'idle') {
+                    post({ type: 'AI_CHAT_ERROR', requestId: msg.requestId, message: '后台 ' + Math.round(AI_CHAT_IDLE_TIMEOUT_MS / 1000) + 's 无响应超时，请重试', retriable: true });
+                } else if (entry.timeoutFired === 'max') {
+                    post({ type: 'AI_CHAT_ERROR', requestId: msg.requestId, message: '后台请求超时（' + Math.round(AI_CHAT_MAX_TIMEOUT_MS / 1000) + 's），请重试', retriable: true });
                 } else {
                     post({ type: 'AI_CHAT_ABORTED', requestId: msg.requestId });
                 }
             }
         });
+    } else if (msg.action === 'aiChatPing') {
+        const entry = aiChatRequests.get(msg.requestId);
+        if (entry) entry.touch();
+        try { port.postMessage({ type: 'AI_CHAT_PONG', requestId: msg.requestId }); } catch { /* 窗口已关闭 */ }
     } else if (msg.action === 'aiChatStop') {
         const entry = aiChatRequests.get(msg.requestId);
         if (entry) entry.controller.abort();

@@ -6,6 +6,7 @@ import {
     aiProviderSelect, aiProviderAddBtn, aiProviderDelBtn,
     aiProviderNameInput, aiBaseUrlInput, aiApiKeyInput, aiModelInput,
     aiSupportsVisionInput, aiMaxToolIterationsInput,
+    aiDisableThinkingInput,
     aiDefaultVisionProviderSelect, aiSettingsOverlay, closeAiSettingsBtn,
     dirStatusBar, openAiSettingsBtn, uploadBtn, aiDebugModeInput,
 } from './ai_state.js';
@@ -25,11 +26,12 @@ function defaultProvider(name) {
         id: 'p_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
         name: name || '默认', baseUrl: DEFAULT_AI_BASE_URL, apiKey: '', model: DEFAULT_AI_MODEL,
         supportsVision: false,
+        disableThinking: false,
     };
 }
 
 function normalizeProvider(provider) {
-    return { ...provider, supportsVision: provider.supportsVision === true };
+    return { ...provider, supportsVision: provider.supportsVision === true, disableThinking: provider.disableThinking === true };
 }
 
 function clampToolIterations(v) {
@@ -109,6 +111,7 @@ export function fillProviderInputs() {
     aiApiKeyInput.value = p.apiKey || '';
     aiModelInput.value = p.model || '';
     aiSupportsVisionInput.checked = p.supportsVision === true;
+    if (aiDisableThinkingInput) aiDisableThinkingInput.checked = p.disableThinking === true;
 }
 
 export function openSettings() {
@@ -167,6 +170,13 @@ export function bindProviderEvents() {
         p.supportsVision = aiSupportsVisionInput.checked;
         await persistProviders();
         renderDefaultVisionProviderSelect();
+    });
+    // 关闭思考（仅对思考型模型有意义，勾选后 SW 请求体才带 enable_thinking:false）
+    aiDisableThinkingInput?.addEventListener('change', async () => {
+        const p = activeProvider();
+        if (!p) return;
+        p.disableThinking = aiDisableThinkingInput.checked;
+        await persistProviders();
     });
     aiMaxToolIterationsInput.addEventListener('change', () => {
         const v = clampToolIterations(aiMaxToolIterationsInput.value);

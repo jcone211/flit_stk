@@ -36,6 +36,8 @@ const EVENT_LABELS = {
     request_error: '请求失败',
     tool_call: '工具调用',
     tool_result: '工具返回',
+    reasoning: '思考过程',
+    retry_stream: '非流式重试',
     quick_intent: '快捷意图',
     retry: '重试请求',
     error: '报错信息',

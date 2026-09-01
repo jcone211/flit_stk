@@ -19,9 +19,18 @@
  *   fsa.js         文件系统访问：readyRoot / writeUpload / getBridgeHandle / workspacePermission
  *
  * 【与 background 的消息协议】long-lived port，name = 'ai-chat-connection'
- *   发送 {action:'aiChatStream'|'aiChatStop', requestId, messages, tools, stream, baseUrl, apiKey, model}
- *   接收 AI_CHAT_READY / AI_CHAT_CHUNK / AI_CHAT_DONE / AI_CHAT_ERROR / AI_CHAT_ABORTED
+ *   发送 {action:'aiChatStream'|'aiChatStop'|'aiChatPing', requestId, messages, tools, stream, baseUrl, apiKey, model, disableThinking}
+ *   接收 AI_CHAT_READY / AI_CHAT_CHUNK / AI_CHAT_REASONING / AI_CHAT_DONE / AI_CHAT_ERROR
+ *        / AI_CHAT_ABORTED / AI_CHAT_PONG
  *        按 requestId 在 pending Map 中查回调（见 handlePortMessage）
+ *
+ * 【单轮请求的超时与保活】（docs/plan-optimization.md T0）
+ *   1. 滑动空闲：每收到 ready/chunk/reasoning 任一事件即重置 REQUEST_IDLE_TIMEOUT_MS 计时，
+ *      同时受 REQUEST_MAX_TIMEOUT_MS 硬上限约束；超时后主动发 aiChatStop 让 SW 中止在途流。
+ *   2. keepalive：pending 非空时每 KEEPALIVE_INTERVAL_MS 发一次 aiChatPing（SW 回 PONG），
+ *      避免请求在途期间 MV3 service worker 被空闲回收。
+ *   3. 断连即刻失败：port onDisconnect 时把 pending 里所有在途请求以 {retriable:true} 收尾，
+ *      页面不再空等超时；重连由 ensurePortReady 在下一次发送前兜住。
  *
  * 【一次对话的数据流】
  *   handleSend(L1027) → runAgentLoop(L190)  最多 state.maxToolIterations 轮
@@ -31,7 +40,8 @@
  *
  * 【段落 / 函数清单】
  *   L69    import 依赖（state+DOM、工具表、设置、FSA）
- *   L94    port 连接 —— connectPort(L96) · pending(L106) · handlePortMessage(L108) · sendRound(L130)
+ *   L94    port 连接 —— connectPort · ensurePortReady · pending · startKeepAlive/stopKeepAlive
+ *                 · failAllPending · handlePortMessage · sendRound（滑动空闲 + 硬上限超时）
  *   L163   视觉模型选择 —— messageHasVisionInput(L165) · latestUserMessageHasVisionInput(L170)
  *                 · selectRequestProvider(L179)
  *   L188   function-calling 循环 —— runAgentLoop(L190) 内含 tool_calls arguments 非标准 JSON 修复
@@ -42,6 +52,7 @@
  *                 图表：renderVolumeChart(L470)，代码围栏语言标 stockchart 时渲染成交量柱状图
  *                 气泡：appendMessage(L499) · showWaitingAssistant(L543) · removeWaitingAssistant(L550)
  *                 · beginAssistant(L556) · appendToCurrentAssistant(L562) · renderToolEntry(L570)
+ *                 · 思考过程折叠块：beginThinking · appendToCurrentThinking · finishThinking
  *                 · appendActionButton(L593) · renderHistory(L607)
  *   L618   会话管理 —— loadSessions(L620) · sortedSessionIds(L625) · renderSessionSelect(L629)
  *                 · ensureChat(L640) · newChatId(L654) · trimChat(L658) · persistSessions(L667)
@@ -69,13 +80,16 @@
  *   7. 无构建、无测试：改完在 Chrome 扩展内手动验证（AI 窗口为独立 window，需关闭后重开）。
  *   8. DEBUG 模式下新增会落日志的渲染入口时，若属于「回放」（如 renderHistory）必须包 withDebugMuted，
  *      否则历史消息会被重复记录；流式回复的空气泡由 commitAssistant 记正文，不要在 appendToCurrentAssistant 里记。
+ *   9. 思考过程的 delta 只用于展示与重置空闲超时，绝不并入 state.currentAssistantRaw，否则会被落库/回放进正文。
+ *      finishThinking 必须在每轮 sendRound 返回后调用（含 tool_calls / 报错 / 超时路径），否则折叠块残留。
  */
 
 import {
     state, dbg, getDateTime,
     storageGet, storageSet, genUid,
     MAX_TOOL_RESULT_CHARS, MAX_MESSAGES, MAX_MESSAGE_CHARS,
-    REQUEST_TIMEOUT_MS, CHAT_KEY,
+    REQUEST_IDLE_TIMEOUT_MS, REQUEST_MAX_TIMEOUT_MS, KEEPALIVE_INTERVAL_MS, THINKING_TAIL_CHARS,
+    CHAT_KEY,
     messagesEl, scrollDownBtn, chatInput, sendBtn, stopBtn,
     uploadBtn, uploadInput, pastePreviews, intentBubblesEl, intentBubbleEls,
     sessionSelect, newSessionBtn, renameSessionBtn, deleteSessionBtn, clearChatBtn,
@@ -106,58 +120,128 @@ function connectPort() {
     try {
         state.port = chrome.runtime.connect({ name: 'ai-chat-connection' });
     } catch {
+        state.portAlive = false;
         return;
     }
+    state.portAlive = true;
     state.port.onMessage.addListener(handlePortMessage);
     state.port.onDisconnect.addListener(() => {
-        record('error', { text: '与后台 service worker 连接断开，500ms 后重连' });
+        state.portAlive = false;
+        stopKeepAlive();
+        // T0-3：SW 被回收/重启时在途请求已孤儿化，立刻以可重试错误收尾，不让页面空等超时
+        record('error', { text: '与后台 service worker 连接断开，500ms 后重连', 在途请求数: pending.size });
+        failAllPending('后台已重启，请求中断');
         setTimeout(connectPort, 500);
     });
 }
 
 const pending = new Map();
 
+// ============== SW keepalive ==============
+
+let keepAliveTimer = null;
+
+// 请求在途期间每 KEEPALIVE_INTERVAL_MS 发一次 ping（SW 回 pong）：
+// MV3 下 long-lived port 单独不足以吊住 SW，靠消息活动重置 30s 空闲回收计时
+function startKeepAlive() {
+    if (keepAliveTimer) return;
+    keepAliveTimer = setInterval(() => {
+        if (pending.size === 0 || !state.portAlive) { stopKeepAlive(); return; }
+        for (const requestId of pending.keys()) {
+            try { state.port.postMessage({ action: 'aiChatPing', requestId }); } catch { /* 断开由 onDisconnect 统一收尾 */ }
+        }
+    }, KEEPALIVE_INTERVAL_MS);
+}
+
+function stopKeepAlive() {
+    if (!keepAliveTimer) return;
+    clearInterval(keepAliveTimer);
+    keepAliveTimer = null;
+}
+
+// 断连后 500ms 才重连，非流式重试常落在该窗口内，发送前先等 port 就绪
+function ensurePortReady(timeoutMs = 2000) {
+    if (state.portAlive) return Promise.resolve(true);
+    return new Promise((resolve) => {
+        const startedAt = Date.now();
+        const timer = setInterval(() => {
+            if (state.portAlive) { clearInterval(timer); resolve(true); }
+            else if (Date.now() - startedAt > timeoutMs) { clearInterval(timer); resolve(false); }
+        }, 150);
+    });
+}
+
+function failAllPending(message) {
+    for (const [, p] of [...pending.entries()]) p.resolve({ ok: false, error: message, retriable: true });
+    pending.clear();
+}
+
 function handlePortMessage(message) {
     const p = pending.get(message.requestId);
-    if (!p) return;
+    if (!p) return; // 已收尾（超时/断连）后迟到的分片，直接丢弃
     if (message.type === 'AI_CHAT_CHUNK') {
+        p.touch();
         p.onChunk(message.delta);
+    } else if (message.type === 'AI_CHAT_REASONING') {
+        p.touch(); // 思考中的 delta 同样重置空闲超时，避免长思考被误判断连
+        p.onReasoning(message.delta);
     } else if (message.type === 'AI_CHAT_READY') {
-        p.onReady?.();
+        p.touch();
+        p.onReady();
+    } else if (message.type === 'AI_CHAT_PONG') {
+        // keepalive 回程，仅证明 SW 存活，无需动作
     } else if (message.type === 'AI_CHAT_DONE') {
-        pending.delete(message.requestId);
-        clearTimeout(p.timeoutId);
         p.resolve({ ok: true, finish_reason: message.finish_reason, tool_calls: message.tool_calls || [] });
     } else if (message.type === 'AI_CHAT_ERROR') {
-        pending.delete(message.requestId);
-        clearTimeout(p.timeoutId);
         p.resolve({ ok: false, error: message.message, retriable: !!message.retriable });
     } else if (message.type === 'AI_CHAT_ABORTED') {
-        pending.delete(message.requestId);
-        clearTimeout(p.timeoutId);
         p.resolve({ ok: false, aborted: true });
     }
 }
 
-function sendRound(apiMessages, tools, { stream = true, provider = activeProvider() } = {}) {
+async function sendRound(apiMessages, tools, { stream = true, provider = activeProvider() } = {}) {
+    if (!(await ensurePortReady())) {
+        return { ok: false, error: '与后台连接已断开，请稍后重试', retriable: true, content: '' };
+    }
     return new Promise((resolve) => {
         const requestId = ++state.currentRequestId;
         let content = '';
-        const timeoutId = setTimeout(() => {
+        let reasoningChars = 0;
+        let idleTimer = 0;
+        const finish = (r) => {
+            if (!pending.has(requestId)) return;
             pending.delete(requestId);
-            resolve({ ok: false, error: '请求超时（120s），请重试', retriable: true, content });
-        }, REQUEST_TIMEOUT_MS);
-        pending.set(requestId, {
-            timeoutId,
+            clearTimeout(idleTimer);
+            clearTimeout(maxTimer);
+            if (pending.size === 0) stopKeepAlive();
+            resolve({ ...r, content, reasoningChars });
+        };
+        const expire = (label) => {
+            // 页面侧先超时：通知 SW 中止在途流，避免继续生成浪费 token
+            try { state.port.postMessage({ action: 'aiChatStop', requestId }); } catch { /* port 已断 */ }
+            finish({ ok: false, error: label + '，请重试', retriable: true });
+        };
+        const entry = {
+            // 滑动空闲：每个事件都重新排，空闲满 REQUEST_IDLE_TIMEOUT_MS 才判无响应
+            touch: () => {
+                clearTimeout(idleTimer);
+                idleTimer = setTimeout(() => expire('模型 ' + Math.round(REQUEST_IDLE_TIMEOUT_MS / 1000) + 's 无响应'), REQUEST_IDLE_TIMEOUT_MS);
+            },
             onReady: () => showWaitingAssistant(),
             onChunk: (delta) => { content += delta; appendToCurrentAssistant(delta); },
-            resolve: (r) => resolve({ ...r, content }),
-        });
+            onReasoning: (delta) => { reasoningChars += String(delta || '').length; appendToCurrentThinking(delta); },
+            resolve: finish,
+        };
+        const maxTimer = setTimeout(() => expire('请求超时（' + Math.round(REQUEST_MAX_TIMEOUT_MS / 1000) + 's）'), REQUEST_MAX_TIMEOUT_MS);
+        entry.touch();
+        pending.set(requestId, entry);
+        startKeepAlive();
         record('request', {
             requestId,
             stream,
             模型: provider.model || '',
             baseUrl: provider.baseUrl || '',
+            关闭思考: provider.disableThinking === true,
             消息数: (apiMessages || []).length,
             工具数: (tools || []).length,
         });
@@ -171,11 +255,10 @@ function sendRound(apiMessages, tools, { stream = true, provider = activeProvide
                 baseUrl: provider.baseUrl,
                 apiKey: provider.apiKey,
                 model: provider.model,
+                disableThinking: provider.disableThinking === true,
             });
         } catch {
-            pending.delete(requestId);
-            clearTimeout(timeoutId);
-            resolve({ ok: false, error: '与后台连接已断开，请稍后重试', retriable: true, content: '' });
+            finish({ ok: false, error: '与后台连接已断开，请稍后重试', retriable: true });
         }
     });
 }
@@ -214,6 +297,7 @@ function logResponse(result) {
         结束原因: result.finish_reason || '',
         工具调用数: (result.tool_calls || []).length,
         文本字符: (result.content || '').length,
+        思考字符: result.reasoningChars || 0,
         错误: result.error || '',
         中断: result.aborted === true,
     });
@@ -232,10 +316,12 @@ async function runAgentLoop(initialMessages, initialToolGroups = []) {
     for (let round = 0; round < state.maxToolIterations; round++) {
         state.currentAssistantEl = null;
         removeWaitingAssistant();
+        finishThinking();
         const requestMessages = [buildSystemPrompt(), ...apiMessages];
         const tools = [TOOL_GROUP_DEF, ...getLoadedToolDefs()];
         let result = await sendRound(requestMessages, tools, { stream: true, provider: requestProvider });
         removeWaitingAssistant();
+        finishThinking();
         logResponse(result);
         if (!result.ok) {
             if (result.aborted) {
@@ -245,7 +331,10 @@ async function runAgentLoop(initialMessages, initialToolGroups = []) {
             }
             if (result.retriable) {
                 appendMessage('system', '流式响应中断，改用非流式重试…');
+                record('retry_stream', { 原因: result.error || '' });
                 result = await sendRound(requestMessages, tools, { stream: false, provider: requestProvider });
+                removeWaitingAssistant();
+                finishThinking();
                 logResponse(result);
             }
             if (!result.ok) {
@@ -611,10 +700,70 @@ function beginAssistant() {
 
 function appendToCurrentAssistant(delta) {
     removeWaitingAssistant();
+    finishThinking(); // 正文开始，思考过程折叠归档
     if (!state.currentAssistantEl) beginAssistant();
     state.currentAssistantRaw += delta;
     state.currentAssistantEl.innerHTML = mdToHtml(state.currentAssistantRaw);
     maybeScroll();
+}
+
+// ============== 思考过程（reasoning_content）折叠块 ==============
+
+// 思考型模型可能先花 10~30s 只输出 reasoning_content；不解析就会出现「页面空转」的观感。
+// 这里把它当进度条用：灰色小字实时展示尾部，正文一到达即折叠为「思考过程（N 字）」可点开回看。
+function beginThinking() {
+    const el = document.createElement('div');
+    el.className = 'msg msg-thinking expanded';
+    const head = document.createElement('div');
+    head.className = 'tool-head';
+    const caret = document.createElement('span');
+    caret.className = 'tool-caret';
+    caret.textContent = '▸';
+    const label = document.createElement('span');
+    label.textContent = '思考中';
+    const dots = document.createElement('span');
+    dots.className = 'typing-dots';
+    dots.innerHTML = '<i></i><i></i><i></i>';
+    head.append(caret, label, dots);
+    const body = document.createElement('div');
+    body.className = 'thinking-body';
+    head.addEventListener('click', () => el.classList.toggle('expanded'));
+    el.append(head, body);
+    messagesEl.appendChild(el);
+    state.thinkingEl = el;
+    state.thinkingLabel = label;
+    state.thinkingBody = body;
+    state.thinkingRaw = '';
+    maybeScroll();
+}
+
+function appendToCurrentThinking(delta) {
+    const text = String(delta || '');
+    if (!text) return;
+    removeWaitingAssistant();
+    if (!state.thinkingEl) beginThinking();
+    state.thinkingRaw += text;
+    state.thinkingBody.textContent = state.thinkingRaw.slice(-THINKING_TAIL_CHARS);
+    maybeScroll();
+}
+
+// 本轮结束（正文到达 / 收工 / 报错 / 超时）时折叠并归档；空思考直接移除，不残留空气泡
+function finishThinking() {
+    const el = state.thinkingEl;
+    if (!el) return;
+    const chars = state.thinkingRaw.length;
+    if (chars) {
+        el.classList.remove('expanded');
+        el.querySelector('.typing-dots')?.remove();
+        state.thinkingLabel.textContent = '思考过程（' + chars + ' 字）';
+        record('reasoning', { 字符: chars, text: state.thinkingRaw });
+    } else {
+        el.remove();
+    }
+    state.thinkingEl = null;
+    state.thinkingLabel = null;
+    state.thinkingBody = null;
+    state.thinkingRaw = '';
 }
 
 function renderToolEntry(name, argsJson, resultText) {
@@ -658,6 +807,11 @@ function renderHistory() {
     // 回放历史消息不写 DEBUG 日志（这些事件当时已记录过）
     withDebugMuted(() => {
         messagesEl.innerHTML = '';
+        // 在途思考块随旧 DOM 一起丢弃（不写 state，避免往已分离节点上流式输出）
+        state.thinkingEl = null;
+        state.thinkingLabel = null;
+        state.thinkingBody = null;
+        state.thinkingRaw = '';
         state.chatMessages.forEach(m => { if (!m.uid) m.uid = genUid('m'); });
         for (const m of state.chatMessages) {
             appendMessage(m.role === 'user' ? 'user' : 'assistant', m.content || '', m);

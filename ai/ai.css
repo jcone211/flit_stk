@@ -552,6 +552,40 @@ body.ai-body {
     display: block;
 }
 
+/* 思考过程折叠块（reasoning_content）：流式阶段展开作进度，正文到达后自动收起 */
+.msg-thinking {
+    align-self: flex-start;
+    max-width: 92%;
+    background: #fafbfc;
+    border: 1px dashed #d7dbe0;
+    font-size: 12px;
+    color: #8a9099;
+}
+
+.msg-thinking .tool-head {
+    gap: 5px;
+}
+
+.msg-thinking .typing-dots i {
+    width: 4px;
+    height: 4px;
+    background: #b6bcc4;
+}
+
+.thinking-body {
+    display: none;
+    margin-top: 4px;
+    max-height: 120px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    line-height: 1.5;
+    color: #9aa0a6;
+}
+
+.msg-thinking.expanded .thinking-body {
+    display: block;
+}
+
 /* 截断提示 / 继续生成按钮 */
 .msg-actions {
     align-self: flex-start;

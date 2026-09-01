@@ -77,9 +77,12 @@ function requirePicker() {
 }
 
 // 选择主工作目录（替换首位；与现有主目录同名则原地替换 handle）
-export async function pickPrimaryWorkspace() {
+export async function pickPrimaryWorkspace(expectedName = '') {
     requirePicker();
     const handle = await window.showDirectoryPicker({ mode: 'readwrite' });
+    if (expectedName && handle.name !== expectedName) {
+        throw new Error(`选择的目录是“${handle.name}”，与填写路径的末级目录“${expectedName}”不一致，请重新选择`);
+    }
     const items = await getWorkspaceHandles();
     if (items.length > 0 && items[0].name === handle.name) {
         items[0].handle = handle;
@@ -102,6 +105,53 @@ export async function addWorkspaceDir() {
         items.push({ name: handle.name, handle });
     }
     await saveWorkspaceHandles(items);
+    return handle;
+}
+
+// ---------------- Agent 桥接目录（与工作目录独立） ----------------
+const BRIDGE_DB_KEY = 'bridgeDir';
+
+export async function getBridgeHandle() {
+    const db = await openDb();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, 'readonly');
+        const req = tx.objectStore(STORE_NAME).get(BRIDGE_DB_KEY);
+        req.onsuccess = () => { resolve(req.result ? req.result.handle : null); };
+        req.onerror = () => reject(req.error);
+        tx.oncomplete = () => db.close();
+    });
+}
+
+export async function saveBridgeHandle(handle) {
+    await idbPut({ name: BRIDGE_DB_KEY, handle });
+}
+
+export async function removeBridgeHandle() {
+    const db = await openDb();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, 'readwrite');
+        tx.objectStore(STORE_NAME).delete(BRIDGE_DB_KEY);
+        tx.oncomplete = () => { db.close(); resolve(); };
+        tx.onerror = () => { db.close(); reject(tx.error); };
+    });
+}
+
+export async function pickBridgeDirectory() {
+    requirePicker();
+    const handle = await window.showDirectoryPicker({ mode: 'readwrite' });
+    // 校验是否为有效的 flit_bridge 目录
+    const requiredFiles = ['server.js', 'start-server.ps1'];
+    const names = new Set();
+    try {
+        for await (const entry of handle.values()) {
+            names.add(entry.name);
+        }
+    } catch { }
+    const missing = requiredFiles.filter(f => !names.has(f));
+    if (missing.length > 0) {
+        throw new Error('所选目录不是有效的 flit_bridge 目录（缺少 ' + missing.join(', ') + '），请重新选择项目根目录下的 flit_bridge 子目录');
+    }
+    await saveBridgeHandle(handle);
     return handle;
 }
 

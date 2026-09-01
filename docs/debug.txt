@@ -1,0 +1,263 @@
+========== flit_stk AI 助手 · DEBUG 日志 ==========
+会话ID: chat_mtie817b30r
+会话名称: 这是我现在量化分析出的股票，帮我挑选最建
+导出时间: 2026-09-01 16:21:01.348
+记录开始: 2026-09-01 16:16:18.463
+事件条数: 49
+环境: 扩展 v1.9.0 | 模型 qwen3.8-flash @ https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1 | 工具轮数上限 50
+      供应商「千问」 APIKey 已配置(114 位) | Agent桥接 启用 | 工具组 market,bridge
+      工作目录 stock-assistant | 主目录 D:\sundry\7-ai\agents\stock-assistant | 桥接目录 D:\codes\ai\flit_stk\flit_bridge
+---------------------------------------------------
+[008] 2026-09-01 16:16:18.463  会话事件
+  说明: 新建会话
+  ext: 1.9.0
+  会话: chat_mtie817b30r
+  供应商: 千问
+  模型: qwen3.8-flash
+  baseUrl: https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+  apiKey: 已配置(114 位)
+  工具轮数上限: 50
+  Agent桥接: 启用
+  工作目录: stock-assistant
+  主目录: D:\sundry\7-ai\agents\stock-assistant
+  桥接目录: D:\codes\ai\flit_stk\flit_bridge
+  已加载工具组: bridge
+  ua: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36
+[009] 2026-09-01 16:16:39.778  报错信息
+  |
+  | 与后台 service worker 连接断开，500ms 后重连
+[010] 2026-09-01 16:17:00.076  用户问题
+  |
+  | 这是我现在量化分析出的股票，帮我挑选最建议购买的三支：单日急跌缩量：有研新材*、江化微*
+  | 缩量回踩低位：华电能源、景津装备
+  | 冲高回落低吸：鲁信创投*、昂利康*、键邦股份、康辰药业、国城矿业*、士兰微*
+[011] 2026-09-01 16:17:00.078  发起请求
+  requestId: 1
+  stream: true
+  模型: qwen3.8-flash
+  baseUrl: https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+  消息数: 2
+  工具数: 1
+[012] 2026-09-01 16:17:03.972  模型响应
+  ok: true
+  结束原因: tool_calls
+  工具调用数: 2
+  文本字符: 0
+  中断: false
+[013] 2026-09-01 16:17:03.972  工具调用 · load_tool_group
+  callId: call_6f8f8bba9fb24885bfe86702
+  args: {"group": "market"}
+[014] 2026-09-01 16:17:03.972  工具返回 · load_tool_group
+  callId: call_6f8f8bba9fb24885bfe86702
+  耗时ms: 0
+  失败: false
+  返回字符: 195
+  result: {"ok":true,"group":"market","rule":"行情工具：批量查询用 get_portfolio_quotes（一次返回组合全部股票实时行情）；个股日线分析用 read_stock_kline。","tools":["get_stock_quote","get_portfolio_quotes","refresh_all","read_stock_kline"]}
+[015] 2026-09-01 16:17:03.973  工具调用 · load_tool_group
+  callId: call_347d46a4427449f0946fd89c
+  args: {"group": "bridge"}
+[016] 2026-09-01 16:17:03.973  工具返回 · load_tool_group
+  callId: call_347d46a4427449f0946fd89c
+  耗时ms: 0
+  失败: false
+  返回字符: 1254
+  result: {"ok":true,"group":"bridge","rule":"桥接工具：优先使用结构化工作区上下文和数据库 schema 查询；Agent 只能写 flit/，但可读取和执行工作目录其他目录中的已有脚本。低 Token 固定链路：先调用 get_workspace_context；若返回 config 或 memory，先使用其中的 verified_connection、database 和 workflows，不要重复读取旧文档；有匹配 workflow 时先 read_file 该流程，按其表结构和基础 SQL 执行，除非查询失败或流程明确要求，否则跳过 discover_database_schema。只有 config/memory/workflow 都不足时，才用 list_dir/read_file 搜索其他配置和脚本。发现错误时将修正经验记录到 flit/memory.md。数据库查询任务只有在“数据查询成功、连接配置已验证并保存（若原先不存在）、可复用流程已封装（若值得复用）、memory.md 已登记入口”后才算完成；不得只返回数据就结束。连接验证成功后必须调用 save_workspace_database_config 保存完整配置，该工具会同时创建 flit/.gitignore 并忽略 config.json。workflow 必须使用通用、可复用标题和文件名，不得绑定具体股票名称或本次日期，例如“查询股票近 N 个交易日行情”；内容必须包含适用条件、已验证连接/数据源名称（不得包含密码）、相关表及关键字段、历史表与当日快照的优先级和去重规则、可替换参数、可直接执行的基础 SQL，以及何时需要重新 discover_database_schema。若本次已验证出值得复用的正确执行流程，先创建 flit/workflow/ 下该流程，再调用 record_workspace_memory；memory.md 必须遵循固定格式，最上方先写“## 数据库连接状态”，明确 verified/unverified/unknown，随后只记录不含凭据的 workflow 入口、用途和触发条件；不要把完整过程、失败尝试或 SQL 结果重复写入记忆。桥接服务未启动时，bridge_health 会返回 pwsh 启动命令；此时必须停止工具调用，只把命令和“请用户执行后重试”告知用户，绝对禁止通过 run_workspace_process 或其他工具启动 flit_bridge。","tools":["get_workspace_context","discover_database_schema","query_local_database","save_workspace_database_config","record_workspace_memory","run_workspace_process","bridge_health"]}
+[017] 2026-09-01 16:17:03.974  发起请求
+  requestId: 2
+  stream: true
+  模型: qwen3.8-flash
+  baseUrl: https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+  消息数: 5
+  工具数: 12
+[018] 2026-09-01 16:17:05.392  模型响应
+  ok: true
+  结束原因: tool_calls
+  工具调用数: 2
+  文本字符: 0
+  中断: false
+[019] 2026-09-01 16:17:05.392  工具调用 · get_workspace_context
+  callId: call_7500f58ccded4a58911c024f
+  args: {"refresh": true}
+[020] 2026-09-01 16:17:07.399  工具返回 · get_workspace_context
+  callId: call_7500f58ccded4a58911c024f
+  耗时ms: 2007
+  失败: false
+  返回字符: 78
+  result: {"ok":false,"error":{"code":"bridge_unreachable","message":"Failed to fetch"}}
+[021] 2026-09-01 16:17:07.399  工具调用 · get_stock_quote
+  callId: call_136ffa85aebb4e51b81934b3
+  args: {"name": "有研新材"}
+[022] 2026-09-01 16:17:07.969  工具返回 · get_stock_quote
+  callId: call_136ffa85aebb4e51b81934b3
+  耗时ms: 570
+  失败: false
+  返回字符: 391
+  result: {"code":"600206.SH","name":"有研新材","quote":{"code":"600206","name":"有研新材","price":48.87,"change":-2.85,"change_pct":-5.51,"open":51.8,"high":51.8,"low":48.63,"previous_close":51.72,"volume":66247200,"amount":3273455991,"turnover_pct":7.83,"amplitude_pct":6.129157,"time":"2026-09-01T16:00:56","source":"xiaoshi-platform","cache_status":"live","is_stale":false,"age_seconds":0},"warning":null}
+[023] 2026-09-01 16:17:07.970  发起请求
+  requestId: 3
+  stream: true
+  模型: qwen3.8-flash
+  baseUrl: https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+  消息数: 8
+  工具数: 12
+[024] 2026-09-01 16:17:13.459  模型响应
+  ok: true
+  结束原因: tool_calls
+  工具调用数: 4
+  文本字符: 0
+  中断: false
+[025] 2026-09-01 16:17:13.459  工具调用 · read_stock_kline
+  callId: call_52bbc871f21943cd9b8102d5
+  args: {"name": "有研新材", "days": 18}
+*由于返回内容太多我统一删除并改成了rows:[...]，这是我截取的rows一天的数据你可以参考：{"date":"2026-08-07","open":30.86,"high":32.98,"low":30.51,"close":32.94,"volume":5803991,"amount":185099039.51,"change_pct":7.122,"turnover_pct":3.6682}
+[026] 2026-09-01 16:17:15.068  工具返回 · read_stock_kline
+  callId: call_52bbc871f21943cd9b8102d5
+  耗时ms: 1609
+  失败: false
+  返回字符: 3006
+  result: {"root":"stock-assistant","code":"600206.SH","name":"有研新材","days":18,"source":"parquet+xiaoshi","cacheLastDate":"2026-08-14","apiLastDate":"2026-09-01","warning":null,"rows":[...]}
+[027] 2026-09-01 16:17:15.069  工具调用 · read_stock_kline
+  callId: call_d259a10657c449bea1b42845
+  args: {"name": "江化微", "days": 18}
+[028] 2026-09-01 16:17:17.018  工具返回 · read_stock_kline
+  callId: call_d259a10657c449bea1b42845
+  耗时ms: 1949
+  失败: false
+  返回字符: 2896
+  result: {"root":"stock-assistant","code":"603078.SH","name":"江化微","days":18,"source":"parquet+xiaoshi","cacheLastDate":"2026-08-14","apiLastDate":"2026-09-01","warning":null,"rows":[...]}
+[029] 2026-09-01 16:17:17.019  工具调用 · read_stock_kline
+  callId: call_e2b889161d874c4c959e3128
+  args: {"name": "华电能源", "days": 18}
+[030] 2026-09-01 16:17:19.053  工具返回 · read_stock_kline
+  callId: call_e2b889161d874c4c959e3128
+  耗时ms: 2034
+  失败: false
+  返回字符: 2841
+  result: {"root":"stock-assistant","code":"600726.SH","name":"华电能源","days":18,"source":"parquet+xiaoshi","cacheLastDate":"2026-08-14","apiLastDate":"2026-09-01","warning":null,"rows":[...]}
+[031] 2026-09-01 16:17:19.054  工具调用 · read_stock_kline
+  callId: call_c138fabddfb44b6895891ed0
+  args: {"name": "景津装备", "days": 18}
+[032] 2026-09-01 16:17:21.085  工具返回 · read_stock_kline
+  callId: call_c138fabddfb44b6895891ed0
+  耗时ms: 2031
+  失败: false
+  返回字符: 2874
+  result: {"root":"stock-assistant","code":"603279.SH","name":"景津装备","days":18,"source":"parquet+xiaoshi","cacheLastDate":"2026-08-14","apiLastDate":"2026-09-01","warning":null,"rows":[...]}
+[033] 2026-09-01 16:17:21.086  发起请求
+  requestId: 4
+  stream: true
+  模型: qwen3.8-flash
+  baseUrl: https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+  消息数: 13
+  工具数: 12
+[034] 2026-09-01 16:17:23.989  模型响应
+  ok: true
+  结束原因: tool_calls
+  工具调用数: 4
+  文本字符: 0
+  中断: false
+[035] 2026-09-01 16:17:23.989  工具调用 · read_stock_kline
+  callId: call_d4c35eda2aae4cd5801041de
+  args: {"days": 18, "name": "鲁信创投"}
+[036] 2026-09-01 16:17:27.839  工具返回 · read_stock_kline
+  callId: call_d4c35eda2aae4cd5801041de
+  耗时ms: 3850
+  失败: false
+  返回字符: 2906
+  result: {"root":"stock-assistant","code":"600783.SH","name":"鲁信创投","days":18,"source":"parquet+xiaoshi","cacheLastDate":"2026-08-14","apiLastDate":"2026-09-01","warning":null,"rows":[...]}
+[037] 2026-09-01 16:17:27.841  工具调用 · read_stock_kline
+  callId: call_506cebb3d6314f8292c0cf00
+  args: {"days": 18, "name": "昂利康"}
+[038] 2026-09-01 16:17:31.546  工具返回 · read_stock_kline
+  callId: call_506cebb3d6314f8292c0cf00
+  耗时ms: 3705
+  失败: false
+  返回字符: 2892
+  result: {"root":"stock-assistant","code":"002940.SZ","name":"昂利康","days":18,"source":"parquet+xiaoshi","cacheLastDate":"2026-08-14","apiLastDate":"2026-09-01","warning":null,"rows":[...]}
+[039] 2026-09-01 16:17:31.548  工具调用 · read_stock_kline
+  callId: call_3dffa4c4bf87467f89ced91a
+  args: {"days": 18, "name": "键邦股份"}
+[040] 2026-09-01 16:17:37.472  工具返回 · read_stock_kline
+  callId: call_3dffa4c4bf87467f89ced91a
+  耗时ms: 5924
+  失败: false
+  返回字符: 2876
+  result: {"root":"stock-assistant","code":"603285.SH","name":"键邦股份","days":18,"source":"parquet+xiaoshi","cacheLastDate":"2026-08-14","apiLastDate":"2026-09-01","warning":null,"rows":[...]}
+[041] 2026-09-01 16:17:37.474  工具调用 · read_stock_kline
+  callId: call_71627035fe334107b718d2b8
+  args: {"days": 18, "name": "康辰药业"}
+[042] 2026-09-01 16:17:43.336  工具返回 · read_stock_kline
+  callId: call_71627035fe334107b718d2b8
+  耗时ms: 5862
+  失败: false
+  返回字符: 2878
+  result: {"root":"stock-assistant","code":"603590.SH","name":"康辰药业","days":18,"source":"parquet+xiaoshi","cacheLastDate":"2026-08-14","apiLastDate":"2026-09-01","warning":null,"rows":[...]}
+[043] 2026-09-01 16:17:43.338  发起请求
+  requestId: 5
+  stream: true
+  模型: qwen3.8-flash
+  baseUrl: https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+  消息数: 18
+  工具数: 12
+[044] 2026-09-01 16:17:46.084  模型响应
+  ok: true
+  结束原因: tool_calls
+  工具调用数: 2
+  文本字符: 0
+  中断: false
+[045] 2026-09-01 16:17:46.084  工具调用 · read_stock_kline
+  callId: call_5cbee20413614a3da5411cf5
+  args: {"days": 18, "name": "国城矿业"}
+[046] 2026-09-01 16:17:52.383  工具返回 · read_stock_kline
+  callId: call_5cbee20413614a3da5411cf5
+  耗时ms: 6299
+  失败: false
+  返回字符: 2882
+  result: {"root":"stock-assistant","code":"000688.SZ","name":"国城矿业","days":18,"source":"parquet+xiaoshi","cacheLastDate":"2026-08-14","apiLastDate":"2026-08-31","warning":null,"rows":[...]}
+[047] 2026-09-01 16:17:52.385  工具调用 · read_stock_kline
+  callId: call_95be944253ab48fb82d21a31
+  args: {"days": 18, "name": "士兰微"}
+[048] 2026-09-01 16:17:58.495  工具返回 · read_stock_kline
+  callId: call_95be944253ab48fb82d21a31
+  耗时ms: 6109
+  失败: false
+  返回字符: 2934
+  result: {"root":"stock-assistant","code":"600460.SH","name":"士兰微","days":18,"source":"parquet+xiaoshi","cacheLastDate":"2026-08-14","apiLastDate":"2026-09-01","warning":null,rows:[...]}
+[049] 2026-09-01 16:17:58.497  发起请求
+  requestId: 6
+  stream: true
+  模型: qwen3.8-flash
+  baseUrl: https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+  消息数: 21
+  工具数: 12
+[050] 2026-09-01 16:18:30.648  报错信息
+  |
+  | 与后台 service worker 连接断开，500ms 后重连
+[051] 2026-09-01 16:19:22.563  报错信息
+  |
+  | 与后台 service worker 连接断开，500ms 后重连
+[052] 2026-09-01 16:19:59.257  模型响应
+  ok: false
+  工具调用数: 0
+  文本字符: 0
+  错误: 请求超时（120s），请重试
+  中断: false
+[053] 2026-09-01 16:19:59.257  系统提示
+  |
+  | 流式响应中断，改用非流式重试…
+[054] 2026-09-01 16:19:59.259  发起请求
+  requestId: 7
+  stream: false
+  模型: qwen3.8-flash
+  baseUrl: https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+  消息数: 21
+  工具数: 12
+[055] 2026-09-01 16:20:59.148  模型响应
+  ok: false
+  工具调用数: 0
+  文本字符: 0
+  中断: true
+[056] 2026-09-01 16:20:59.148  报错信息
+  |
+  | 请求失败
+========== DEBUG 日志结束 ==========

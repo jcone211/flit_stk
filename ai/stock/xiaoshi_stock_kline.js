@@ -12,9 +12,19 @@
 const XIAOSHI_BASE = 'https://api.shizixi.com/api/v3';
 const DEFAULT_TIMEOUT_MS = 20000;
 const DEFAULT_MAX_RETRIES = 2;
-// 兜底 Key：优先读 chrome.storage.sync 的 apiKey（全局设置「数据获取方式-小石大数据」），
-// 未配置时回退到此默认值，保证「缓存缺最新数据自动补齐」直接可用。
+// Key 优先级：调用方显式传入 > 全局设置「数据获取方式 - 小石大数据」(chrome.storage.sync.apiKey)
+// > 内置兜底 Key（保证未配置时「缓存缺最新数据自动补齐」仍可用）。
 const DEFAULT_XIAOSHI_API_KEY = 'xs_live_sEdZZR_9fYq4dWJB5LQgZGG6G3BtF6awLyJhPL1zCow';
+
+// 读全局设置中的小石 Key；非扩展环境或读取失败时返回 ''，由调用方回退兜底 Key。
+export async function getSettingApiKey() {
+    try {
+        const res = await chrome.storage.sync.get('apiKey');
+        return String((res && res.apiKey) || '').trim();
+    } catch {
+        return '';
+    }
+}
 
 function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
@@ -23,7 +33,7 @@ function sleep(ms) {
 // 统一请求入口：path 以 /api/v3 之后的部分（如 '/data/search'），params 拼为查询串。
 // 返回解析后的 JSON；失败抛出带中文说明的 Error。
 export async function xiaoshiFetch(path, { apiKey, params = {}, timeoutMs = DEFAULT_TIMEOUT_MS, maxRetries = DEFAULT_MAX_RETRIES } = {}) {
-    const key = apiKey || DEFAULT_XIAOSHI_API_KEY;
+    const key = String(apiKey || '').trim() || (await getSettingApiKey()) || DEFAULT_XIAOSHI_API_KEY;
     const qs = new URLSearchParams();
     for (const [k, v] of Object.entries(params)) {
         if (v !== undefined && v !== null && v !== '') qs.set(k, v);
@@ -65,7 +75,11 @@ export async function xiaoshiFetch(path, { apiKey, params = {}, timeoutMs = DEFA
         if (!resp.ok) {
             let detail = '';
             try { detail = (await resp.text()).slice(0, 200); } catch { /* ignore */ }
-            throw new Error('小石 API HTTP ' + resp.status + (detail ? '：' + detail : '') + '（检查 API Key 是否有效）');
+            // 401/403 多为 Key 问题：指明具体来源，避免用户去改「AI 设置」里的供应商 Key
+            const keyHint = (resp.status === 401 || resp.status === 403)
+                ? '（当前使用' + (String(apiKey || '').trim() ? '调用方传入' : (await getSettingApiKey() ? '全局设置' : '内置兜底')) + '的 API Key，可在插件「全局设置 → 数据获取方式（小石大数据）」中修改）'
+                : '（检查 API Key 是否有效）';
+            throw new Error('小石 API HTTP ' + resp.status + (detail ? '：' + detail : '') + keyHint);
         }
         return resp.json();
     }

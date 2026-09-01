@@ -33,12 +33,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - 首次启动自动把 stockList 从 sync 迁移到 local（background `ensureMigrated` 幂等，background 是唯一迁移执行者，popup 不自行迁移）；存储的 url 恒为 `new URL().href` 百分号编码形态，显示层统一 `safeDecodeUrl` 解码。
 - popup 列表支持分页（pageSize 存 sync，默认 10）、按当日/导入以来涨跌幅排序、股票列表与垃圾池双视图；数据可经工具栏导入导出 JSON（导入按 URL 合并），导入导出可登记为命名组合（不超过 4 字），页脚首行「持仓组合」标签 + 导入导出图标 + 分页同行、组合卡片独立成行，一键切换组合；非活动组合可经 chip 内 × 删除（活动组合须先切走；初始组合「默认」固定首位、不可删除）。
 - 股票列表通过 DOM 字符串拼接渲染（`renderStock`），编辑/启停按钮在渲染时逐个绑定事件，勿依赖事件委托。
-- AI 助手 DEBUG 模式（优化与排错）：开关在「AI 设置 → 全局设置」复选框，存 sync `aiDebugMode`；记录器 `ai/core/ai_debug.js` 按会话记录用户问题、AI 回复、工具调用方法与传参、工具返回、请求/响应元信息与报错（含 window error / unhandledrejection），存 local `aiDebugLogs`（单会话 300 条、单字段 4000 字符、最多 8 个会话，落库前先读最新存量再合并写回，与数据落地同一套并发约定）。开启后头部目录行最右侧显示「Debug信息」按钮（`debugInfoBtn`，由 `syncDebugBtn` 控制显隐），点击即把当前会话记录以纯文本复制到剪切板（clipboard API 失败降级 `execCommand`）。
+- AI 对话链路可靠性（T0）：单轮请求为「滑动空闲 45s + 硬上限 300s」双档超时（`REQUEST_IDLE_TIMEOUT_MS` / `REQUEST_MAX_TIMEOUT_MS`），每收 ready/chunk/reasoning 重置空闲计时，超时主动发 `aiChatStop` 中止 SW 在途流；后台 `AI_CHAT_IDLE_TIMEOUT_MS=60s`/`MAX=360s` 只作兜底（均比页面宽一档）。请求在途时每 20s `aiChatPing` 保活 SW（MV3 下光靠 long-lived port 吊不住）；port `onDisconnect` 立即把 pending 全部以 `{retriable:true}` 收尾（`failAllPending`），重连由 `ensurePortReady` 在下一次发送前兜住——改超时/重连逻辑时不要再回到固定总超时。
+- AI 思考过程（T0）：`ai_backend.js` 解析 `delta.reasoning_content`（兼容 `delta.reasoning`）并 emit `reasoning` 事件，后台转 `AI_CHAT_REASONING`，页面 `beginThinking/appendToCurrentThinking/finishThinking` 渲染可折叠灰字（不并入正文、不落库）。供应商可选 `disableThinking`，开启后请求体才注入 `enable_thinking:false` + `chat_template_kwargs`。
+- AI 字符量控制（T1）：多只股票日线一律走 `read_stocks_kline`（一次读年文件 `filter: {code:{$in:[...]}}` + `mapWithLimit` 并发 4，只回 `klineSummary` 派生指标）；工具结果按 `TOOL_RESULT_CHARS` 分级上限截断，单轮总预算 `MAX_ROUND_TOOL_CHARS=16000`，上下文超 `MAX_CONTEXT_CHARS=24000` 时 `evictToolResults` 驱逐最旧几轮 tool 结果（只改 content，保留 role/tool_call_id 配对，最近一轮不驱）。系统提示只留一行工具组目录（`TOOL_GROUP_SUMMARY`）与硬约束，详细规则由 `load_tool_group` 的 `rule` 字段给出。
+- AI 助手 DEBUG 模式（优化与排错）：开关在「AI 设置 → 全局设置」复选框，存 sync `aiDebugMode`；记录器 `ai/core/ai_debug.js` 按会话记录用户问题、AI 回复、工具调用方法与传参、工具返回、思考过程（reasoning）、上下文驱逐（evict）、请求/响应元信息与报错（含 window error / unhandledrejection），存 local `aiDebugLogs`（单会话 300 条、单字段 4000 字符、最多 8 个会话，落库前先读最新存量再合并写回，与数据落地同一套并发约定）。开启后头部目录行最右侧显示「Debug信息」按钮（`debugInfoBtn`，由 `syncDebugBtn` 控制显隐），点击即把当前会话记录以纯文本复制到剪切板（clipboard API 失败降级 `execCommand`）。
 
 ## 编码约定
 
 - 界面文案与注释使用中文；变量名、消息 action 名使用英文。
-- 消息协议两套字段并存：`action`（控制指令：`startRefresh` / `stopRefresh` / `getStatus` / `refresh` / `setView`，内部另有 background→offscreen 的 `parseDocument`）与 `type`（数据上报：`DOCUMENT_CAPTURED`，background→popup 的 `DATA_LANDED`/`DATA_LAND_ERROR`），新增消息沿用此风格。
+- 消息协议两套字段并存：`action`（控制指令：`startRefresh` / `stopRefresh` / `getStatus` / `refresh` / `setView` / `aiChatStream` / `aiChatStop` / `aiChatPing`，内部另有 background→offscreen 的 `parseDocument`）与 `type`（数据上报：`DOCUMENT_CAPTURED`，background→popup 的 `DATA_LANDED`/`DATA_LAND_ERROR`，background→AI 窗口的 `AI_CHAT_READY`/`AI_CHAT_CHUNK`/`AI_CHAT_REASONING`/`AI_CHAT_DONE`/`AI_CHAT_ERROR`/`AI_CHAT_ABORTED`/`AI_CHAT_PONG`），新增消息沿用此风格。
 
 ## 任务处理节奏
 

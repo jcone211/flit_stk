@@ -2,6 +2,9 @@
 
 > 基于 `docs/debug.txt`（2026-09-01 对话中断事故）的系统性优化计划。
 > 完成状态标记：✅ 已实现 | 🔲 待实现 | ⏳ 实现中
+>
+> 进度（2026-09-02）：第一优先级 T0（T0-1~T0-4）与第二优先级 T1（T1-1~T1-4、T1-6）已全部交付；
+> T2（token 计量、parquet LRU、摘要落库、rank_stocks）待排期。
 
 ---
 
@@ -21,59 +24,61 @@
 
 > 目标：消灭「对话进行中突然断连」的故障模式。
 
-### T0-1 超时改滑动空闲 (🔲)
+### T0-1 超时改滑动空闲 (✅)
 
 | 文件 | 位置 | 改动 |
 |------|------|------|
-| `ai/core/ai_state.js:16` | `REQUEST_TIMEOUT_MS` | 拆为 `REQUEST_IDLE_TIMEOUT_MS=45s` + `REQUEST_MAX_TIMEOUT_MS=300s` |
-| `ai/ai.js:146-149` | `sendRound` | 收到 `ready`/`chunk` 时 `clearTimeout` + 重排空闲超时 |
+| `ai/core/ai_state.js` | `REQUEST_TIMEOUT_MS` | 已拆为 `REQUEST_IDLE_TIMEOUT_MS=45s` + `REQUEST_MAX_TIMEOUT_MS=300s` |
+| `ai/ai.js` `sendRound` | pending 条目 | `touch()` 在 `ready`/`chunk`/`reasoning` 任一事件到来时重置空闲计时；硬上限单独计时 |
+| `background/background.js` | `AI_CHAT_TIMEOUT_MS` | 已改为 `AI_CHAT_IDLE_TIMEOUT_MS=60s` + `AI_CHAT_MAX_TIMEOUT_MS=360s`（比页面放宽一档，只作窗口挂起兜底），每个上游事件 `entry.touch()` 重置 |
 
 ```js
-// 改动后 behavior:
+// 已落地行为：
 // - 启动时设 idle=45s, max=300s
-// - 每收一个 chunk 重置 idle 计时器
+// - 每收一个 chunk/reasoning 重置 idle 计时器
 // - 45s 无任何 delta → 超时（retriable）；300s 硬上限 → 超时（retriable）
+// - 页面超时同时下发 aiChatStop，让 SW 中止在途流，不再白烧 token
 ```
 
-background 侧 `AI_CHAT_TIMEOUT_MS`（`background/background.js:566`）同样改为滑动空闲，
-或直接移除 SW 侧总超时，改由页面侧统一控制 + SW keepalive 兜底。
-
-### T0-2 SW Keepalive (🔲)
+### T0-2 SW Keepalive (✅)
 
 | 文件 | 位置 | 改动 |
 |------|------|------|
-| `ai/ai.js` sendRound 尾部 | 启动定时调度 | 请求在途时每 20s `postMessage({action:'aiChatPing', requestId})` |
-| `background/background.js` | handleAiChatMessage 新增分支 | 收到 ping 回 pong（port 消息重置 30s 空闲计时器）；断开时页面侧收到 `onDisconnect` |
+| `ai/ai.js` | `startKeepAlive`/`stopKeepAlive` | pending 非空时每 20s（`KEEPALIVE_INTERVAL_MS`）对每个在途 requestId 发 `{action:'aiChatPing', requestId}` |
+| `background/background.js` | `handleAiChatMessage` | 新增 `aiChatPing` 分支：回 `{type:'AI_CHAT_PONG'}` 并 `entry.touch()` 重置 SW 空闲计时 |
 
-只需 2 个 postMessage 交换 + 页面侧 20s `setInterval`，消灭「请求在途 SW 死亡」场景。
+port 断开时页面侧收 `onDisconnect` → 走 T0-3；实际只需 port 消息往返即吊住 SW。
 
-### T0-3 断连即刻失败 (🔲)
+### T0-3 断连即刻失败 (✅)
 
 | 文件 | 位置 | 改动 |
 |------|------|------|
-| `ai/ai.js:112` | `port.onDisconnect` | 遍历 `pending` Map，所有在途请求以 `{retriable:true, error:'后台已重启，请求中断'}` 结束 |
+| `ai/ai.js` | `port.onDisconnect` | `failAllPending('后台已重启，请求中断')` 遍历 pending 以 `{retriable:true}` 收尾（保留已流式到的正文），并 `stopKeepAlive()` |
+| `ai/ai.js` | `sendRound` 开头 | 新增 `ensurePortReady()`：port 不可用时最多等 2s，避免重连窗口（500ms）内的重试直接撞空 port |
 
 ```js
 state.port.onDisconnect.addListener(() => {
-    if (pending.size > 0) {
-        for (const [id, p] of pending) { clearTimeout(p.timeoutId); p.resolve({ ok:false, error:'后台已重启，请求中断', retriable:true }); }
-        pending.clear();
-    }
+    state.portAlive = false;
+    stopKeepAlive();
+    record('error', { text: '与后台 service worker 连接断开，500ms 后重连', 在途请求数: pending.size });
+    failAllPending('后台已重启，请求中断');   // 页面不再空等超时
     setTimeout(connectPort, 500);
 });
 ```
 
-### T0-4 解析 reasoning_content (🔲)
+### T0-4 解析 reasoning_content (✅)
 
 | 文件 | 位置 | 改动 |
 |------|------|------|
-| `ai/ai_backend.js:127` | `choice.delta.content` 旁 | 加 `choice.delta.reasoning_content` 分支 |
-| `ai/ai.js` | `appendToCurrentAssistant` | 收到 reasoning 时显示折叠灰字「思考中…」并**重置空闲超时** |
-| 供应商设置 | 设置面板 | 新增「关闭思考」复选框，注入 `enable_thinking:false` 或 `chat_template_kwargs` |
+| `ai/ai_backend.js` | `handleLine` / `handleNonStream` | 新增 `choice.delta.reasoning_content`（兼容 `reasoning`）→ `emit({type:'reasoning'})` |
+| `background/background.js` | 事件转发 | `reasoning` → `AI_CHAT_REASONING`，并重置 SW 空闲计时 |
+| `ai/ai.js` | `appendToCurrentThinking` / `finishThinking` | 折叠灰字块「思考中… → 思考过程（N 字）」，同时重置空闲超时；正文到达自动收起 |
+| 供应商设置 | 「关闭思考」复选框 | `provider.disableThinking`（存 storage.sync `aiProviders`）→ 请求体注入 `enable_thinking:false` + `chat_template_kwargs` |
 
-关键效果：
-1. 用户在 10-30s 内看到「思考中…」（不是空转），知道模型在工作。
+关键效果（已达成）：
+1. 用户在几秒内看到「思考中…」与实时思考文本（不是空转）。
 2. reasoning delta 重置空闲超时，不会因为无 content 而杀死请求。
+3. DEBUG 日志新增 `reasoning` 事件与 `思考字符` 字段，下次同类事故能直接看出卡在哪个阶段。
 
 ---
 
@@ -81,7 +86,7 @@ state.port.onDisconnect.addListener(() => {
 
 > 目标：从数据结构层面减少每轮通信量，让模型可在 1-2 轮内完成同类需求。
 
-### T1-1 批量摘要取数 `read_stocks_kline` (🔲)
+### T1-1 批量摘要取数 `read_stocks_kline` (✅)
 
 **新工具**，取代逐只调用 `read_stock_kline`：
 
@@ -120,54 +125,65 @@ parameters:
 10 只 ≈ **2.5k 字符**（现在是 29k），且「急跌缩量 / 回踩低位 / 冲高回落」这类判据本来
 就是代码可算的，不需要让模型看 180 行 OHLCV 再心算。
 
-**实现要点：**
-- 并发拉取（`Promise.all(xiaoshiDailyKline)` + parquet 缓存读取），总耗时 ≈ 6s 而不是串行 35s
-- `isEtfCode` 分桶统一处理，无单独 ETF 逻辑
+**实现要点（已落地，`ai/core/ai_tools.js`）：**
+- `readStocksFromParquet(rootHandle, codes, days)`：一年文件只解析一次，用 hyparquet 的
+  `filter: { code: { $in: [...] } }` 一次服务多只代码，磁盘 IO 从 N×年数 压成 年数
+- 接口补齐走 `mapWithLimit(..., API_CONCURRENCY=4, ...)`，串行 35s → 并发 4 路
+- `loadKlineRows` / `fillKlineFromApi` 与 `read_stock_kline`、`read_stocks_kline` 共用同一条
+  「parquet → 小石 → adata」回退链，`isEtfCode` 只影响 adata 接口选择，无单独 ETF 分支
+- 指标由 `klineSummary` 算：`ma5/ma10/ma20`、`dd_20d`、`vol_ratio_5d`、`down_streak`、
+  `shrink_days`、`amplitude_pct`、`fade_pct`（冲高回落/上影幅度）、`turnover_pct`、`closes`、
+  `bars`、`source`；`compactObj` 去空字段，实测单只 ≈ 320 字（12 只 ≈ 3.8k）
 - 旧 `read_stock_kline` 保留不变，已有 workflow/memory 不崩
 
-### T1-2 逐轮工具结果驱逐 (🔲)
+### T1-2 逐轮工具结果驱逐 (✅)
 
 | 位置 | 改动 |
 |------|------|
-| `ai/ai.js` `runAgentLoop` | 每轮工具结果返回后、进入下一轮前，检查 `apiMessages` 总字符数 < `MAX_CONTEXT_CHARS`（默认 ~24k） |
-| 同上 | 超预算时将最旧 1-2 轮 `role:'tool'` 消息替换为存根：`{role:'tool', tool_call_id:..., content: '«read_stock_kline:600206有研新材 已执行（摘要已归档）》'}` |
+| `ai/ai.js` `runAgentLoop` | 每轮拼 `requestMessages` 前调 `evictToolResults(apiMessages)`，用 `msgChars` 求和与 `MAX_CONTEXT_CHARS`（24k）比较 |
+| `ai/ai.js` `evictToolResults` | 超预算时按「最旧优先」把 `role:'tool'` 消息换成存根，一回到预算内立即停手（最少驱逐），并写 DEBUG `evict` 事件 + 一条系统提示 |
 
-注意保留 `tool_call_id` 配对合法性（assistant 的 `tool_calls` 必须对应 tool 消息）。
+存根带工具名与原文字数，告知模型可重取：
 
-### T1-3 单工具结果分级上限 (🔲)
+```json
+{ "role": "tool", "tool_call_id": "c1", "content": "«read_stock_kline: 早先的 8000 字结果已驱逐归档（需重新查看请再次调用该工具）»" }
+```
 
-| 常量 | 位置 | 当前值 | 改后 |
-|------|------|--------|------|
-| `MAX_TOOL_RESULT_CHARS` | `ai_state.js:15` | 20000（全局统一） | 改为按工具配置 |
-| K 线 | — | 20000 | **2000**（摘要） / **6000**（detail） |
-| `read_file` | — | 20000 | 8000 |
-| 数据库/script | — | 20000 | 10000 |
-| 单轮总预算 | — | 不限 | **16000**，超限自动驱逐旧轮 |
+已保留 `tool_call_id` 配对合法性：只改 `content` 并打 `m.evicted` 标记，不动 `role`/`tool_call_id`。
+与计划的一点差异：**末尾连续的 tool 消息（最近一轮结果）绝不驱逐**，否则模型手上正在用的数据会
+丢；若只剩最近一轮仍超预算就不再处理，只记一条 `evict` 诊断日志供调上限。
 
-### T1-4 系统提示去重 (🔲)
+### T1-3 单工具结果分级上限 (✅)
 
-| 文件 | 位置 | 问题 |
+| 常量 | 位置 | 改后（已落地） |
+|------|------|--------------|
+| `MAX_TOOL_RESULT_CHARS` | `ai_state.js` | 保留为硬顶 20000，实际不再直接使用 |
+| `TOOL_RESULT_CHARS` | `ai_state.js` | read_stock_kline 6000 / read_stocks_kline 5000 / read_file 8000 / read_parquet 8000 / query_local_database 10000 / run_workspace_process 10000 / get_workspace_context 8000 |
+| `DEFAULT_TOOL_RESULT_CHARS` | `ai_state.js` | 12000（未列入的工具） |
+| `MAX_ROUND_TOOL_CHARS` | `ai_state.js` | 16000（单轮总预算，逐条压缩后续工具上限，每条至少留 600 字） |
+
+超限截断时会告知模型原文字数与「缩小范围/传 limit 重取」的出路，不再只写一句「已截断」。
+
+### T1-4 系统提示去重 (✅)
+
+| 文件 | 问题 | 做法 |
 |------|------|------|
-| `ai/core/ai_tools.js` | `buildSystemPrompt` + TOOL_CATALOG | bridge 规则 1.3k 在 `TOOL_CATALOG` + `bridgeGuide` + `bridgeRules` 里出现**三份** |
+| `ai/core/ai_tools.js` | bridge 规则 1.3k 在目录、guide、rules 里出现**三份** | 新增 `TOOL_GROUP_SUMMARY`，`TOOL_CATALOG` 改为每组一行摘要；详细规则只由 `load_tool_group` 返回的 `rule` 给出 |
+| 同上 | `bridgeGuide` / `bridgeRules` 两大段重复叙述 | 合并为一句 `[桥接硬约束]`，只保留不能交给按需加载的安全红线（禁止自行启动 flit_bridge、凭据只写 config.json、只写 flit/） |
 
-方案：目录每组只留一行摘要（如 "bridge: 本地脚本/数据库查询"），详细规则由 `load_tool_group`
-的返回字段 `rule` 给（本来已经返回了）。
+系统提示由约 3.5k 字符降到约 0.9k（未启用桥接时更少）。
 
-### T1-5 并行工具执行 (✅ 已部分实现 | 🔲 get_portfolio_quotes)
+### T1-5 并行工具执行 (✅ | 🔲 其余工具暂不动)
 
 `get_portfolio_quotes` 已改为批量接口（1 次请求代替 N 次），见下文「已交付修改」。
 
 其他工具的并行化：`executeToolCalls`（`ai.js:310`）仍为串行 `await`，
 但经过 T1-1 批量化后，单轮工具调用数会从 4-6 降到 1-2，现有串行不再成为瓶颈。
 
-### T1-6 取数纪律 (🔲)
+### T1-6 取数纪律 (✅)
 
-在系统提示末尾加一条：
-
-```
-- 多只股票必须一次批量取数（read_stocks_kline），禁止逐只 query
-- 最多 2 轮数据收集即给结论，超过 3 轮会触发结果驱逐
-```
+已落到 `buildSystemPrompt` 的 `[取数纪律]` 一段：日线走 read_stocks_kline、实时走
+get_portfolio_quotes、最多 2 轮取数即给结论、结果被截断/驱逐时不反复重试同一查询。
 
 ---
 
@@ -210,6 +226,24 @@ parameters:
 
 ## 五、已交付修改
 
+### ✅ T0 止血四项 + T1 瘦身五项（2026-09-02）
+
+| 项 | 主要文件 |
+|----|----------|
+| T0-1 滑动空闲超时 | `ai/core/ai_state.js`、`ai/ai.js`、`background/background.js` |
+| T0-2 SW keepalive（aiChatPing / AI_CHAT_PONG） | `ai/ai.js`、`background/background.js` |
+| T0-3 断连即刻失败 + `ensurePortReady` | `ai/ai.js` |
+| T0-4 reasoning_content + 思考折叠块 + 「关闭思考」开关 | `ai/ai_backend.js`、`background/background.js`、`ai/ai.js`、`ai/ai.css`、`ai/ai.html`、`ai/core/ai_settings.js` |
+| T1-1 `read_stocks_kline` 批量摘要 | `ai/core/ai_tools.js`、`ai/core/ai_state.js` |
+| T1-2 逐轮工具结果驱逐 | `ai/ai.js` |
+| T1-3 单工具结果分级上限 + 单轮预算 | `ai/core/ai_state.js`、`ai/ai.js` |
+| T1-4 系统提示去重 | `ai/core/ai_tools.js` |
+| T1-6 取数纪律 | `ai/core/ai_tools.js` |
+
+验证：`node --input-type=module --check` 全部通过；`klineSummary` / `mapWithLimit` /
+`evictToolResults` 纯逻辑跑过 25 项断言（指标数值、tool_call_id 配对、并发上限、退化输入）。
+端到端（parquet 命中、思考流展示、断连恢复）需在 Chrome 扩展内手动验证。
+
 ### ✅ 小石 API Key 修复（2026-09-01）
 
 **文件：** `ai/stock/xiaoshi_stock_kline.js`
@@ -240,25 +274,27 @@ Key 来源优先级：调用方传入 > 全局设置 > 内置兜底
 
 ## 六、实施路径
 
-### 第一优先级（T0, 70% 断连问题）
+### 第一优先级（T0, 70% 断连问题）—— ✅ 已完成（2026-09-02）
 
-| 项 | 估时 | 回归风险 |
-|----|------|----------|
-| T0-3 断连即刻失败 | 15 分钟 | 低（只在 onDisconnect 加清理）|
-| T0-2 SW Keepalive | 20 分钟 | 低（仅请求在途时发 ping）|
-| T0-1 滑动空闲超时 | 20 分钟 | 中（改常量 + reset 逻辑）|
-| T0-4 reasoning_content | 20 分钟 | 低（新增字段解析 + 折叠 UI）|
+| 项 | 估时 | 回归风险 | 状态 |
+|----|------|----------|------|
+| T0-3 断连即刻失败 | 15 分钟 | 低（只在 onDisconnect 加清理）| ✅ |
+| T0-2 SW Keepalive | 20 分钟 | 低（仅请求在途时发 ping）| ✅ |
+| T0-1 滑动空闲超时 | 20 分钟 | 中（改常量 + reset 逻辑）| ✅ |
+| T0-4 reasoning_content | 20 分钟 | 低（新增字段解析 + 折叠 UI）| ✅ |
 
-合计：约 75 分钟
+### 第二优先级（T1, 70% 字符量压缩）—— ✅ 已完成（2026-09-02）
 
-### 第二优先级（T1, 70% 字符量压缩）
+| 项 | 估时 | 备注 | 状态 |
+|----|------|------|------|
+| T1-1 `read_stocks_kline` | 90 分钟 | 最复杂，收益最大 | ✅ |
+| T1-3 单工具上限分级 | 20 分钟 | 与 T1-1 配套 | ✅ |
+| T1-4 系统提示去重 | 15 分钟 | 可独立做 | ✅ |
+| T1-2 结果驱逐 | 60 分钟 | 需 T1-1 做完才有效 | ✅ |
+| T1-6 取数纪律 | 5 分钟 | 系统提示一段 | ✅ |
 
-| 项 | 估时 | 备注 |
-|----|------|------|
-| T1-1 `read_stocks_kline` | 90 分钟 | 最复杂，收益最大 |
-| T1-3 单工具上限分级 | 20 分钟 | 与 T1-1 配套 |
-| T1-4 系统提示去重 | 15 分钟 | 可独立做 |
-| T1-2 结果驱逐 | 60 分钟 | 需 T1-1 做完才有效 |
+实测收益：10 只股票日线从 10 次调用 / 29k 字符 → 1 次调用 / ≈ 3.2k 字符；系统提示从
+≈ 3.5k → ≈ 0.9k；单轮工具结果封顶 16k，总体上下文超 24k 自动驱逐旧轮。
 
 ### 第三优先级（T2, 进阶优化）
 

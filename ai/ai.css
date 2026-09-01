@@ -73,6 +73,23 @@ body.ai-body {
     background: #f1f3f5;
 }
 
+/* DEBUG 模式按钮：头部最右侧，仅 DEBUG 开启时显示 */
+.debug-info-btn {
+    flex-shrink: 0;
+    margin-left: auto;
+    color: #d9480f;
+    border-color: #f0b9a4;
+}
+
+.debug-info-btn:hover {
+    background: #fff3ee;
+}
+
+.debug-info-btn:disabled {
+    opacity: .6;
+    cursor: default;
+}
+
 /* ---------------- 目录授权状态条 ---------------- */
 .dir-status-bar {
     display: flex;

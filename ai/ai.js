@@ -13,6 +13,9 @@
  *   ai_tools.js    TOOL_DEFS / TOOL_GROUPS / TOOL_GROUP_DEF / TOOL_GROUP_RULES / TOOL_CATALOG
  *                  toolExecutors / getLoadedToolDefs / buildSystemPrompt / loadMemory / todayStr
  *   ai_settings.js 供应商、工作目录、Bridge 设置的加载与面板渲染，bindProviderEvents 等 bind*Events
+ *   ai_debug.js    DEBUG 模式（存储键 aiDebugMode/aiDebugLogs）：会话全过程记录与「Debug信息」按钮一键复制
+ *                  记录点：appendMessage(user/assistant/system/error)、commitAssistant、executeToolCalls、
+ *                  sendRound/logResponse、会话生命周期；renderHistory 等回放靠 withDebugMuted 抑制
  *   fsa.js         文件系统访问：readyRoot / writeUpload / getBridgeHandle / workspacePermission
  *
  * 【与 background 的消息协议】long-lived port，name = 'ai-chat-connection'
@@ -64,6 +67,8 @@
  *   5. 含图片的请求会临时改用视觉供应商（selectRequestProvider），不改动用户设置的活动供应商。
  *   6. 快捷意图（要点/事件/股票）用正则本地解析后直接调 toolExecutors，不经模型；改提示文案要同步改正则。
  *   7. 无构建、无测试：改完在 Chrome 扩展内手动验证（AI 窗口为独立 window，需关闭后重开）。
+ *   8. DEBUG 模式下新增会落日志的渲染入口时，若属于「回放」（如 renderHistory）必须包 withDebugMuted，
+ *      否则历史消息会被重复记录；流式回复的空气泡由 commitAssistant 记正文，不要在 appendToCurrentAssistant 里记。
  */
 
 import {
@@ -74,7 +79,7 @@ import {
     messagesEl, scrollDownBtn, chatInput, sendBtn, stopBtn,
     uploadBtn, uploadInput, pastePreviews, intentBubblesEl, intentBubbleEls,
     sessionSelect, newSessionBtn, renameSessionBtn, deleteSessionBtn, clearChatBtn,
-    openAiSettingsBtn, closeAiSettingsBtn, dirStatusBar,
+    openAiSettingsBtn, closeAiSettingsBtn, dirStatusBar, aiDebugModeInput,
 } from './core/ai_state.js';
 import {
     TOOL_DEFS, TOOL_GROUPS, TOOL_GROUP_DEF, TOOL_GROUP_RULES, TOOL_CATALOG,
@@ -90,6 +95,10 @@ import {
     bindBridgeSetupEvents,
 } from './core/ai_settings.js';
 import { readyRoot, writeUpload, getBridgeHandle, workspacePermission } from './core/fsa.js';
+import {
+    loadDebugFlag, applyRemoteDebugFlag, isDebugOn, beginDebugSession, dropDebugSession,
+    record, recordMessage, withDebugMuted, bindDebugButton, bindDebugGlobals,
+} from './core/ai_debug.js';
 
 // ============== port 连接 ==============
 
@@ -100,7 +109,10 @@ function connectPort() {
         return;
     }
     state.port.onMessage.addListener(handlePortMessage);
-    state.port.onDisconnect.addListener(() => setTimeout(connectPort, 500));
+    state.port.onDisconnect.addListener(() => {
+        record('error', { text: '与后台 service worker 连接断开，500ms 后重连' });
+        setTimeout(connectPort, 500);
+    });
 }
 
 const pending = new Map();
@@ -140,6 +152,14 @@ function sendRound(apiMessages, tools, { stream = true, provider = activeProvide
             onReady: () => showWaitingAssistant(),
             onChunk: (delta) => { content += delta; appendToCurrentAssistant(delta); },
             resolve: (r) => resolve({ ...r, content }),
+        });
+        record('request', {
+            requestId,
+            stream,
+            模型: provider.model || '',
+            baseUrl: provider.baseUrl || '',
+            消息数: (apiMessages || []).length,
+            工具数: (tools || []).length,
         });
         try {
             state.port.postMessage({
@@ -187,6 +207,18 @@ function selectRequestProvider(messages) {
 
 // ============== function-calling 循环 ==============
 
+/** DEBUG：记录一次模型响应的元信息（正文另由 commitAssistant / appendMessage 记录） */
+function logResponse(result) {
+    record('response', {
+        ok: result.ok === true,
+        结束原因: result.finish_reason || '',
+        工具调用数: (result.tool_calls || []).length,
+        文本字符: (result.content || '').length,
+        错误: result.error || '',
+        中断: result.aborted === true,
+    });
+}
+
 async function runAgentLoop(initialMessages, initialToolGroups = []) {
     const apiMessages = initialMessages || state.chatMessages.map(m => ({ role: m.role, content: m.content }));
     state.activeToolGroups = new Set(initialToolGroups);
@@ -204,6 +236,7 @@ async function runAgentLoop(initialMessages, initialToolGroups = []) {
         const tools = [TOOL_GROUP_DEF, ...getLoadedToolDefs()];
         let result = await sendRound(requestMessages, tools, { stream: true, provider: requestProvider });
         removeWaitingAssistant();
+        logResponse(result);
         if (!result.ok) {
             if (result.aborted) {
                 appendMessage('system', '已停止');
@@ -213,6 +246,7 @@ async function runAgentLoop(initialMessages, initialToolGroups = []) {
             if (result.retriable) {
                 appendMessage('system', '流式响应中断，改用非流式重试…');
                 result = await sendRound(requestMessages, tools, { stream: false, provider: requestProvider });
+                logResponse(result);
             }
             if (!result.ok) {
                 const errorEl = appendMessage('error', result.error || '请求失败');
@@ -263,6 +297,7 @@ async function runAgentLoop(initialMessages, initialToolGroups = []) {
 
 function commitAssistant(content) {
     if (!content) return null;
+    record('assistant', { text: content });
     const entry = state.currentAssistantEntry || { role: 'assistant', content: '', ts: Date.now(), uid: genUid('m') };
     entry.content = content;
     state.chatMessages.push(entry);
@@ -276,15 +311,21 @@ async function executeToolCalls(toolCalls) {
     const toolMessages = [];
     for (const call of toolCalls) {
         let args = {};
-        try { args = call.arguments ? JSON.parse(call.arguments) : {}; } catch { args = {}; }
+        let parseError = '';
+        try { args = call.arguments ? JSON.parse(call.arguments) : {}; } catch (err) { parseError = err.message; args = {}; }
+        record('tool_call', { name: call.name, callId: call.id, args: call.arguments || '{}', 参数解析失败: parseError });
         let result;
+        let failed = false;
         const exec = toolExecutors[call.name];
+        const startedAt = Date.now();
         if (!exec) {
+            failed = true;
             result = '未知工具 ' + call.name;
         } else {
             try {
                 result = await exec(args);
             } catch (err) {
+                failed = true;
                 result = '工具执行失败：' + err.message;
             }
         }
@@ -292,6 +333,14 @@ async function executeToolCalls(toolCalls) {
         if (resultText.length > MAX_TOOL_RESULT_CHARS) {
             resultText = resultText.slice(0, MAX_TOOL_RESULT_CHARS) + '\n（已截断）';
         }
+        record('tool_result', {
+            name: call.name,
+            callId: call.id,
+            耗时ms: Date.now() - startedAt,
+            失败: failed,
+            返回字符: resultText.length,
+            result: resultText,
+        });
         renderToolEntry(call.name, call.arguments || '{}', resultText);
         toolMessages.push({ role: 'tool', tool_call_id: call.id, content: resultText });
     }
@@ -497,6 +546,7 @@ function renderVolumeChart(lines) {
 }
 
 function appendMessage(role, content, entry) {
+    recordMessage(role, content);
     const el = document.createElement('div');
     el.className = 'msg msg-' + role;
     if (Array.isArray(content)) {
@@ -605,14 +655,17 @@ function appendActionButton(label, onClick) {
 }
 
 function renderHistory() {
-    messagesEl.innerHTML = '';
-    state.chatMessages.forEach(m => { if (!m.uid) m.uid = genUid('m'); });
-    for (const m of state.chatMessages) {
-        appendMessage(m.role === 'user' ? 'user' : 'assistant', m.content || '', m);
-    }
-    state.followStream = true;
-    scrollDownBtn.hidden = true;
-    updateIntentBubbles();
+    // 回放历史消息不写 DEBUG 日志（这些事件当时已记录过）
+    withDebugMuted(() => {
+        messagesEl.innerHTML = '';
+        state.chatMessages.forEach(m => { if (!m.uid) m.uid = genUid('m'); });
+        for (const m of state.chatMessages) {
+            appendMessage(m.role === 'user' ? 'user' : 'assistant', m.content || '', m);
+        }
+        state.followStream = true;
+        scrollDownBtn.hidden = true;
+        updateIntentBubbles();
+    });
 }
 
 // ============== 会话管理 ==============
@@ -703,7 +756,7 @@ function deferAutoTitleForVisionInput(content) {
     else if (!latestUserMessageHasVisionInput([{ role: 'user', content }])) state.sessions[state.currentChatId].deferAutoTitle = false;
 }
 
-async function switchSession(id) {
+async function switchSession(id, debugReason = 'switch') {
     if (!state.sessions[id] || id === state.currentChatId) return;
     await saveChat();
     state.currentChatId = id;
@@ -712,6 +765,7 @@ async function switchSession(id) {
     renderPastePreviews();
     renderHistory();
     renderSessionSelect();
+    beginDebugSession(id, debugReason);
     chatInput.focus();
 }
 
@@ -719,7 +773,7 @@ async function createSession() {
     const id = newChatId();
     state.sessions[id] = { id, title: '新会话', messages: [], createdAt: Date.now(), updatedAt: Date.now() };
     await persistSessions();
-    await switchSession(id);
+    await switchSession(id, 'new');
 }
 
 async function renameSession() {
@@ -736,7 +790,9 @@ async function deleteSession() {
     const session = state.sessions[state.currentChatId];
     if (!session) return;
     if (!confirm(`删除会话「${session.title || '未命名会话'}」？消息内容将一并删除`)) return;
+    const removedChatId = state.currentChatId;
     delete state.sessions[state.currentChatId];
+    dropDebugSession(removedChatId);
     state.currentChatId = null;
     const ids = sortedSessionIds();
     if (ids.length === 0) {
@@ -748,6 +804,7 @@ async function deleteSession() {
     state.chatMessages = state.sessions[state.currentChatId].messages || [];
     renderHistory();
     renderSessionSelect();
+    beginDebugSession(state.currentChatId, 'open');
 }
 
 async function clearSession() {
@@ -759,6 +816,8 @@ async function clearSession() {
     state.followStream = true;
     scrollDownBtn.hidden = true;
     updateIntentBubbles();
+    dropDebugSession(state.currentChatId);
+    beginDebugSession(state.currentChatId, 'open');
     await saveChat();
 }
 
@@ -925,6 +984,12 @@ async function handleIntentBubble(intent) {
     if (intent === 'keypoint') result = await parseAndCreateKeyPoint(raw);
     else if (intent === 'event') result = await parseAndCreateEvent(raw);
     else if (intent === 'stock') result = await parseAndRecordStockTrade(raw);
+    record('quick_intent', {
+        意图: intentLabel(intent),
+        输入: raw,
+        成功: !!(result && result.ok),
+        回复: (result && result.text) || '',
+    });
     chatInput.value = '';
     state.pendingImages = [];
     renderPastePreviews();
@@ -1099,6 +1164,10 @@ async function retryLast() {
     }
     state.currentAssistantEl = null;
     setGenerating(true);
+    record('retry', {
+        快照消息数: state.lastRequestSnapshot.messages.length,
+        工具组: (state.lastRequestSnapshot.toolGroups || []).join(',') || '无',
+    });
     try {
         await runAgentLoop(
             state.lastRequestSnapshot.messages.slice(1).map(m => ({ ...m })),
@@ -1168,16 +1237,24 @@ function bindEvents() {
     bindProviderEvents();
     bindWorkspaceSetupEvents();
     bindBridgeSetupEvents();
+    bindDebugButton((msg, ok) => appendMessage(ok ? 'system' : 'error', msg));
 }
 
 // ============== 初始化 ==============
 
 async function init() {
     connectPort();
+    bindDebugGlobals();
     await loadProviders();
     await loadBridgeSettings();
+    await loadDebugFlag();
     chrome.storage.onChanged.addListener((changes, area) => {
         if (area !== 'sync') return;
+        if (changes.aiDebugMode) {
+            Promise.resolve(applyRemoteDebugFlag(changes.aiDebugMode.newValue)).then(() => {
+                if (aiDebugModeInput) aiDebugModeInput.checked = isDebugOn();
+            });
+        }
         if (changes.aiProviders || changes.aiActiveProviderId || changes.aiDefaultVisionProviderId) {
             loadProviders().then(() => {
                 renderProviderSelect();
@@ -1200,6 +1277,7 @@ async function init() {
     // We replace it above with a proper implementation
     await loadMemory();
     await ensureChat();
+    beginDebugSession(state.currentChatId, 'init');
     renderHistory();
     renderSessionSelect();
     await refreshDirStatus();

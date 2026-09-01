@@ -33,6 +33,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - 首次启动自动把 stockList 从 sync 迁移到 local（background `ensureMigrated` 幂等，background 是唯一迁移执行者，popup 不自行迁移）；存储的 url 恒为 `new URL().href` 百分号编码形态，显示层统一 `safeDecodeUrl` 解码。
 - popup 列表支持分页（pageSize 存 sync，默认 10）、按当日/导入以来涨跌幅排序、股票列表与垃圾池双视图；数据可经工具栏导入导出 JSON（导入按 URL 合并），导入导出可登记为命名组合（不超过 4 字），页脚首行「持仓组合」标签 + 导入导出图标 + 分页同行、组合卡片独立成行，一键切换组合；非活动组合可经 chip 内 × 删除（活动组合须先切走；初始组合「默认」固定首位、不可删除）。
 - 股票列表通过 DOM 字符串拼接渲染（`renderStock`），编辑/启停按钮在渲染时逐个绑定事件，勿依赖事件委托。
+- AI 助手 DEBUG 模式（优化与排错）：开关在「AI 设置 → 全局设置」复选框，存 sync `aiDebugMode`；记录器 `ai/core/ai_debug.js` 按会话记录用户问题、AI 回复、工具调用方法与传参、工具返回、请求/响应元信息与报错（含 window error / unhandledrejection），存 local `aiDebugLogs`（单会话 300 条、单字段 4000 字符、最多 8 个会话，落库前先读最新存量再合并写回，与数据落地同一套并发约定）。开启后头部目录行最右侧显示「Debug信息」按钮（`debugInfoBtn`，由 `syncDebugBtn` 控制显隐），点击即把当前会话记录以纯文本复制到剪切板（clipboard API 失败降级 `execCommand`）。
 
 ## 编码约定
 

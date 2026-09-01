@@ -7,8 +7,11 @@ import {
     aiProviderNameInput, aiBaseUrlInput, aiApiKeyInput, aiModelInput,
     aiSupportsVisionInput, aiMaxToolIterationsInput,
     aiDefaultVisionProviderSelect, aiSettingsOverlay, closeAiSettingsBtn,
-    dirStatusBar, openAiSettingsBtn, uploadBtn,
+    dirStatusBar, openAiSettingsBtn, uploadBtn, aiDebugModeInput,
 } from './ai_state.js';
+import {
+    isDebugOn, setDebugFlag,
+} from './ai_debug.js';
 import {
     getWorkspaceHandles, pickPrimaryWorkspace, addWorkspaceDir, removeWorkspaceDir,
     workspacePermission, reauthorizeWorkspace,
@@ -113,6 +116,7 @@ export function openSettings() {
     fillProviderInputs();
     renderDefaultVisionProviderSelect();
     aiMaxToolIterationsInput.value = state.maxToolIterations;
+    if (aiDebugModeInput) aiDebugModeInput.checked = isDebugOn();
     aiSettingsOverlay.style.display = 'flex';
 }
 
@@ -173,6 +177,15 @@ export function bindProviderEvents() {
     aiDefaultVisionProviderSelect.addEventListener('change', async () => {
         state.defaultVisionProviderId = aiDefaultVisionProviderSelect.value;
         await persistProviders();
+    });
+    // DEBUG 模式开关（存 storage.sync，头部「Debug信息」按钮随之显隐）
+    aiDebugModeInput?.addEventListener('change', async () => {
+        try {
+            await setDebugFlag(aiDebugModeInput.checked);
+        } catch (err) {
+            console.warn('[thswc:ai] DEBUG 模式切换失败:', err);
+            aiDebugModeInput.checked = isDebugOn();
+        }
     });
     document.getElementById('aiAgentBridge').addEventListener('change', async (event) => {
         const checkbox = event.currentTarget;

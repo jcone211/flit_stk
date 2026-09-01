@@ -16,6 +16,9 @@
         <button type="button" id="deleteSessionBtn" class="ai-text-btn" title="删除当前会话">删除</button>
         <button type="button" id="clearChatBtn" class="ai-text-btn" title="清空当前会话消息">清空</button>
         <button type="button" id="openAiSettingsBtn" class="ai-text-btn" title="设置">设置</button>
+        <!-- DEBUG 模式开启时显示（由 ai/core/ai_debug.js 控制显隐与点击） -->
+        <button type="button" id="debugInfoBtn" class="ai-text-btn debug-info-btn" title="复制本会话全部 DEBUG 记录到剪切板"
+            hidden>Debug信息</button>
     </header>
 
     <!-- 工作目录授权状态条（主目录 + 附加目录；由 ai.js 渲染） -->
@@ -82,6 +85,7 @@
                     <input type="checkbox" id="aiSupportsVision"> 当前模型支持视觉（图片输入）
                 </label>
             </div>
+            <p class="ai-settings-desc">支持任何 OpenAI 兼容 /v1/chat/completions 端点</p>
             <!-- 全局设置分隔线 -->
             <div class="ai-settings-divider">
                 <span class="ai-divider-label">全局设置</span>
@@ -103,7 +107,12 @@
                 </label>
                 <div id="bridgeDirStatus" class="bridge-dir-status"></div>
             </div>
-            <p class="ai-settings-desc">支持任何 OpenAI 兼容 /v1/chat/completions 端点</p>
+            <div class="ai-settings-item">
+                <label for="aiDebugMode">
+                    <input type="checkbox" id="aiDebugMode"> 开启 DEBUG 模式（优化与排错）
+                </label>
+                <p class="ai-settings-desc">开启后记录会话中的全部用户问题、AI 回复、工具调用方法与传参、工具返回与报错信息</p>
+            </div>
         </div>
     </div>
 

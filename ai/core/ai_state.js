@@ -79,6 +79,8 @@ export const aiModelInput = document.getElementById('aiModel');
 export const aiSupportsVisionInput = document.getElementById('aiSupportsVision');
 export const aiMaxToolIterationsInput = document.getElementById('aiMaxToolIterations');
 export const aiDefaultVisionProviderSelect = document.getElementById('aiDefaultVisionProvider');
+export const aiDebugModeInput = document.getElementById('aiDebugMode');
+export const debugInfoBtn = document.getElementById('debugInfoBtn');
 
 // Storage 封装
 export const storageGet = (area, keys) => new Promise(resolve => area.get(keys, resolve));

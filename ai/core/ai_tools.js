@@ -13,8 +13,9 @@ import {
 } from './fsa.js';
 import { parquetMetadataAsync, parquetSchema, parquetReadObjects, toJson } from '../vendor/hyparquet/index.js';
 import { compressors } from '../vendor/hyparquet/compressors.js';
-import { xiaoshiSearchStock, xiaoshiDailyKline, xiaoshiQuote } from '../stock/xiaoshi_stock_kline.js';
+import { xiaoshiSearchStock, xiaoshiDailyKline, xiaoshiQuote, getSettingApiKey as getXiaoshiApiKey } from '../stock/xiaoshi_stock_kline.js';
 import { getMarketDaily as adataGetMarketDaily, getMarketEtfDaily as adataGetMarketEtfDaily } from '../stock/adata_stock_kline.js';
+import { batchQuotes } from '../../js/xiaoshi_realtime_quote.js';
 import { parseCronExpr, nextTradingCronTimes } from '../../shared/cron.js';
 import { bridgeRequest, bridgeHealth } from './bridge_client.js';
 
@@ -642,19 +643,69 @@ export const toolExecutors = {
             list = p.stockList || [];
         }
         if (!list.length) return { total: 0, quotes: [], hint: '该组合为空' };
-        const results = await Promise.allSettled(list.map(s => {
-            if (!s.code) return Promise.resolve({ name: s.name || '(待抓取)', error: '尚未获取到代码' });
-            const suffix = s.prefix || (s.code.startsWith('6') ? 'SH' : 'SZ');
-            const code = s.code + '.' + suffix;
-            return xiaoshiQuote(code, { timeoutMs: 10000 }).then(q => ({
-                name: s.name || q.name,
-                code: s.code, price: q.price, change: q.change, change_pct: q.change_pct,
-                open: q.open, high: q.high, low: q.low, previous_close: q.previous_close,
-                volume: q.volume, amount: q.amount, turnover_pct: q.turnover_pct,
-                is_stale: q.is_stale,
-            })).catch(e => ({ name: s.name || s.code, code: s.code, error: e && e.message || '请求失败' }));
-        }));
-        return { total: list.length, fetched: results.length, quotes: results.map(r => r.status === 'fulfilled' ? r.value : { error: r.reason }) };
+
+        // 改用批量接口（单请求代替 N 次单只调用），按 stock/etf 分桶
+        const apiKey = await getXiaoshiApiKey();
+        if (!apiKey) {
+            return { error: '小石 API Key 未配置，请在扩展「全局设置 → 数据获取方式（小石大数据）」中填写', hint: '也可用 get_stock_quote 单只查询' };
+        }
+
+        const codes = []; // { code, name }
+        const noCode = [];
+        for (const s of list) {
+            if (!s.code) { noCode.push(s.name || '(待抓取)'); continue; }
+            codes.push({ code: s.code, name: s.name });
+        }
+
+        const stocks = codes.filter(c => !/^(159|51|58)\d{3}$/.test(c.code)).map(c => c.code);
+        const etfs = codes.filter(c => /^(159|51|58)\d{3}$/.test(c.code)).map(c => c.code);
+
+        const allItems = [];
+        const missing = [];
+        if (stocks.length) {
+            try {
+                const r = await batchQuotes(stocks, { apiKey, instrument: 'stock' });
+                allItems.push(...r.items);
+                if (r.missing_codes) missing.push(...r.missing_codes);
+            } catch (e) { dbg('batch stock quotes failed', e); }
+        }
+        if (etfs.length) {
+            try {
+                const r = await batchQuotes(etfs, { apiKey, instrument: 'etf' });
+                allItems.push(...r.items);
+                if (r.missing_codes) missing.push(...r.missing_codes);
+            } catch (e) { dbg('batch etf quotes failed', e); }
+        }
+
+        const codeMap = new Map(allItems.map(item => [item.code, item]));
+        const quotes = codes.map(c => {
+            const hit = codeMap.get(c.code);
+            if (hit) return {
+                name: c.name || hit.name,
+                code: hit.code,
+                price: hit.price,
+                change: hit.change,
+                change_pct: hit.change_pct,
+                open: hit.open,
+                high: hit.high,
+                low: hit.low,
+                previous_close: hit.last_close,
+                volume: hit.volume,
+                amount: hit.amount,
+                turnover_pct: hit.turnover_pct,
+                is_stale: false,
+            };
+            return { name: c.name, code: c.code, error: '未获取到行情' };
+        });
+        for (const n of noCode) {
+            quotes.push({ name: n, error: '尚未获取到代码' });
+        }
+        return {
+            total: list.length,
+            fetched: quotes.filter(q => !q.error).length,
+            quotes,
+            missing_codes: missing.length ? missing : undefined,
+        };
     },
     async write_file(args) {
         if (!args || !args.path) return { ok: false, error: 'path 必填' };

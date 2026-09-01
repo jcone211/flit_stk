@@ -51,7 +51,7 @@ let eventFilterKeyPoint = ''; // 事件按要点筛选值，'' 表示全部
 let autoResizeWindow = true; // 切换组合时专属窗口自动伸缩
 let defaultPortfolio = '持仓'; // 打开插件时默认显示的组合，默认「持仓」
 let hideKeyPoints = false; // 隐藏首页「要点管理」图标
-let enableTrash = true; // 启用垃圾池功能（默认开启）
+let enableTrash = false; // 启用垃圾池功能（默认关闭）
 let refreshOnOpen = true; // 打开插件时全部更新（默认开启，不弹窗）
 let enableQuickImport = true; // 启用快速打开一键导入（默认开启）
 let quickImportInStockWindow = true; // 一键导入在最小化专属窗口打开（默认开启）；关闭则统一普通页面打开
@@ -597,7 +597,7 @@ async function handleImport(file) {
     await new Promise(r => chrome.storage.sync.get(['autoResizeWindow', 'hideKeyPoints', 'enableTrash', 'refreshOnOpen', 'enableQuickImport', 'quickImportInStockWindow', 'enableAi', 'keepMonitoringOnClose', 'keepRefreshOnClose', 'defaultPortfolio', 'pageSize', 'selectorName', 'dataSource'], (result) => {
         autoResizeWindow = result.autoResizeWindow !== false;
         hideKeyPoints = !!result.hideKeyPoints;
-        enableTrash = result.enableTrash !== false;
+        enableTrash = result.enableTrash === true;
         refreshOnOpen = result.refreshOnOpen !== false;
         enableQuickImport = result.enableQuickImport !== false;
         quickImportInStockWindow = result.quickImportInStockWindow !== false;
@@ -683,7 +683,7 @@ initState().then(() => {
     chrome.storage.sync.get(['defaultPortfolio', 'autoResizeWindow', 'hideKeyPoints', 'enableTrash', 'refreshOnOpen', 'enableQuickImport', 'quickImportInStockWindow', 'enableAi', 'keepMonitoringOnClose', 'keepRefreshOnClose'], (result) => {
         autoResizeWindow = result.autoResizeWindow !== false;
         hideKeyPoints = !!result.hideKeyPoints;
-        enableTrash = result.enableTrash !== false; // 默认开启
+        enableTrash = result.enableTrash === true; // 默认关闭
         refreshOnOpen = result.refreshOnOpen !== false; // 默认开启
         enableQuickImport = result.enableQuickImport !== false; // 默认开启
         quickImportInStockWindow = result.quickImportInStockWindow !== false; // 默认开启

@@ -59,7 +59,7 @@ flit_stk 是一个轻量浏览器扩展，定时刷新股票页面，实时抓�
 
 > **⚠️ 注意：** 要解锁插件的**全部** AI 能力，需要把工作目录指定为你的 **AI 助手主目录**，并在该主目录中运行其他 Agent 工具（如 Claude Code / Cursor 等）以读取其配置与技能。
 
-- **指定主目录**：点击 AI 窗口顶部「选择目录」，授权你的 Agent 主工作目录（如 `D:\sundry\7-ai\agents\stock-assistant`），AI 即可读取该目录下的 `CLAUDE.md`、`.claude/`、`.claude/skills/` 等文件
+- **指定主目录**：点击 AI 窗口顶部「选择目录」，授权你的 Agent 主工作目录（如 `D:\ai\agents\stock-assistant`），AI 即可读取该目录下的 `CLAUDE.md`、`.claude/`、`.claude/skills/` 等文件
 - **在主目录运行其他 Agent 工具**：在授权的主目录中用其他 Agent 工具运行任务，让该目录积累你的偏好、技能与数据；插件 AI 会自动感知并使用
 - **安装 xiaoshi skill**：参考 **[https://www.shizixi.com/user](https://www.shizixi.com/user)** 安装小石量化 skill 到主目录的 `.claude/skills/` 下。安装后：
   - 拉取股票 K 线 / 实时行情：插件 AI 直接调用内置的 `read_stock_kline` / `get_stock_quote` 工具（优先本地 parquet 缓存，缺最近交易日时依次用小石 API、东方财富 adata 兜底），无需手工拼接接口

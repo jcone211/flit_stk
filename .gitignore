@@ -7,7 +7,9 @@
 .cody/
 opencode.json
 
-# 密钥和凭证
+# flit_bridge 本地运行配置
+flit_bridge/server.log
+.ai-workspace-path
 *.pem
 *.key
 credentials.json

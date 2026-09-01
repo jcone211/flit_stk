@@ -1,0 +1,8 @@
+{
+    "watchDir": "D:\\codes\\ai\\flit_stk\\flit_bridge",
+    "host": "127.0.0.1",
+    "port": 17321,
+    "protocolVersion": 1,
+    "maxBodyBytes": 1048576,
+    "maxOutputChars": 50000
+}

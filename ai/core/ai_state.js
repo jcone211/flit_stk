@@ -12,7 +12,24 @@ export const DEFAULT_MAX_TOOL_ITERATIONS = 18;
 export const MAX_MESSAGES = 100;
 export const MAX_MESSAGE_CHARS = 10000;
 export const MAX_MEMORY_ITEMS = 50;
+// 工具结果上限：全局硬顶 + 按工具分级（摘要类工具不需要 20k）
 export const MAX_TOOL_RESULT_CHARS = 20000;
+// 单工具返回字符上限（未列入的工具用 DEFAULT_TOOL_RESULT_CHARS）；K 线类只回摘要，不需要给模型看 180 行 OHLCV
+export const DEFAULT_TOOL_RESULT_CHARS = 12000;
+export const TOOL_RESULT_CHARS = {
+    read_stock_kline: 6000,
+    read_stocks_kline: 5000,
+    read_file: 8000,
+    read_parquet: 8000,
+    query_local_database: 10000,
+    run_workspace_process: 10000,
+    get_workspace_context: 8000,
+};
+// 单轮全部工具结果总预算（超限后后续工具只留存根）
+export const MAX_ROUND_TOOL_CHARS = 16000;
+// 送入模型的上下文字符预算（超限逐轮驱逐旧 tool 结果，见 ai.js evictToolResults：
+// 仅驱逐「最近一轮以外」的旧结果，驱逐到预算内即停）
+export const MAX_CONTEXT_CHARS = 24000;
 // 单轮 LLM 请求超时：滑动空闲 + 硬上限双档。
 // 思考型模型可能长时间只输出 reasoning_content（无正文 delta），固定总超时会误杀，
 // 故每收到一个 delta（正文或思考）就重置空闲计时；空闲满 45s 判无响应，300s 为硬上限兜底。
@@ -104,6 +121,11 @@ export const storageSet = (area, obj) => new Promise(resolve => area.set(obj, ()
 // 生成唯一 id
 export function genUid(prefix) {
     return prefix + '_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+}
+
+// 单工具结果字符上限（T1-3 分级）
+export function toolResultLimitChars(name) {
+    return TOOL_RESULT_CHARS[name] || DEFAULT_TOOL_RESULT_CHARS;
 }
 
 // 列表结果精简 + 截断

@@ -1,4 +1,6 @@
-// ai_tools.js —— 工具定义、工具组、执行器、K 线辅助、要点/事件、长期记忆
+// ai_tools.js —— 工具定义、工具组（一行摘要目录）、执行器、K 线取数与批量摘要、要点/事件、长期记忆
+// 取数约定：多只股票一律走批量工具（read_stocks_kline / get_portfolio_quotes）；
+// K 线默认只回「派生指标摘要」（klineSummary），detail=true 才带原始 OHLCV 行。
 
 import {
     state, dbg, getDateTime,
@@ -43,6 +45,7 @@ export const TOOL_DEFS = [
     { type: 'function', function: { name: 'read_file', description: '读取工作目录中的文本文件内容，支持 Markdown、JSON、JavaScript、CSS、TXT、CSV 等文本文件；路径相对当前工作区；内容过长时会截断', parameters: { type: 'object', properties: { path: { type: 'string' }, root: { type: 'string' } }, required: ['path'] } } },
     { type: 'function', function: { name: 'read_parquet', description: '读取工作目录中的 Parquet 数据文件，返回列名、总行数和限定数量的行。适合查询股票日线等 parquet 数据；path 必须是相对授权工作目录的路径，root 缺省为主目录。默认最多返回 100 行，可用 columns 选择列。', parameters: { type: 'object', properties: { path: { type: 'string', description: '相对工作目录的 .parquet 文件路径' }, root: { type: 'string', description: '工作目录名，缺省为主目录' }, columns: { type: 'array', items: { type: 'string' }, description: '要读取的列名；缺省读取全部列' }, row_start: { type: 'integer', minimum: 0, description: '起始行，缺省 0' }, limit: { type: 'integer', minimum: 1, maximum: 500, description: '最多返回行数，缺省 100，最大 500' } }, required: ['path'] } } },
     { type: 'function', function: { name: 'read_stock_kline', description: '获取股票近 N 天日线 K 线（开/高/低/收/成交量/成交额/涨跌幅）。优先读取工作目录 parquet 缓存（data/a_share_daily/qfq/data_*.parquet，小石量化数据）；当缓存缺少最近交易日数据时自动调用小石量化 API 补齐。支持按股票名称或代码。', parameters: { type: 'object', properties: { name: { type: 'string', description: '股票名称，如「德明利」；与 code 二选一' }, code: { type: 'string', description: '股票代码：6 位数字（如 001309）或带市场后缀（如 001309.SZ），不要使用 SH:600519 等冒号前缀形式；与 name 二选一' }, days: { type: 'integer', minimum: 1, maximum: 60, description: '近 N 个交易日，缺省 30' }, root: { type: 'string', description: '工作目录名，缺省为主目录（parquet 数据目录的根，如含 data/a_share_daily 的目录）' } }, required: [] } } },
+    { type: 'function', function: { name: 'read_stocks_kline', description: '批量获取多只股票近 N 个交易日的日线「派生指标摘要」（收盘/涨跌幅/MA5・10・20/距 20 日高点回撤/量比/连续下跌天数/缩量天数/振幅/换手/近 5 日收盘），一次调用代替逐只 read_stock_kline；多只股票必须优先用本工具。detail=true 才附带原始 OHLCV 行。', parameters: { type: 'object', properties: { names: { type: 'array', items: { type: 'string' }, description: '股票名称数组，最多 12 只' }, codes: { type: 'array', items: { type: 'string' }, description: '股票代码数组（6 位或带 .SZ/.SH 后缀），可与 names 混用' }, days: { type: 'integer', minimum: 1, maximum: 60, description: '近 N 个交易日，缺省 18' }, detail: { type: 'boolean', description: 'true 时返回原始 K 线行，缺省 false 只返回摘要' }, max_rows: { type: 'integer', minimum: 1, maximum: 18, description: 'detail=true 时每只最多返回行数，缺省 5' }, root: { type: 'string', description: '工作目录名，缺省为主目录' } }, required: [] } } },
     { type: 'function', function: { name: 'get_stock_quote', description: '获取股票实时行情（最新价/涨跌幅/昨收/最高/最低/成交量/成交额/换手率），不经页面直接调用小石实时行情接口。支持按股票名称或代码。', parameters: { type: 'object', properties: { name: { type: 'string', description: '股票名称，如「德明利」；与 code 二选一' }, code: { type: 'string', description: '股票代码：6 位数字（如 001309）或带市场后缀（如 001309.SZ），不要使用 SH:600519 等冒号前缀形式；与 name 二选一' } }, required: [] } } },
     { type: 'function', function: { name: 'get_portfolio_quotes', description: '批量获取指定组合全部股票的实时行情（最新价/涨跌幅/昨收/最高/最低/成交量/成交额/换手率）。一次调用返回所有股票，无需逐只查询', parameters: { type: 'object', properties: { portfolio: { type: 'string', description: '组合名，如「持仓」「观察」；缺省为当前活动组合' } }, required: [] } } },
 
@@ -59,7 +62,7 @@ export const TOOL_DEFS = [
 
 export const TOOL_GROUPS = {
     portfolio: ['get_stock_list', 'get_portfolios', 'switch_portfolio', 'add_stock_to_portfolio', 'move_stock_to_combo', 'get_current_view'],
-    market: ['get_stock_quote', 'get_portfolio_quotes', 'refresh_all', 'read_stock_kline'],
+    market: ['get_stock_quote', 'get_portfolio_quotes', 'refresh_all', 'read_stock_kline', 'read_stocks_kline'],
     events: ['get_key_points', 'create_key_point', 'update_key_point', 'delete_key_point', 'get_events', 'create_event', 'update_event', 'delete_event'],
     settings: ['get_settings', 'update_cron'],
     workspace: ['list_workspaces', 'list_dir', 'read_file', 'write_file', 'append_file', 'read_parquet'],
@@ -68,7 +71,7 @@ export const TOOL_GROUPS = {
 };
 export const TOOL_GROUP_RULES = {
     portfolio: '组合和股票工具：需要组合名时先读取组合结构，按用户指定组合操作。',
-    market: '行情工具：批量查询用 get_portfolio_quotes（一次返回组合全部股票实时行情）；个股日线分析用 read_stock_kline。',
+    market: '行情工具：实时行情批量用 get_portfolio_quotes（一次返回组合全部股票）；多只股票日线用 read_stocks_kline（一次返回多只派生指标摘要），仅单只需要看原始 OHLCV 时才用 read_stock_kline。',
     events: '要点/事件工具：先读取已有要点；事件 content 只写股票名称。',
     settings: '设置工具：仅 Cron 可修改；修改前校验表达式，成功后立即生效。',
     workspace: '工作区工具：root 用目录名定位，只访问用户已授权目录；Agent 可直接维护当前工作目录下的 flit/ 文件。',
@@ -76,6 +79,16 @@ export const TOOL_GROUP_RULES = {
     bridge: '桥接工具：优先使用结构化工作区上下文和数据库 schema 查询；Agent 只能写 flit/，但可读取和执行工作目录其他目录中的已有脚本。低 Token 固定链路：先调用 get_workspace_context；若返回 config 或 memory，先使用其中的 verified_connection、database 和 workflows，不要重复读取旧文档；有匹配 workflow 时先 read_file 该流程，按其表结构和基础 SQL 执行，除非查询失败或流程明确要求，否则跳过 discover_database_schema。只有 config/memory/workflow 都不足时，才用 list_dir/read_file 搜索其他配置和脚本。发现错误时将修正经验记录到 flit/memory.md。数据库查询任务只有在“数据查询成功、连接配置已验证并保存（若原先不存在）、可复用流程已封装（若值得复用）、memory.md 已登记入口”后才算完成；不得只返回数据就结束。连接验证成功后必须调用 save_workspace_database_config 保存完整配置，该工具会同时创建 flit/.gitignore 并忽略 config.json。workflow 必须使用通用、可复用标题和文件名，不得绑定具体股票名称或本次日期，例如“查询股票近 N 个交易日行情”；内容必须包含适用条件、已验证连接/数据源名称（不得包含密码）、相关表及关键字段、历史表与当日快照的优先级和去重规则、可替换参数、可直接执行的基础 SQL，以及何时需要重新 discover_database_schema。若本次已验证出值得复用的正确执行流程，先创建 flit/workflow/ 下该流程，再调用 record_workspace_memory；memory.md 必须遵循固定格式，最上方先写“## 数据库连接状态”，明确 verified/unverified/unknown，随后只记录不含凭据的 workflow 入口、用途和触发条件；不要把完整过程、失败尝试或 SQL 结果重复写入记忆。桥接服务未启动时，bridge_health 会返回 pwsh 启动命令；此时必须停止工具调用，只把命令和“请用户执行后重试”告知用户，绝对禁止通过 run_workspace_process 或其他工具启动 flit_bridge。',
 };
 export const TOOL_BY_NAME = new Map(TOOL_DEFS.map(def => [def.function.name, def]));
+// 工具组一行摘要（进系统提示）；详细规则不重复列，由 load_tool_group 返回的 rule 字段给出（T1-4 去重）
+export const TOOL_GROUP_SUMMARY = {
+    portfolio: '组合/股票列表增删改查、切换活动组合与视图',
+    market: '实时行情与日线取数（一律优先批量）',
+    events: '交易要点与预测事件维护',
+    settings: '全局设置（仅 Cron 可改）',
+    workspace: '工作目录文件读写与 parquet 查询',
+    memory: '长期记忆保存',
+    bridge: '本地脚本执行与本地数据库查询',
+};
 export const TOOL_GROUP_DEF = {
     type: 'function',
     function: {
@@ -88,7 +101,7 @@ export const TOOL_GROUP_DEF = {
         },
     },
 };
-export const TOOL_CATALOG = Object.keys(TOOL_GROUPS).map(group => `${group}: ${TOOL_GROUP_RULES[group]}`).join('\n');
+export const TOOL_CATALOG = Object.keys(TOOL_GROUPS).map(group => `${group}: ${TOOL_GROUP_SUMMARY[group] || TOOL_GROUP_RULES[group]}`).join('\n');
 
 export function getLoadedToolDefs() {
     const names = new Set();
@@ -583,34 +596,7 @@ export const toolExecutors = {
         const resolved = await resolveStockCode(args);
         if (resolved.error) return resolved;
         const { code, name } = resolved;
-        const cache = await readStockFromParquet(dir.handle, code, days);
-        const expected = lastTradingDayStr(new Date());
-        const isEtf = isEtfCode(code);
-        let source = cache.length ? 'parquet' : 'none';
-        let apiRows = [];
-        let apiWarning = null;
-        const cacheLast = cache.length ? cache[cache.length - 1].date : '';
-        if (!cache.length || cacheLast < expected) {
-            try {
-                apiRows = await xiaoshiDailyKline(code, { limit: days, timeoutMs: 15000 });
-                source = cache.length ? 'parquet+xiaoshi' : 'xiaoshi';
-            } catch (e) {
-                dbg('xiaoshi kline fetch failed', e);
-                apiWarning = '小石 API 未补齐（' + (e && e.message || e) + '）';
-                try {
-                    const adataRows = isEtf
-                        ? await adataGetMarketEtfDaily(code.split('.')[0], { startDate: klineStartDate(days) })
-                        : await adataGetMarketDaily(code.split('.')[0], { startDate: klineStartDate(days), adjustType: 1 });
-                    apiRows = adataToKlineRows(adataRows);
-                    source = cache.length ? 'parquet+adata' : 'adata';
-                    apiWarning = '小石 API 不可用，已改用东方财富/同花顺数据';
-                } catch (e2) {
-                    dbg('adata kline fetch failed', e2);
-                    apiWarning += '；东方财富 adata 也未补齐（' + (e2 && e2.message || e2) + '）';
-                }
-            }
-        }
-        const rows = mergeKlineRows(cache, apiRows, days);
+        const { rows, source, cacheLast, apiRows, apiWarning } = await loadKlineRows(dir.handle, code, days);
         if (!rows.length) {
             return {
                 root: dir.name, code, name,
@@ -618,6 +604,60 @@ export const toolExecutors = {
             };
         }
         return { root: dir.name, code, name, days, source, cacheLastDate: cacheLast || null, apiLastDate: apiRows.length ? apiRows[apiRows.length - 1].date : null, warning: apiWarning, rows };
+    },
+    // 批量日线摘要（T1-1）：一年 parquet 文件只读一次（$in 多代码），API 补齐限并发，输出派生指标而不是 OHLCV
+    async read_stocks_kline(args) {
+        const names = Array.isArray(args && args.names) ? args.names : [];
+        const codes = Array.isArray(args && args.codes) ? args.codes : [];
+        const want = [];
+        for (const n of names) { const v = String(n || '').trim(); if (v) want.push({ name: v }); }
+        for (const c of codes) { const v = String(c || '').trim(); if (v) want.push({ code: v, name: '' }); }
+        if (!want.length) return { error: 'names 或 codes 至少传一个（字符串数组）' };
+        // 超出上限不报错，取前 12 只并把未处理的名单回给模型，省一次往返
+        const overflow = want.length > MAX_BATCH_KLINE;
+        const targets = overflow ? want.slice(0, MAX_BATCH_KLINE) : want;
+        const days = Math.min(Math.max(parseInt(args && args.days, 10) || 18, 1), 60);
+        const detail = args && args.detail === true;
+        const maxRows = detail ? Math.min(Math.max(parseInt(args && args.max_rows, 10) || 5, 1), 18) : 0;
+        let dir;
+        try {
+            dir = await readyRoot(state.workspaceHandles, args && args.root);
+        } catch (err) {
+            return { error: '工作目录不可用，无法读取 parquet 缓存：' + (err && err.message || err), hint: '也可用 get_portfolio_quotes 取实时行情' };
+        }
+        const expected = lastTradingDayStr(new Date());
+        // 代码解析并发（名称先本地列表命中，未命中才走小石搜索）
+        const resolved = await Promise.all(targets.map(w => resolveStockCode(w)));
+        // 一次读年文件：把 N×年数的磁盘 IO 压成 年数
+        const codesForCache = resolved.filter(r => r && r.code).map(r => r.code);
+        const cacheMap = await readStocksFromParquet(dir.handle, codesForCache, days);
+        const stocks = await mapWithLimit(resolved, API_CONCURRENCY, async (r) => {
+            if (!r || r.error) return { name: (r && r.name) || null, code: (r && r.code) || null, error: r && r.error || '代码解析失败' };
+            const { rows, source, apiWarning } = await fillKlineFromApi(r.code, days, cacheMap.get(r.code) || [], expected);
+            if (!rows.length) {
+                return { name: r.name || null, code: r.code, error: '无数据（parquet 缓存无记录且接口未补齐）' + (apiWarning ? '：' + apiWarning : '') };
+            }
+            // 批量路径不带 per-stock warning（文本重复占字），数据源由 source 字段体现
+            const item = klineSummary(r.code, r.name, rows, { source });
+            if (detail) item.rows = rows.slice(-maxRows);
+            return item;
+        });
+        const failed = stocks.filter(s => s.error).length;
+        return {
+            days,
+            detail: detail ? maxRows : false,
+            total: stocks.length,
+            failed: failed || undefined,
+            truncated: overflow ? {
+                上限: MAX_BATCH_KLINE,
+                未处理: want.slice(MAX_BATCH_KLINE).map(w => w.name || w.code),
+                说明: '只处理了前 ' + MAX_BATCH_KLINE + ' 只，剩下的请再调一次',
+            } : undefined,
+            warning: stocks.some(s => s.source && s.source !== 'parquet' && s.source !== 'none')
+                ? '部分数据不全部来自 parquet 缓存（见各项 source，如 parquet+xiaoshi / adata）' : undefined,
+            hint: '指标均为本地从日线行算出；需原始 OHLCV 才传 detail=true 或单只改用 read_stock_kline',
+            stocks,
+        };
     },
     async get_stock_quote(args) {
         const resolved = await resolveStockCode(args);
@@ -766,35 +806,61 @@ async function resolveStockCode(args) {
 }
 
 async function readStockFromParquet(rootHandle, code, days) {
+    const map = await readStocksFromParquet(rootHandle, [code], days);
+    return map.get(code) || [];
+}
+
+// 日线列集（与 parquet 缓存列名一致）
+const KLINE_COLUMNS = ['code', 'date', 'open', 'high', 'low', 'close', 'volume', 'amount', 'change_pct', 'turnover_pct'];
+// 批量取数一次最多几只 / 接口补齐并发度（并发太高会把一年的年文件同时加载多份）
+const MAX_BATCH_KLINE = 12;
+const API_CONCURRENCY = 4;
+
+// 按年文件批量读多只股票日线：一次 parquet 解析服务多只代码（filter $in），
+// 把 N 只 × 年数的磁盘 IO 压成 年数，这是 read_stocks_kline 并发不爆内存的关键
+async function readStocksFromParquet(rootHandle, codes, days) {
     const qfqPath = 'data/a_share_daily/qfq';
+    const uniq = [...new Set((codes || []).filter(Boolean))];
+    const out = new Map(uniq.map(c => [c, []]));
+    if (!uniq.length) return out;
     const entries = await listDir(rootHandle, qfqPath).catch(() => []);
     const years = entries
         .filter(e => e.type === 'file' && /^data_(\d{4})\.parquet$/.test(e.name))
         .map(e => e.name.match(/^data_(\d{4})\.parquet$/)[1])
         .sort();
-    if (!years.length) return [];
+    if (!years.length) return out;
     const thisYear = new Date().getFullYear();
     const needRows = days + 5;
-    const rows = [];
+    const byUpper = new Map(uniq.map(c => [String(c).toUpperCase(), c]));
     for (const y of years.slice().reverse()) {
         if (Number(y) > thisYear) continue;
-        const r = await readParquetStockYear(rootHandle, qfqPath, code, y).catch(err => { dbg('parquet year failed', y, err); return []; });
-        rows.push(...r);
-        if (rows.length >= needRows) break;
+        // 只补缺口：已读到足够行数的代码不再参不下一年查询
+        const pending = uniq.filter(c => (out.get(c) || []).length < needRows);
+        if (!pending.length) break;
+        let rows = [];
+        try {
+            const binary = await readFileBinary(rootHandle, qfqPath + '/data_' + y + '.parquet');
+            rows = await parquetReadObjects({
+                file: binary.buffer,
+                columns: KLINE_COLUMNS,
+                filter: { code: { $in: pending } },
+                compressors,
+            });
+        } catch (err) {
+            dbg('parquet year failed', y, err);
+            continue;
+        }
+        for (const r of rows) {
+            const key = byUpper.get(String(r.code || '').toUpperCase());
+            if (key) out.get(key).push(klineRow(r));
+        }
     }
-    return rows.sort((a, b) => a.date < b.date ? -1 : 1).slice(-days);
+    for (const [c, list] of out) out.set(c, list.sort((a, b) => (a.date < b.date ? -1 : 1)).slice(-days));
+    return out;
 }
 
-async function readParquetStockYear(rootHandle, qfqPath, code, year) {
-    const relPath = qfqPath + '/data_' + year + '.parquet';
-    const binary = await readFileBinary(rootHandle, relPath);
-    const found = await parquetReadObjects({
-        file: binary.buffer,
-        columns: ['code', 'date', 'open', 'high', 'low', 'close', 'volume', 'amount', 'change_pct', 'turnover_pct'],
-        filter: { code },
-        compressors,
-    });
-    return found.map(r => ({
+function klineRow(r) {
+    return {
         date: fmtKlineDate(r.date),
         open: r.open ?? null,
         high: r.high ?? null,
@@ -804,7 +870,136 @@ async function readParquetStockYear(rootHandle, qfqPath, code, year) {
         amount: r.amount ?? null,
         change_pct: r.change_pct ?? null,
         turnover_pct: r.turnover_pct ?? null,
-    }));
+    };
+}
+
+// 单只：缓存 → 接口补齐（read_stock_kline 用）
+async function loadKlineRows(rootHandle, code, days) {
+    const cache = await readStockFromParquet(rootHandle, code, days);
+    return fillKlineFromApi(code, days, cache, lastTradingDayStr(new Date()));
+}
+
+// 「缓存不够最新交易日 → 小石 → adata」回退链（ETF 与普通股票同一条链，isEtfCode 只影响 adata 接口选择）
+async function fillKlineFromApi(code, days, cache, expected) {
+    let source = cache.length ? 'parquet' : 'none';
+    let apiRows = [];
+    let apiWarning = null;
+    const cacheLast = cache.length ? cache[cache.length - 1].date : '';
+    if (!cache.length || cacheLast < expected) {
+        try {
+            apiRows = await xiaoshiDailyKline(code, { limit: days, timeoutMs: 15000 });
+            source = cache.length ? 'parquet+xiaoshi' : 'xiaoshi';
+        } catch (e) {
+            dbg('xiaoshi kline fetch failed', e);
+            apiWarning = '小石 API 未补齐（' + (e && e.message || e) + '）';
+            try {
+                const isEtf = isEtfCode(code);
+                const adataRows = isEtf
+                    ? await adataGetMarketEtfDaily(code.split('.')[0], { startDate: klineStartDate(days) })
+                    : await adataGetMarketDaily(code.split('.')[0], { startDate: klineStartDate(days), adjustType: 1 });
+                apiRows = adataToKlineRows(adataRows);
+                source = cache.length ? 'parquet+adata' : 'adata';
+                apiWarning = '小石 API 不可用，已改用东方财富/同花顺数据';
+            } catch (e2) {
+                dbg('adata kline fetch failed', e2);
+                apiWarning += '；东方财富 adata 也未补齐（' + (e2 && e2.message || e2) + '）';
+            }
+        }
+    }
+    const rows = mergeKlineRows(cache, apiRows, days);
+    return { rows, source, cacheLast, apiRows, apiWarning };
+}
+
+// 并发受限的 map（接口补齐用：12 只串行要 30s+，无限并发又会压城 API 限流）
+async function mapWithLimit(items, limit, fn) {
+    const out = new Array(items.length);
+    let cursor = 0;
+    const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
+        while (cursor < items.length) {
+            const i = cursor++;
+            out[i] = await fn(items[i], i);
+        }
+    });
+    await Promise.all(workers);
+    return out;
+}
+
+function round2(v) {
+    // Number(null) === 0，必须先排空值，否则 null 会被当 0 输出
+    if (v === null || v === undefined || v === '') return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? Math.round(n * 100) / 100 : null;
+}
+
+function firstFinite(...vals) {
+    for (const v of vals) {
+        const n = Number(v);
+        if (v !== null && v !== undefined && v !== '' && Number.isFinite(n)) return n;
+    }
+    return null;
+}
+
+// 去掉空字段，保证单只输出控制在 150~250 字
+function compactObj(obj) {
+    const out = {};
+    for (const [k, v] of Object.entries(obj)) {
+        if (v === null || v === undefined || v === '') continue;
+        out[k] = v;
+    }
+    return out;
+}
+
+// 「急跌缩量 / 回踩低位 / 冲高回落」这类判据本来就能用代码算，不要让模型看 180 行 OHLCV 心算
+function klineSummary(code, name, rows, { source, warning } = {}) {
+    const closes = rows.map(r => Number(r.close)).filter(Number.isFinite);
+    const vols = rows.map(r => Number(r.volume));
+    const last = rows[rows.length - 1];
+    const prev = rows.length > 1 ? rows[rows.length - 2] : null;
+    const lastClose = Number(last.close);
+    const prevClose = prev ? Number(prev.close) : null;
+    const ma = n => (closes.length >= n ? round2(closes.slice(-n).reduce((a, b) => a + b, 0) / n) : null);
+    const win = closes.slice(-20);
+    const hi20 = win.length ? Math.max(...win) : null;
+    const prior5 = vols.slice(-6, -1).filter(v => Number.isFinite(v) && v > 0);
+    // 连续下跌天数（自末尾）
+    let downStreak = 0;
+    for (let i = rows.length - 1; i >= 1; i--) {
+        const a = Number(rows[i].close), b = Number(rows[i - 1].close);
+        if (Number.isFinite(a) && Number.isFinite(b) && a < b) downStreak++;
+        else break;
+    }
+    // 连续缩量天数（量 < 0.8 × 前 5 日均量）
+    let shrinkDays = 0;
+    for (let i = rows.length - 1; i >= 5; i--) {
+        const base = vols.slice(i - 5, i).filter(v => Number.isFinite(v) && v > 0);
+        if (base.length < 5 || !Number.isFinite(vols[i])) break;
+        if (vols[i] < (base.reduce((a, b) => a + b, 0) / base.length) * 0.8) shrinkDays++;
+        else break;
+    }
+    return compactObj({
+        name: name || null,
+        code,
+        date: last.date,
+        bars: rows.length,
+        close: round2(lastClose),
+        change_pct: round2(firstFinite(last.change_pct, prevClose && Number.isFinite(lastClose) ? (lastClose - prevClose) / prevClose * 100 : null)),
+        ma5: ma(5),
+        ma10: ma(10),
+        ma20: ma(20),
+        dd_20d: hi20 && Number.isFinite(lastClose) ? round2((lastClose - hi20) / hi20 * 100) : null, // 距 20 日高点回撤%
+        vol_ratio_5d: prior5.length && Number.isFinite(Number(last.volume))
+            ? round2(Number(last.volume) / (prior5.reduce((a, b) => a + b, 0) / prior5.length)) : null,
+        down_streak: downStreak || null,
+        shrink_days: shrinkDays || null,
+        amplitude_pct: prevClose && Number.isFinite(Number(last.high)) && Number.isFinite(Number(last.low))
+            ? round2((Number(last.high) - Number(last.low)) / prevClose * 100) : null,
+        fade_pct: prevClose && Number.isFinite(Number(last.high)) && Number.isFinite(lastClose)
+            ? round2((Number(last.high) - lastClose) / prevClose * 100) : null,               // 冲高回落（上影）幅度%
+        turnover_pct: round2(firstFinite(last.turnover_pct)),
+        closes: closes.slice(-5).map(v => round2(v)).join(','),
+        source: source || null,
+        warning: warning || null,
+    });
 }
 
 function fmtKlineDate(d) {
@@ -940,19 +1135,20 @@ export function buildSystemPrompt() {
         ? ` 工作目录已设置。你可以直接使用 write_file / append_file 自动创建和修改工作目录下 flit/ 子目录中的文件，修改会持久保存到磁盘，无需额外请求确认；path 必须以 flit/ 开头，有多个工作目录时自行选择 root。`
         : ` 工作目录未设置时 write_file / append_file 不可用（会报错）。若需要创建文件，请先告知用户设置工作目录。`;
     const bridgeEnabled = state.bridgeEnabled;
+    // T1-4：系统提示只留「一行目录 + 硬约束」，bridge 详细规则由 load_tool_group('bridge') 返回的 rule 字段给（本来就会返回），
+    // 同一套规则不再在目录/guide/rules 里出现三份。硬约束只保留不能交给按需加载的安全红线。
     const bridgeCatalog = bridgeEnabled
         ? TOOL_CATALOG
-        : TOOL_CATALOG.split('\n').filter(l => !l.startsWith('bridge:')).join('\n') + '\nbridge: 桥接工具（本地脚本/数据库查询）。当前未启用';
-    const bridgeGuide = bridgeEnabled
-        ? '\n[本地桥接] get_workspace_context 只是配置发现：status=candidate 或 unknown 不代表数据库连接成功。低 Token 顺序：1) 读取 context.database、context.verified_connection、context.workflows；2) 有匹配 workflow 就先 read_file 复用；3) 缺字段或 SQL 失败才 discover_database_schema。连接验证成功后必须调用 save_workspace_database_config，该工具会同时创建 .gitignore 忽略 config.json。若流程值得复用，创建通用的 flit/workflow/ 文件（标题/文件名不得绑定具体股票或日期），然后调用 record_workspace_memory。memory.md 顶部必须是"## 数据库连接状态"，先记录 verified/unverified/unknown，再记录不含凭据的 workflow 入口。凭据只能保存到被忽略的 flit/config.json。只能写入 flit/，但可读取和执行工作目录其他目录中的已有文件。若 bridge_health 返回 bridge_unreachable，立即停止工具调用，只向用户输出 start_command 中的 pwsh 命令并让用户手动执行后重试；绝对禁止通过 run_workspace_process 或其他工具启动 flit_bridge。'
-        : '';
-    const bridgeRules = bridgeEnabled
-        ? '[桥接低调用规则] get_workspace_context 已直接返回 flit/memory.md 内容和 flit/workflow/ 清单，不要再次 read_file 获取 memory.md。workflow 是通用工作流定义，不限于数据库或股票；应说明目标、触发条件、输入参数、步骤、工具顺序、输出、错误处理和验证标准。若用于数据库查询股票，再额外包含数据源名称、相关表和关键字段、可替换参数、基础 SQL 及 schema 失效条件。workflow 标题和文件名不得绑定具体股票或日期。数据库查询优先复用 context.verified_connection、context.database、context.memory 和 context.workflows；只有缺字段或 SQL 失败才调用 discover_database_schema。若 memory 已标记 verified 且配置已存在，不得重复保存 config。'
-        : '桥接未启用。若用户需要执行本地脚本或查询数据库，告知用户：在 AI 设置中启用桥接、授权目录并启动 flit_bridge 后，重新打开 AI 窗口且需要开启一个新会话。';
+        : TOOL_CATALOG.split('\n').filter(l => !l.startsWith('bridge:')).join('\n') + '\nbridge: 本地脚本/数据库查询（当前未启用）';
+    const bridgeHardRules = bridgeEnabled
+        ? '[桥接硬约束] 各组详细规则以 load_tool_group 返回的 rule 为准，不得推测表名/字段，先读 get_workspace_context 与 workflow 再查询。若 bridge_health 返回 bridge_unreachable，立即停止工具调用，只把 start_command 里的 pwsh 命令输出给用户手动执行；绝对禁止用 run_workspace_process 等工具自行启动 flit_bridge。凭据只能写入被 .gitignore 忽略的 flit/config.json，不得写入 memory.md。'
+        : '[桥接] 当前未启用。若用户需要本地脚本或数据库查询，告知在 AI 设置中启用桥接、授权目录并启动 flit_bridge 后，重开 AI 窗口并新建会话。';
+    const dataRules = '[取数纪律] 多只股票必须一次批量取数（日线用 read_stocks_kline，最多 12 只；实时行情用 get_portfolio_quotes），禁止逐只重复 query；最多 2 轮数据收集就要给出结论，超过 3 轮会触发旧工具结果驱逐（早期原始数据被丢弃）；结果被截断或已驱逐时不要反复重试同一查询，必要时缩小范围重取。';
     const lines = [
         '你是「flit stk - 量化盯盘」Chrome 扩展 AI 助手，使用中文。工具按组冷加载：需要能力时先调用 load_tool_group。全局设置只能修改 Cron，直接执行并说明修改结果。flit_stk 是 Chrome 扩展安装目录，不是 Agent 项目目录；不要把文件写入 flit_stk。写入/读取 flit/... 时使用 Agent 工作目录，多个工作目录时自行选择 root。' + wsGuide,
-        '[工具组]\n' + bridgeCatalog + bridgeGuide,
-        bridgeRules,
+        '[工具组]\n' + bridgeCatalog,
+        bridgeHardRules,
+        dataRules,
     ];
     if (state.memoryItems.length > 0) {
         lines.push('', '[长期记忆]：');

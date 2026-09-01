@@ -45,7 +45,7 @@
  *   L163   视觉模型选择 —— messageHasVisionInput(L165) · latestUserMessageHasVisionInput(L170)
  *                 · selectRequestProvider(L179)
  *   L188   function-calling 循环 —— runAgentLoop(L190) 内含 tool_calls arguments 非标准 JSON 修复
- *                 · commitAssistant(L264) · executeToolCalls(L275)
+ *                 · evictToolResults（逐轮工具结果驱逐）· msgChars · commitAssistant(L264) · executeToolCalls(L275)
  *   L301   渲染 —— 滚动：isNearBottom(L303) · scrollToBottom(L307) · maybeScroll(L311)
  *                 · updateScrollBtn(L315) · 顶层 scroll/按钮监听(L319 起)
  *                 Markdown：escapeHtml(L332) · escapeUrl(L337) · inlineMd(L344) · mdToHtml(L358)
@@ -82,12 +82,15 @@
  *      否则历史消息会被重复记录；流式回复的空气泡由 commitAssistant 记正文，不要在 appendToCurrentAssistant 里记。
  *   9. 思考过程的 delta 只用于展示与重置空闲超时，绝不并入 state.currentAssistantRaw，否则会被落库/回放进正文。
  *      finishThinking 必须在每轮 sendRound 返回后调用（含 tool_calls / 报错 / 超时路径），否则折叠块残留。
+ *  10. evictToolResults 只改 tool 消息的 content 并打 m.evicted 标记（不动 role / tool_call_id，
+ *      否则 OpenAI 协议报错）；末尾连续的 tool 消息 = 最近一轮结果，绝不驱逐。
  */
 
 import {
     state, dbg, getDateTime,
     storageGet, storageSet, genUid,
     MAX_TOOL_RESULT_CHARS, MAX_MESSAGES, MAX_MESSAGE_CHARS,
+    toolResultLimitChars, MAX_ROUND_TOOL_CHARS, MAX_CONTEXT_CHARS,
     REQUEST_IDLE_TIMEOUT_MS, REQUEST_MAX_TIMEOUT_MS, KEEPALIVE_INTERVAL_MS, THINKING_TAIL_CHARS,
     CHAT_KEY,
     messagesEl, scrollDownBtn, chatInput, sendBtn, stopBtn,
@@ -317,6 +320,7 @@ async function runAgentLoop(initialMessages, initialToolGroups = []) {
         state.currentAssistantEl = null;
         removeWaitingAssistant();
         finishThinking();
+        evictToolResults(apiMessages);
         const requestMessages = [buildSystemPrompt(), ...apiMessages];
         const tools = [TOOL_GROUP_DEF, ...getLoadedToolDefs()];
         let result = await sendRound(requestMessages, tools, { stream: true, provider: requestProvider });
@@ -398,6 +402,7 @@ function commitAssistant(content) {
 
 async function executeToolCalls(toolCalls) {
     const toolMessages = [];
+    let roundBudget = MAX_ROUND_TOOL_CHARS; // 单轮工具结果总预算（T1-3）
     for (const call of toolCalls) {
         let args = {};
         let parseError = '';
@@ -419,21 +424,71 @@ async function executeToolCalls(toolCalls) {
             }
         }
         let resultText = typeof result === 'string' ? result : JSON.stringify(result);
-        if (resultText.length > MAX_TOOL_RESULT_CHARS) {
-            resultText = resultText.slice(0, MAX_TOOL_RESULT_CHARS) + '\n（已截断）';
+        // 分级上限：按工具取值，再受本轮剩余预算约束（至少留 600 字，否则不如给存根）
+        const cap = Math.max(Math.min(toolResultLimitChars(call.name), MAX_TOOL_RESULT_CHARS, roundBudget), 600);
+        if (resultText.length > cap) {
+            resultText = resultText.slice(0, cap) + '\n（已截断，共 ' + resultText.length + ' 字；需要更多数据可缩小查询范围或传 detail/limit 参数）';
         }
+        roundBudget -= resultText.length;
         record('tool_result', {
             name: call.name,
             callId: call.id,
             耗时ms: Date.now() - startedAt,
             失败: failed,
             返回字符: resultText.length,
+            上限: cap,
             result: resultText,
         });
         renderToolEntry(call.name, call.arguments || '{}', resultText);
         toolMessages.push({ role: 'tool', tool_call_id: call.id, content: resultText });
     }
     return toolMessages;
+}
+
+/** 消息计入上下文的字符量（content 可能为图片 parts 数组） */
+function msgChars(m) {
+    if (typeof m.content === 'string') return m.content.length + (m.reasoning_content || '').length;
+    if (Array.isArray(m.content)) return m.content.reduce((n, p) => n + String(p && p.text || '').length, 0);
+    return 0;
+}
+
+// 逐轮工具结果驱逐（T1-2）：上下文超预算时，把最旧几轮的 tool 结果换成存根。
+// 只改 content，保留 role/tool_call_id 配对合法性（assistant.tool_calls 必须能找到对应 tool 消息）；
+// 末尾连续的 tool 消息 = 最近一轮结果，不得驱逐，模型丢了旧数据可按存根里的工具名重新取数。
+function evictToolResults(apiMessages) {
+    let total = apiMessages.reduce((n, m) => n + msgChars(m), 0);
+    if (total <= MAX_CONTEXT_CHARS) return 0;
+    // tool_call_id -> 工具名（存根里告诉模型是谁被归档了）
+    const nameByCallId = new Map();
+    for (const m of apiMessages) {
+        for (const tc of m.tool_calls || []) {
+            nameByCallId.set(tc.id, (tc.function && tc.function.name) || tc.name || '');
+        }
+    }
+    // 最近一轮边界：从末尾往前数连续的 tool 消息，这些不碰
+    let lastRoundFrom = apiMessages.length;
+    while (lastRoundFrom > 0 && apiMessages[lastRoundFrom - 1].role === 'tool') lastRoundFrom--;
+    let evicted = 0;
+    for (let i = 0; i < lastRoundFrom; i++) {
+        if (total <= MAX_CONTEXT_CHARS) break;
+        const m = apiMessages[i];
+        if (m.role !== 'tool' || m.evicted) continue;
+        const raw = typeof m.content === 'string' ? m.content : '';
+        const toolName = nameByCallId.get(m.tool_call_id) || '工具';
+        const stub = '«' + toolName + ': 早先的 ' + raw.length + ' 字结果已驱逐归档（需重新查看请再次调用该工具）»';
+        total -= raw.length - stub.length;
+        m.content = stub;
+        m.evicted = true;
+        evicted++;
+    }
+    if (evicted) {
+        record('evict', { 驱逐条数: evicted, 驱逐后字符: total, 预算: MAX_CONTEXT_CHARS });
+        appendMessage('system', '上下文超过预算，已将最早 ' + evicted + ' 条工具结果归档（需要时可重新取数）');
+    } else if (total > MAX_CONTEXT_CHARS) {
+        // 只剩最近一轮仍超预算：不再驱逐（会弄坏当前分析），只记日志供调上限
+        record('evict', { 未驱逐: true, 当前字符: total, 预算: MAX_CONTEXT_CHARS });
+    }
+    return evicted;
 }
 
 // ============== 渲染 ==============

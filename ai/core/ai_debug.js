@@ -8,7 +8,8 @@
  * 设计要点：
  *   1. 开关存 chrome.storage.sync（键 aiDebugMode），与 AI 设置面板「全局设置」中的复选框双向同步；
  *      记录内容存 chrome.storage.local（键 aiDebugLogs），按会话 id 分组，带容量上限，避免撑爆存储。
- *   2. 记录入口统一为 record(kind, data)；DOM 渲染回放（renderHistory）等场景用 withDebugMuted 抑制，
+ *   2. 记录入口统一为 record(kind, data)；会连续重复的报错用 recordRepeat(kind, data)（同组合并，
+ *      只留首条 + 一条滚动末条）；DOM 渲染回放（renderHistory）等场景用 withDebugMuted 抑制，
  *      防止把历史消息重新记一遍。
  *   3. 本模块只负责「记录 + 组织文本 + 写剪切板」，不直接渲染消息气泡；页面提示由调用方通过
  *      bindDebugButton(notify) 注入，保持与 ai.js 的单向依赖。
@@ -26,6 +27,8 @@ const MAX_FIELD_CHARS = 4000;           // 单字段字符上限（超长截断�
 const MAX_KEEP_SESSIONS = 8;            // 最多保留最近几个会话的记录
 const MAX_PERSIST_CHARS = 6000000;      // 落库总量上限（字符数近似字节数）
 const PERSIST_DEBOUNCE_MS = 800;        // 合并写入间隔
+// 同类连续报错（如 SW 每 30s 断连重连）的折叠窗口：超过该间隔再出现视为新一轮，重新记首条
+const REPEAT_COLLAPSE_WINDOW_MS = 120 * 1000;
 
 const EVENT_LABELS = {
     session: '会话事件',
@@ -235,23 +238,87 @@ export function withDebugMuted(fn) {
     try { return fn(); } finally { muted = prev; }
 }
 
+/** 由事件数据构造一条记录（含序号、时间与字段截断） */
+function buildEvent(kind, data) {
+    const evt = { seq: ++seq, ts: Date.now(), kind };
+    for (const [k, v] of Object.entries(data || {})) {
+        if (v === undefined || v === null) continue;
+        evt[k] = typeof v === 'string' ? clip(v) : (typeof v === 'object' ? clip(safeStringify(v)) : v);
+    }
+    return evt;
+}
+
+/** 超出条数上限时丢弃最早的事件，并安排落库 */
+function trimAndTouch(log) {
+    if (log.events.length > MAX_EVENTS_PER_SESSION) {
+        log.events.splice(0, log.events.length - MAX_EVENTS_PER_SESSION);
+    }
+    log.updatedAt = Date.now();
+    schedulePersist();
+}
+
 /** 记录一条事件（DEBUG 未开启或处于抑制态时静默丢弃） */
 export function record(kind, data, chatId) {
     if (!flag || muted) return;
     const id = chatId || state.currentChatId;
     if (!id) return;
     const log = ensureLog(id);
-    const evt = { seq: ++seq, ts: Date.now(), kind };
-    for (const [k, v] of Object.entries(data || {})) {
-        if (v === undefined || v === null) continue;
-        evt[k] = typeof v === 'string' ? clip(v) : (typeof v === 'object' ? clip(safeStringify(v)) : v);
+    log.events.push(buildEvent(kind, data));
+    trimAndTouch(log);
+}
+
+/**
+ * 记录「同类会重复」的日志（如 SW 断连重连报错）：连续重复只保留首条与末条。
+ *
+ * 规则（key = kind + text，同一 key 视为同一组）：
+ *   1. 组内第 1 次 → 正常入队，作为「首条」不再改动；
+ *   2. 组内第 2 次 → 追加一条「滚动末条」（带 连续重复=2、首次发生=首条时间）；
+ *   3. 组内第 N 次 → 就地把滚动末条刷新并移到末尾（时间/字段取最新，连续重复+1），
+ *      因此长期挂机反复断连也只占两条记录，末条始终是最后一次；
+ *   4. 距上一次同类超过 REPEAT_COLLAPSE_WINDOW_MS → 视为新的一组，重新记首条。
+ * 内部标识 __rk（同类 key）、__roll（是否滚动末条）、__n / __firstTs 不参与报告输出。
+ */
+export function recordRepeat(kind, data, chatId) {
+    if (!flag || muted) return;
+    const id = chatId || state.currentChatId;
+    if (!id) return;
+    const log = ensureLog(id);
+    const key = kind + '|' + String((data && data.text) ?? '');
+    const now = Date.now();
+    const events = log.events;
+    // 从末尾回溯，找窗口内最近一条同类事件（滚动末条总在末尾附近，命中即停）
+    let prev = null;
+    for (let i = events.length - 1; i >= 0; i--) {
+        const e = events[i];
+        if (now - Number(e.ts || 0) > REPEAT_COLLAPSE_WINDOW_MS) break;
+        if (e.__rk === key) { prev = e; break; }
     }
-    log.events.push(evt);
-    if (log.events.length > MAX_EVENTS_PER_SESSION) {
-        log.events.splice(0, log.events.length - MAX_EVENTS_PER_SESSION);
+    if (prev && prev.__roll) {
+        const idx = events.indexOf(prev);
+        if (idx >= 0) events.splice(idx, 1);          // 末条滚动：撤下旧的，重新追加到末尾
+        const evt = buildEvent(kind, data);
+        evt.__rk = key;
+        evt.__roll = true;
+        evt.__n = Number(prev.__n || 2) + 1;
+        evt.__firstTs = prev.__firstTs || prev.ts;
+        evt.连续重复 = evt.__n;
+        evt.首次发生 = fmtTs(evt.__firstTs);
+        events.push(evt);
+    } else if (prev) {
+        const evt = buildEvent(kind, data);
+        evt.__rk = key;
+        evt.__roll = true;
+        evt.__n = 2;
+        evt.__firstTs = prev.ts;
+        evt.连续重复 = 2;
+        evt.首次发生 = fmtTs(prev.ts);
+        events.push(evt);
+    } else {
+        const evt = buildEvent(kind, data);
+        evt.__rk = key;
+        events.push(evt);
     }
-    log.updatedAt = Date.now();
-    schedulePersist();
+    trimAndTouch(log);
 }
 
 function safeStringify(v) {
@@ -306,7 +373,7 @@ function formatEvent(e) {
     const lines = [`[${pad3(e.seq)}] ${fmtTs(e.ts)}  ${label}${e.name ? ' · ' + e.name : ''}`];
     const skip = new Set(['seq', 'ts', 'kind', 'name', 'text']);
     for (const [k, v] of Object.entries(e)) {
-        if (skip.has(k) || v === '') continue;
+        if (skip.has(k) || k.startsWith('__') || v === '') continue;
         lines.push(`  ${k}: ${v}`);
     }
     if (typeof e.text === 'string' && e.text) {

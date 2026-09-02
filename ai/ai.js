@@ -114,7 +114,7 @@ import {
 import { readyRoot, writeUpload, getBridgeHandle, workspacePermission } from './core/fsa.js';
 import {
     loadDebugFlag, applyRemoteDebugFlag, isDebugOn, beginDebugSession, dropDebugSession,
-    record, recordMessage, withDebugMuted, bindDebugButton, bindDebugGlobals,
+    record, recordRepeat, recordMessage, withDebugMuted, bindDebugButton, bindDebugGlobals,
 } from './core/ai_debug.js';
 
 // ============== port 连接 ==============
@@ -132,7 +132,8 @@ function connectPort() {
         state.portAlive = false;
         stopKeepAlive();
         // T0-3：SW 被回收/重启时在途请求已孤儿化，立刻以可重试错误收尾，不让页面空等超时
-        record('error', { text: '与后台 service worker 连接断开，500ms 后重连', 在途请求数: pending.size });
+        // 断连会每 30s 左右重复一次，同类报错走折叠：长期挂机只留首条 + 一条滚动末条
+        recordRepeat('error', { text: '与后台 service worker 连接断开，500ms 后重连', 在途请求数: pending.size });
         failAllPending('后台已重启，请求中断');
         setTimeout(connectPort, 500);
     });

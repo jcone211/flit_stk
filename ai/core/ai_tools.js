@@ -3,7 +3,7 @@
 // K 线默认只回「派生指标摘要」（klineSummary），detail=true 才带原始 OHLCV 行。
 
 import {
-    state, dbg, getDateTime,
+    state, dbg, fmtDateTimeStr,
     storageGet, storageSet, genUid,
     DEFAULT_AI_BASE_URL, DEFAULT_AI_MODEL,
     MAX_TOOL_RESULT_CHARS, MAX_MESSAGES, MAX_MESSAGE_CHARS,
@@ -17,8 +17,12 @@ import { parquetMetadataAsync, parquetSchema, parquetReadObjects, toJson } from 
 import { compressors } from '../vendor/hyparquet/compressors.js';
 import { xiaoshiSearchStock, xiaoshiDailyKline, xiaoshiQuote, getSettingApiKey as getXiaoshiApiKey } from '../stock/xiaoshi_stock_kline.js';
 import { getMarketDaily as adataGetMarketDaily, getMarketEtfDaily as adataGetMarketEtfDaily } from '../stock/adata_stock_kline.js';
-import { batchQuotes } from '../../js/xiaoshi_realtime_quote.js';
+// 取数优先级：本地数据库（工作目录 flit/config.json 登记，经 flit_bridge 只读查询）→ 免费公开渠道（东财/同花顺 K 线、新浪/腾讯实时）
+// → 小石 API（有额度，仅当免费渠道不可用时才调）。parquet 年文件只是某时刻全市场快照，不参与 K 线取数。
+import { batchQuotes as xiaoshiBatchQuotes } from '../../js/xiaoshi_realtime_quote.js';
+import { batchQuotes as adataBatchQuotes, listMarketFull as adataListMarketFull } from '../../js/adata_realtime_quote.js';
 import { parseCronExpr, nextTradingCronTimes } from '../../shared/cron.js';
+import { etfPrefixForCode } from '../../shared/utils.js';
 import { bridgeRequest, bridgeHealth } from './bridge_client.js';
 
 export const TOOL_DEFS = [
@@ -43,10 +47,10 @@ export const TOOL_DEFS = [
     { type: 'function', function: { name: 'list_workspaces', description: '列出已授权的全部工作目录（主目录与附加目录）及其权限状态', parameters: { type: 'object', properties: {}, required: [] } } },
     { type: 'function', function: { name: 'list_dir', description: '列出工作目录（或子目录）内容。root 缺省为主目录，可传附加目录名；软链接条目无法访问（浏览器安全限制）', parameters: { type: 'object', properties: { path: { type: 'string', description: '相对所选目录的路径，空为根目录' }, root: { type: 'string', description: '工作目录名，可用 list_workspaces 查询；缺省为主目录' } }, required: [] } } },
     { type: 'function', function: { name: 'read_file', description: '读取工作目录中的文本文件内容，支持 Markdown、JSON、JavaScript、CSS、TXT、CSV 等文本文件；路径相对当前工作区；内容过长时会截断', parameters: { type: 'object', properties: { path: { type: 'string' }, root: { type: 'string' } }, required: ['path'] } } },
-    { type: 'function', function: { name: 'read_parquet', description: '读取工作目录中的 Parquet 数据文件，返回列名、总行数和限定数量的行。适合查询股票日线等 parquet 数据；path 必须是相对授权工作目录的路径，root 缺省为主目录。默认最多返回 100 行，可用 columns 选择列。', parameters: { type: 'object', properties: { path: { type: 'string', description: '相对工作目录的 .parquet 文件路径' }, root: { type: 'string', description: '工作目录名，缺省为主目录' }, columns: { type: 'array', items: { type: 'string' }, description: '要读取的列名；缺省读取全部列' }, row_start: { type: 'integer', minimum: 0, description: '起始行，缺省 0' }, limit: { type: 'integer', minimum: 1, maximum: 500, description: '最多返回行数，缺省 100，最大 500' } }, required: ['path'] } } },
-    { type: 'function', function: { name: 'read_stock_kline', description: '获取股票近 N 天日线 K 线（开/高/低/收/成交量/成交额/涨跌幅）。优先读取工作目录 parquet 缓存（data/a_share_daily/qfq/data_*.parquet，小石量化数据）；当缓存缺少最近交易日数据时自动调用小石量化 API 补齐。支持按股票名称或代码。', parameters: { type: 'object', properties: { name: { type: 'string', description: '股票名称，如「德明利」；与 code 二选一' }, code: { type: 'string', description: '股票代码：6 位数字（如 001309）或带市场后缀（如 001309.SZ），不要使用 SH:600519 等冒号前缀形式；与 name 二选一' }, days: { type: 'integer', minimum: 1, maximum: 60, description: '近 N 个交易日，缺省 30' }, root: { type: 'string', description: '工作目录名，缺省为主目录（parquet 数据目录的根，如含 data/a_share_daily 的目录）' } }, required: [] } } },
-    { type: 'function', function: { name: 'read_stocks_kline', description: '批量获取多只股票近 N 个交易日的日线「派生指标摘要」（收盘/涨跌幅/MA5・10・20/距 20 日高点回撤/量比/连续下跌天数/缩量天数/振幅/换手/近 5 日收盘），一次调用代替逐只 read_stock_kline；多只股票必须优先用本工具。detail=true 才附带原始 OHLCV 行。', parameters: { type: 'object', properties: { names: { type: 'array', items: { type: 'string' }, description: '股票名称数组，最多 12 只' }, codes: { type: 'array', items: { type: 'string' }, description: '股票代码数组（6 位或带 .SZ/.SH 后缀），可与 names 混用' }, days: { type: 'integer', minimum: 1, maximum: 60, description: '近 N 个交易日，缺省 18' }, detail: { type: 'boolean', description: 'true 时返回原始 K 线行，缺省 false 只返回摘要' }, max_rows: { type: 'integer', minimum: 1, maximum: 18, description: 'detail=true 时每只最多返回行数，缺省 5' }, root: { type: 'string', description: '工作目录名，缺省为主目录' } }, required: [] } } },
-    { type: 'function', function: { name: 'get_stock_quote', description: '获取股票实时行情（最新价/涨跌幅/昨收/最高/最低/成交量/成交额/换手率），不经页面直接调用小石实时行情接口。支持按股票名称或代码。', parameters: { type: 'object', properties: { name: { type: 'string', description: '股票名称，如「德明利」；与 code 二选一' }, code: { type: 'string', description: '股票代码：6 位数字（如 001309）或带市场后缀（如 001309.SZ），不要使用 SH:600519 等冒号前缀形式；与 name 二选一' } }, required: [] } } },
+    { type: 'function', function: { name: 'read_parquet', description: '读取工作目录中的 Parquet 数据文件，返回列名、总行数和限定数量的行。适合查看回测/备份用的 parquet 文件；path 必须是相对授权工作目录的路径，root 缺省为主目录。默认最多返回 100 行，可用 columns 选择列。本工具不参与股票 K 线取数；查询股票 K 线请走 read_stock_kline / read_stocks_kline（它们只读本地数据库）。', parameters: { type: 'object', properties: { path: { type: 'string', description: '相对工作目录的 .parquet 文件路径' }, root: { type: 'string', description: '工作目录名，缺省为主目录' }, columns: { type: 'array', items: { type: 'string' }, description: '要读取的列名；缺省读取全部列' }, row_start: { type: 'integer', minimum: 0, description: '起始行，缺省 0' }, limit: { type: 'integer', minimum: 1, maximum: 500, description: '最多返回行数，缺省 100，最大 500' } }, required: ['path'] } } },
+    { type: 'function', function: { name: 'read_stock_kline', description: '获取股票近 N 天日线 K 线（开/高/低/收/成交量/成交额/涨跌幅）。数据只从工作目录 flit/config.json 登记的本地日线库读取（经 Agent 桥接只读查询，不读 parquet）；库里缺交易日时先用免费渠道（东方财富/同花顺）补齐，只缺 1~2 个交易日且免费不可用时才用少量小石额度。ETF/指数不在该库内，自动改走免费同花顺 ETF 日线（失败再小石，ETF 只有未复权价）。盘中（含午休）自动把当日未收盘 bar 拼到末尾（行上标 intraday/as_of，实时价走新浪/腾讯免费批量）。返回含 数据表 / 数据日期 / 最新已收盘交易日 / 实时拼接 / 接口调用；报「工作目录不存在可用数据库」时直接把结论转述给用户，不要重试或改用别的工具硬凑 K 线。支持按股票名称或代码。', parameters: { type: 'object', properties: { name: { type: 'string', description: '股票名称，如「德明利」；与 code 二选一' }, code: { type: 'string', description: '股票代码：6 位数字（如 001309）或带市场后缀（如 001309.SZ），不要使用 SH:600519 等冒号前缀形式；与 name 二选一' }, days: { type: 'integer', minimum: 1, maximum: 60, description: '近 N 个交易日（盘中含拼接的当日实时 bar，共 N 根），缺省 30' }, root: { type: 'string', description: '工作目录名，缺省为主目录（parquet 数据目录的根，如含 data/a_share_daily 的目录）' } }, required: [] } } },
+    { type: 'function', function: { name: 'read_stocks_kline', description: '批量获取多只股票近 N 个交易日的日线「派生指标摘要」（收盘/涨跌幅/MA5・10・20/距 20 日高点回撤/量比/连续下跌天数/缩量天数/振幅/换手/近 5 日收盘），一条 SQL 取回全部标的，一次调用代替逐只 read_stock_kline；多只股票必须优先用本工具。detail=true 才附带原始 OHLCV 行。数据源为工作目录登记的本地日线库（不读 parquet），缺口再走免费/小石。返回含 数据表 / 本地库诊断 / 数据日期 / 最新已收盘交易日 / 实时拼接（盘中自动用一次免费批量实时行情把当日未收盘 bar 拼到末行，各项标 intraday+as_of）/ 接口调用；末行 intraday=true 时可直接当现价，否则现价请另调 get_stock_quote 或 get_portfolio_quotes。', parameters: { type: 'object', properties: { names: { type: 'array', items: { type: 'string' }, description: '股票名称数组，最多 12 只' }, codes: { type: 'array', items: { type: 'string' }, description: '股票代码数组（6 位或带 .SZ/.SH 后缀），可与 names 混用' }, days: { type: 'integer', minimum: 1, maximum: 60, description: '近 N 个交易日，缺省 18' }, detail: { type: 'boolean', description: 'true 时返回原始 K 线行，缺省 false 只返回摘要' }, max_rows: { type: 'integer', minimum: 1, maximum: 18, description: 'detail=true 时每只最多返回行数，缺省 5' }, root: { type: 'string', description: '工作目录名，缺省为主目录' } }, required: [] } } },
+    { type: 'function', function: { name: 'get_stock_quote', description: '【必调】获取股票实时行情（最新价/涨跌幅/昨收/最高/最低/成交量/成交额/换手率），不经页面直接调用免费+付费混合接口。回答任何股票价格问题前必须先调用本工具或 get_portfolio_quotes。支持按股票名称或代码。', parameters: { type: 'object', properties: { name: { type: 'string', description: '股票名称，如「德明利」；与 code 二选一' }, code: { type: 'string', description: '股票代码：6 位数字（如 001309）或带市场后缀（如 001309.SZ），不要使用 SH:600519 等冒号前缀形式；与 name 二选一' } }, required: [] } } },
     { type: 'function', function: { name: 'get_portfolio_quotes', description: '批量获取指定组合全部股票的实时行情（最新价/涨跌幅/昨收/最高/最低/成交量/成交额/换手率）。一次调用返回所有股票，无需逐只查询', parameters: { type: 'object', properties: { portfolio: { type: 'string', description: '组合名，如「持仓」「观察」；缺省为当前活动组合' } }, required: [] } } },
 
     { type: 'function', function: { name: 'write_file', description: '自动创建或覆盖当前工作目录下 flit/ 子目录中的文件，用于维护 memory.md、config.json、脚本和用户适配文件；无需额外确认', parameters: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' }, root: { type: 'string' } }, required: ['path', 'content'] } } },
@@ -71,7 +75,7 @@ export const TOOL_GROUPS = {
 };
 export const TOOL_GROUP_RULES = {
     portfolio: '组合和股票工具：需要组合名时先读取组合结构，按用户指定组合操作。',
-    market: '行情工具：实时行情批量用 get_portfolio_quotes（一次返回组合全部股票）；多只股票日线用 read_stocks_kline（一次返回多只派生指标摘要），仅单只需要看原始 OHLCV 时才用 read_stock_kline。',
+    market: '行情工具：实时行情批量用 get_portfolio_quotes（一次返回组合全部股票）；多只股票日线用 read_stocks_kline（一次返回多只派生指标摘要），仅单只需要看原始 OHLCV 时才用 read_stock_kline。取数侧已做免费优先（本地数据库→新浪/腾讯实时、东财/同花顺日线→小石兜底），你不需要特意指定渠道；ETF 不在本地库内，由免费接口负责。若工具报「工作目录不存在可用数据库」，照原样转述给用户，不要改用其他工具硬凑 K 线（实时现价仍可查）。结论里要标数据日期：末行带 intraday 的是当日实时未收盘价（可称现价），不带的是已收盘日线（只能称"某日收盘"）；量能能不能当整日用看 实时拼接.量能说明。\n[禁止编造] 绝对禁止凭空编造行情数据。没有通过工具实际获取到真实数据前，不得输出价格数字、涨跌幅、跌停/涨停判定。宁可说「我没有查到」也不准编造。',
     events: '要点/事件工具：先读取已有要点；事件 content 只写股票名称。',
     settings: '设置工具：仅 Cron 可修改；修改前校验表达式，成功后立即生效。',
     workspace: '工作区工具：root 用目录名定位，只访问用户已授权目录；Agent 可直接维护当前工作目录下的 flit/ 文件。',
@@ -596,16 +600,41 @@ export const toolExecutors = {
         const resolved = await resolveStockCode(args);
         if (resolved.error) return resolved;
         const { code, name } = resolved;
-        const { rows, source, cacheLast, apiRows, apiWarning } = await loadKlineRows(dir.handle, code, days);
+        const now = new Date();
+        const today = localDateStr(now);
+        const code6 = String(code).split('.')[0];
+        // 盘中/午休：当日未收盘 bar 由实时行情拼接，因此不让补齐链去追当日，也不看库里残留的当日行
+        const liveNeeded = hasLiveSession(now);
+        const db = await readKlineFromDb(dir, [code], days);
+        if (db.error && !isEtfCode(code6)) return { root: dir.name, code, name, ...klineDbUnavailable(db) };
+        const { rows, source, cacheLast, apiRows, apiWarning } = await fillKlineFromApi(code, days, db.map.get(String(code).toUpperCase()) || [], expectedDailyLastDate(now), { liveToday: liveNeeded });
         if (!rows.length) {
             return {
                 root: dir.name, code, name,
-                error: '未读取到该股票数据：parquet 缓存无记录，且小石 / 东方财富接口均拉取失败' + (apiWarning ? '（' + apiWarning + '）' : ''),
+                error: '未读取到该股票数据：本地日线库无记录（ETF/指数本库不收录），免费渠道（东方财富/同花顺）与小石接口也均未补齐' + (apiWarning ? '（' + apiWarning + '）' : ''),
+                取数诊断: (db.diag || []).join('；'),
             };
         }
-        return { root: dir.name, code, name, days, source, cacheLastDate: cacheLast || null, apiLastDate: apiRows.length ? apiRows[apiRows.length - 1].date : null, warning: apiWarning, rows };
+        const live = liveNeeded ? await fetchLiveQuotes([code6]) : { map: new Map(), diag: [] };
+        const liveMap = live.map;
+        const sp = liveNeeded ? applyIntradayBar(rows, liveMap.get(code6), today, days) : { rows, spliced: false };
+        const lastRow = sp.rows[sp.rows.length - 1];
+        return {
+            root: dir.name, code, name, days, source: sp.spliced ? source + '+live' : source,
+            数据表: isEtfCode(code6) ? '本库不含 ETF（走免费同花顺日线）' : (db.table || null),
+            本地库诊断: (db.diag || []).filter(Boolean).join('；') || undefined,
+            数据日期: lastRow.date || null, 最新已收盘交易日: lastClosedSessionStr(now),
+            实时拼接: liveSpliceInfo(now, sp.spliced ? 1 : 0, 1, lastRow.as_of, liveMap.get(code6) && liveMap.get(code6).source, live.diag),
+            接口调用: apiCallsNote(),
+            cacheLastDate: cacheLast || null, apiLastDate: apiRows.length ? apiRows[apiRows.length - 1].date : null,
+            warning: apiWarning,
+            hint: sp.spliced
+                ? '末行为当日实时未收盘 bar（带 intraday/as_of）；前面各行为已收盘日线，量能按 实时拼接.量能说明 解读'
+                : 'rows 均为已收盘日线（末行 date 即数据日期）；当日实时价请另调 get_stock_quote',
+            rows: sp.rows,
+        };
     },
-    // 批量日线摘要（T1-1）：一年 parquet 文件只读一次（$in 多代码），API 补齐限并发，输出派生指标而不是 OHLCV
+    // 批量日线摘要（T1-1）：一次 SQL 取回多只（窗口函数分组取前 N 根），接口补齐限并发，输出派生指标而不是 OHLCV
     async read_stocks_kline(args) {
         const names = Array.isArray(args && args.names) ? args.names : [];
         const codes = Array.isArray(args && args.codes) ? args.codes : [];
@@ -623,28 +652,66 @@ export const toolExecutors = {
         try {
             dir = await readyRoot(state.workspaceHandles, args && args.root);
         } catch (err) {
-            return { error: '工作目录不可用，无法读取 parquet 缓存：' + (err && err.message || err), hint: '也可用 get_portfolio_quotes 取实时行情' };
+            return { error: '工作目录未授权，无法读 flit/config.json 与本地日线库：' + (err && err.message || err), hint: '也可用 get_portfolio_quotes 取实时行情' };
         }
-        const expected = lastTradingDayStr(new Date());
-        // 代码解析并发（名称先本地列表命中，未命中才走小石搜索）
+        const now = new Date();
+        const expected = expectedDailyLastDate(now);
+        const liveNeeded = hasLiveSession(now);
+        const today = localDateStr(now);
+        // 代码解析并发（名称先本地列表命中，再本地库搜索，都不中才走小石搜索）
         const resolved = await Promise.all(targets.map(w => resolveStockCode(w)));
-        // 一次读年文件：把 N×年数的磁盘 IO 压成 年数
+        // 一次 SQL 取回本批全部股票（代替逐只请求），ETF 不在本库范围、自然拿到 0 行后走免费接口
         const codesForCache = resolved.filter(r => r && r.code).map(r => r.code);
-        const cacheMap = await readStocksFromParquet(dir.handle, codesForCache, days);
+        const cacheRes = await readKlineFromDb(dir, codesForCache, days);
+        const cacheMap = cacheRes.map;
+        // 本地库不可用时：整批都是股票就直接给统话术；混了 ETF 则 ETF 照样能取，只对股票逐项报错
+        const hasStock = codesForCache.some(c => !isEtfCode(String(c).split('.')[0]));
+        const dbError = cacheRes.error && hasStock ? klineDbUnavailable(cacheRes) : null;
+        if (dbError && !codesForCache.some(c => isEtfCode(String(c).split('.')[0]))) {
+            return { days, ...dbError, total: codesForCache.length };
+        }
+        // 盘中/午休：一次免费批量实时行情覆盖全部标的（不逐只调接口），把当日未收盘 bar 拼到末尾
+        const live = liveNeeded
+            ? await fetchLiveQuotes(codesForCache.map(c => String(c).split('.')[0]))
+            : { map: new Map(), diag: [] };
+        const liveMap = live.map;
+        let liveCount = 0, liveAsOf = null, liveChannel = null;
         const stocks = await mapWithLimit(resolved, API_CONCURRENCY, async (r) => {
             if (!r || r.error) return { name: (r && r.name) || null, code: (r && r.code) || null, error: r && r.error || '代码解析失败' };
-            const { rows, source, apiWarning } = await fillKlineFromApi(r.code, days, cacheMap.get(r.code) || [], expected);
-            if (!rows.length) {
-                return { name: r.name || null, code: r.code, error: '无数据（parquet 缓存无记录且接口未补齐）' + (apiWarning ? '：' + apiWarning : '') };
+            const code6 = String(r.code).split('.')[0];
+            if (dbError && !isEtfCode(code6)) return { name: r.name || null, code: r.code, error: dbError.error };
+            const { rows, source, apiWarning } = await fillKlineFromApi(r.code, days, cacheMap.get(String(r.code).toUpperCase()) || [], expected, { liveToday: liveNeeded });
+            const sp = liveNeeded ? applyIntradayBar(rows, liveMap.get(code6), today, days) : { rows, spliced: false };
+            if (sp.spliced) {
+                liveCount++;
+                liveAsOf = liveAsOf || sp.rows[sp.rows.length - 1].as_of;
+                liveChannel = liveChannel || (liveMap.get(code6) && liveMap.get(code6).source);
+            }
+            if (!sp.rows.length) {
+                return { name: r.name || null, code: r.code, error: '无数据（本地日线库无记录且免费/小石接口未补齐）' + (apiWarning ? '：' + apiWarning : '') };
             }
             // 批量路径不带 per-stock warning（文本重复占字），数据源由 source 字段体现
-            const item = klineSummary(r.code, r.name, rows, { source });
-            if (detail) item.rows = rows.slice(-maxRows);
+            const item = klineSummary(r.code, r.name, sp.rows, { source: sp.spliced ? source + '+live' : source });
+            if (detail) item.rows = sp.rows.slice(-maxRows);
             return item;
         });
         const failed = stocks.filter(s => s.error).length;
+        const dates = stocks.map(s => s.date).filter(Boolean).sort();
+        // 取各股最旧的那个作为对外口径：宁可保守，也不把“只有部分股票拿到最新”当成整体最新
+        const dataDate = dates.length ? dates[0] : null;
         return {
             days,
+            // 时效自述：末行到底是哪一天、是不是未收盘，全看这几个字段
+            数据表: hasStock ? (cacheRes.table || null) : '本库不含 ETF（走免费同花顺日线）',
+            本地库诊断: (cacheRes.diag || []).filter(Boolean).join('；') || undefined,
+            数据日期: dataDate,
+            最新已收盘交易日: expected,
+            实时拼接: liveSpliceInfo(now, liveCount, codesForCache.length, liveAsOf, liveChannel, live.diag),
+            接口调用: apiCallsNote(),
+            数据日期不齐: (dates.length && dates[dates.length - 1] !== dates[0])
+                ? ('各股末行日期不一致：' + dates[0] + ' ~ ' + dates[dates.length - 1] + '（以各项 date 为准）') : undefined,
+            数据滞后: (dataDate && dataDate < expected)
+                ? ('末行 ' + dataDate + ' 早于最新已收盘交易日 ' + expected + '，免费与小石渠道均未补齐，只能当作历史参照') : undefined,
             detail: detail ? maxRows : false,
             total: stocks.length,
             failed: failed || undefined,
@@ -653,9 +720,9 @@ export const toolExecutors = {
                 未处理: want.slice(MAX_BATCH_KLINE).map(w => w.name || w.code),
                 说明: '只处理了前 ' + MAX_BATCH_KLINE + ' 只，剩下的请再调一次',
             } : undefined,
-            warning: stocks.some(s => s.source && s.source !== 'parquet' && s.source !== 'none')
-                ? '部分数据不全部来自 parquet 缓存（见各项 source，如 parquet+xiaoshi / adata）' : undefined,
-            hint: '指标均为本地从日线行算出；需原始 OHLCV 才传 detail=true 或单只改用 read_stock_kline',
+            warning: stocks.some(s => s.source && s.source !== 'db')
+                ? '部分数据不全部来自本地日线库（见各项 source：db 为本地库，adata 为免费东财/同花顺，xiaoshi 为小石接口，+live 为当日实时未收盘 bar）' : undefined,
+            hint: '指标均由本地从日线行算出；末行 intraday=true 时为当日实时价（可当现价），否则最新价请另调 get_stock_quote / get_portfolio_quotes；需原始 OHLCV 才传 detail=true',
             stocks,
         };
     },
@@ -663,12 +730,21 @@ export const toolExecutors = {
         const resolved = await resolveStockCode(args);
         if (resolved.error) return resolved;
         const { code, name } = resolved;
-        try {
-            const q = await xiaoshiQuote(code, { timeoutMs: 15000 });
-            return { code, name, quote: q, warning: q.is_stale ? '行情可能已过期（is_stale=' + q.is_stale + '）' : null };
-        } catch (e) {
-            return { code, name, error: '小石实时行情拉取失败：' + (e && e.message || e) };
-        }
+        const code6 = String(code).split('.')[0];
+        // 免费优先（新浪+腾讯合并），不可用时 fetchLiveQuotes 内部依次回退小石批量/小石单只
+        const { map, diag } = await fetchLiveQuotes([code6]);
+        const q = map.get(code6);
+        if (!q) return { code, name, error: '实时行情拉取失败：免费渠道与小石均不可用，可稍后重试', 渠道诊断: diag.join('；') };
+        return {
+            code, name,
+            quote: {
+                code: code6, name: q.name || name, price: q.price, change: q.change, change_pct: q.change_pct,
+                open: q.open, high: q.high, low: q.low, previous_close: q.last_close,
+                volume: q.volume, amount: q.amount, turnover_pct: q.turnover_pct,
+                time: q.time, source: q.source,
+            },
+            渠道: q.source,
+        };
     },
     async get_portfolio_quotes(args) {
         const portfolio = args && args.portfolio ? String(args.portfolio).trim() : '';
@@ -684,45 +760,20 @@ export const toolExecutors = {
         }
         if (!list.length) return { total: 0, quotes: [], hint: '该组合为空' };
 
-        // 改用批量接口（单请求代替 N 次单只调用），按 stock/etf 分桶
-        const apiKey = await getXiaoshiApiKey();
-        if (!apiKey) {
-            return { error: '小石 API Key 未配置，请在扩展「全局设置 → 数据获取方式（小石大数据）」中填写', hint: '也可用 get_stock_quote 单只查询' };
-        }
-
         const codes = []; // { code, name }
         const noCode = [];
         for (const s of list) {
             if (!s.code) { noCode.push(s.name || '(待抓取)'); continue; }
-            codes.push({ code: s.code, name: s.name });
+            codes.push({ code: String(s.code).split('.')[0], name: s.name });
         }
 
-        const stocks = codes.filter(c => !/^(159|51|58)\d{3}$/.test(c.code)).map(c => c.code);
-        const etfs = codes.filter(c => /^(159|51|58)\d{3}$/.test(c.code)).map(c => c.code);
-
-        const allItems = [];
-        const missing = [];
-        if (stocks.length) {
-            try {
-                const r = await batchQuotes(stocks, { apiKey, instrument: 'stock' });
-                allItems.push(...r.items);
-                if (r.missing_codes) missing.push(...r.missing_codes);
-            } catch (e) { dbg('batch stock quotes failed', e); }
-        }
-        if (etfs.length) {
-            try {
-                const r = await batchQuotes(etfs, { apiKey, instrument: 'etf' });
-                allItems.push(...r.items);
-                if (r.missing_codes) missing.push(...r.missing_codes);
-            } catch (e) { dbg('batch etf quotes failed', e); }
-        }
-
-        const codeMap = new Map(allItems.map(item => [item.code, item]));
+        const live = await fetchLiveQuotes(codes.map(c => c.code));
+        const liveMap = live.map;
         const quotes = codes.map(c => {
-            const hit = codeMap.get(c.code);
+            const hit = liveMap.get(c.code);
             if (hit) return {
                 name: c.name || hit.name,
-                code: hit.code,
+                code: c.code,
                 price: hit.price,
                 change: hit.change,
                 change_pct: hit.change_pct,
@@ -733,18 +784,23 @@ export const toolExecutors = {
                 volume: hit.volume,
                 amount: hit.amount,
                 turnover_pct: hit.turnover_pct,
-                is_stale: false,
+                time: hit.time || null,
+                source: hit.source || null,
             };
             return { name: c.name, code: c.code, error: '未获取到行情' };
         });
         for (const n of noCode) {
             quotes.push({ name: n, error: '尚未获取到代码' });
         }
+        const fetched = quotes.filter(q => !q.error).length;
         return {
             total: list.length,
-            fetched: quotes.filter(q => !q.error).length,
+            fetched,
+            渠道: fetched ? (quotes.find(q => !q.error) || {}).source || null : null,
+            note: 'price 为当日实时价（time 为行情时间，渠道见 source）；盘前/休市时它是上一交易日收盘价，勿与日线末行当成两个不同的“现价”',
+            error: fetched ? undefined : '实时行情不可用：免费渠道（新浪/腾讯）与小石均失败，可稍后重试',
+            渠道诊断: live.diag.length ? live.diag.join('；') : undefined,
             quotes,
-            missing_codes: missing.length ? missing : undefined,
         };
     },
     async write_file(args) {
@@ -769,6 +825,27 @@ export const toolExecutors = {
 
 // ============== K 线辅助 ==============
 
+/**
+ * 名称 → 代码的本地库搜索（stock_basic_cache 一类表）：探不到表/桥接不可用就返 null，
+ * 由小石搜索接管（名称解析不是 K 线，调用一次搜索接口可接受）。
+ */
+async function searchCodeInDatabase(name) {
+    const kw = String(name || '').trim();
+    if (!kw) return null;
+    const plan = await resolveKlineDbPlan(await primaryRoot());
+    if (plan.error || !plan.basicTable) return null;
+    const codeCol = plan.basicCodeCol || 'ts_code';
+    const sql = 'SELECT ' + codeCol + ', name FROM ' + plan.basicTable
+        + ' WHERE name = ' + sqlText(kw) + ' OR name LIKE ' + sqlText(kw + '%')
+        + ' ORDER BY (name = ' + sqlText(kw) + ') DESC LIMIT 5';
+    const q = await dbQuery(sql, [codeCol, 'name'], plan.sourceName);
+    if (!q.ok) { dbg('db name search failed', q.message); return null; }
+    const rows = q.rows.filter(r => r && r[codeCol]);
+    if (!rows.length) return null;
+    const best = rows.find(r => String(r.name).trim() === kw) || rows[0];
+    return { code: String(best[codeCol]).toUpperCase(), name: best.name || kw, table: plan.basicTable };
+}
+
 async function resolveStockCode(args) {
     let code = String(args && args.code || '').trim();
     let name = String(args && args.name || '').trim();
@@ -784,6 +861,9 @@ async function resolveStockCode(args) {
         const digits = m[1];
         const suffix = (m[2] || '').toUpperCase();
         if (suffix) return { code: digits + suffix, name };
+        // ETF 代码段与股票不同（51/58 上交所、159 深交所），不能沿用「6 开头才是 SH」的推断
+        const etfPrefix = etfPrefixForCode(digits);
+        if (etfPrefix) return { code: digits + '.' + etfPrefix, name };
         const inferred = digits.startsWith('6') ? digits + '.SH' : digits + '.SZ';
         return { code: inferred, name };
     }
@@ -795,7 +875,11 @@ async function resolveStockCode(args) {
         const suffix = hit.prefix || (hit.code.startsWith('6') ? 'SH' : 'SZ');
         return { code: hit.code + '.' + suffix, name };
     }
+    // 本地列表没命中先问工作目录数据库（免掉一次小石搜索额度）
+    const dbHit = await searchCodeInDatabase(name);
+    if (dbHit) return { code: dbHit.code, name: dbHit.name };
     try {
+        trackCall('小石搜索');
         const items = await xiaoshiSearchStock(name, { timeoutMs: 15000 });
         const best = items.find(i => i.name === name) || items[0];
         if (best && best.symbol) return { code: best.symbol, name };
@@ -805,109 +889,435 @@ async function resolveStockCode(args) {
     }
 }
 
-async function readStockFromParquet(rootHandle, code, days) {
-    const map = await readStocksFromParquet(rootHandle, [code], days);
-    return map.get(code) || [];
-}
+// ============ 本地数据库日线（K 线唯一的本地来源，只读，经 flit_bridge 查询） ============
+// 口径：库里的日线由用户自己的定时任务维护（含除权处理），扩展只查不写、也不碰同步脚本。
+// parquet 年文件只是「某一时刻全市场快照」，用于回测或入库备份，**不参与 K 线取数**。
+// ETF / 指数不在本库覆盖范围（实测 a_share_daily 无 51/15/58 开头代码），一律走免费同花顺 ETF 日线，失败再小石兜底。
 
-// 日线列集（与 parquet 缓存列名一致）
-const KLINE_COLUMNS = ['code', 'date', 'open', 'high', 'low', 'close', 'volume', 'amount', 'change_pct', 'turnover_pct'];
-// 批量取数一次最多几只 / 接口补齐并发度（并发太高会把一年的年文件同时加载多份）
+// 批量取数一次最多几只 / 接口补齐并发度
 const MAX_BATCH_KLINE = 12;
 const API_CONCURRENCY = 4;
-
-// 按年文件批量读多只股票日线：一次 parquet 解析服务多只代码（filter $in），
-// 把 N 只 × 年数的磁盘 IO 压成 年数，这是 read_stocks_kline 并发不爆内存的关键
-async function readStocksFromParquet(rootHandle, codes, days) {
-    const qfqPath = 'data/a_share_daily/qfq';
-    const uniq = [...new Set((codes || []).filter(Boolean))];
-    const out = new Map(uniq.map(c => [c, []]));
-    if (!uniq.length) return out;
-    const entries = await listDir(rootHandle, qfqPath).catch(() => []);
-    const years = entries
-        .filter(e => e.type === 'file' && /^data_(\d{4})\.parquet$/.test(e.name))
-        .map(e => e.name.match(/^data_(\d{4})\.parquet$/)[1])
-        .sort();
-    if (!years.length) return out;
-    const thisYear = new Date().getFullYear();
-    const needRows = days + 5;
-    const byUpper = new Map(uniq.map(c => [String(c).toUpperCase(), c]));
-    for (const y of years.slice().reverse()) {
-        if (Number(y) > thisYear) continue;
-        // 只补缺口：已读到足够行数的代码不再参不下一年查询
-        const pending = uniq.filter(c => (out.get(c) || []).length < needRows);
-        if (!pending.length) break;
-        let rows = [];
-        try {
-            const binary = await readFileBinary(rootHandle, qfqPath + '/data_' + y + '.parquet');
-            rows = await parquetReadObjects({
-                file: binary.buffer,
-                columns: KLINE_COLUMNS,
-                filter: { code: { $in: pending } },
-                compressors,
-            });
-        } catch (err) {
-            dbg('parquet year failed', y, err);
-            continue;
-        }
-        for (const r of rows) {
-            const key = byUpper.get(String(r.code || '').toUpperCase());
-            if (key) out.get(key).push(klineRow(r));
-        }
+// 本地库查询超时（桥接侧还要 spawn docker exec psql，比直连慢一档）
+const DB_TIMEOUT_MS = 12000;
+// 库侧列名与工具行字段一致（parquet_to_postgres 约定：adjust,market,code,date,OHLC,volume,amount,change_pct,turnover_pct）
+const KLINE_DB_COLUMNS = ['code', 'date', 'open', 'high', 'low', 'close', 'volume', 'amount', 'change_pct', 'turnover_pct'];
+const KLINE_DB_REQUIRED = ['code', 'date', 'open', 'high', 'low', 'close'];
+const SAFE_TABLE_RE = /^[A-Za-z_][A-Za-z0-9_.]*$/;
+// 一次会话内按「工作目录 + 数据源 + config 指纹」缓存探测结果，避免每次查 K 线都摸一遍 schema；
+// 带指纹是为了改了 flit/config.json 不必重开 AI 窗口（P1-4），只留最近几个库的探测结果。
+const dbPlanCache = new Map();
+function dbPlanSet(key, plan) {
+    if (dbPlanCache.size > 16) {
+        const oldest = dbPlanCache.keys().next().value;
+        if (oldest !== undefined && oldest !== key) dbPlanCache.delete(oldest);
     }
-    for (const [c, list] of out) out.set(c, list.sort((a, b) => (a.date < b.date ? -1 : 1)).slice(-days));
-    return out;
+    dbPlanCache.set(key, plan);
 }
 
-function klineRow(r) {
+/** 主工作目录 handle（未授权返回 null，不抛） */
+async function primaryRoot() {
+    try { return await readyRoot(state.workspaceHandles, ''); } catch { return null; }
+}
+
+/** SQL 字符串字面量：名称/代码都来自模型，必须在这里过一道 */
+function sqlText(v) {
+    return "'" + String(v).replace(/'/g, "''") + "'";
+}
+
+/** psql -A -t 输出的是文本：空串即 NULL；数值统一转数并收掉长尾小数 */
+function dbNum(v, digits = 6) {
+    if (v === null || v === undefined || v === '') return null;
+    const n = Number(v);
+    if (!Number.isFinite(n)) return null;
+    return Math.round(n * 10 ** digits) / 10 ** digits;
+}
+
+function dbKlineRow(r) {
     return {
-        date: fmtKlineDate(r.date),
-        open: r.open ?? null,
-        high: r.high ?? null,
-        low: r.low ?? null,
-        close: r.close ?? null,
-        volume: r.volume ?? null,
-        amount: r.amount ?? null,
-        change_pct: r.change_pct ?? null,
-        turnover_pct: r.turnover_pct ?? null,
+        date: String(r.date || '').slice(0, 10),
+        open: dbNum(r.open, 4), high: dbNum(r.high, 4), low: dbNum(r.low, 4), close: dbNum(r.close, 4),
+        volume: dbNum(r.volume, 0), amount: dbNum(r.amount, 2),
+        change_pct: dbNum(r.change_pct, 4), turnover_pct: dbNum(r.turnover_pct, 4),
     };
 }
 
-// 单只：缓存 → 接口补齐（read_stock_kline 用）
-async function loadKlineRows(rootHandle, code, days) {
-    const cache = await readStockFromParquet(rootHandle, code, days);
-    return fillKlineFromApi(code, days, cache, lastTradingDayStr(new Date()));
+/** 桥接只读查询：成功回 { ok, rows }，失败回 { ok:false, message }（桥接没起来也走这里） */
+async function dbQuery(sql, columns, sourceName) {
+    if (!state.workspaceRootPath) return { ok: false, message: '未设置主工作目录' };
+    trackCall('本地数据库');
+    const r = await bridgeRequest('/v1/database/query', {
+        workspace_root: state.workspaceRootPath,
+        source: sourceName || undefined,
+        sql, columns, timeout_ms: DB_TIMEOUT_MS,
+    }, { timeoutMs: DB_TIMEOUT_MS + 3000 });
+    if (!r || r.ok === false) {
+        return { ok: false, message: (r && r.error && r.error.message) || '本地数据库查询失败', code: r && r.error && r.error.code };
+    }
+    return { ok: true, rows: r.rows || [] };
 }
 
-// 「缓存不够最新交易日 → 小石 → adata」回退链（ETF 与普通股票同一条链，isEtfCode 只影响 adata 接口选择）
-async function fillKlineFromApi(code, days, cache, expected) {
-    let source = cache.length ? 'parquet' : 'none';
+/** 读 flit/config.json 里登记的数据源（扩展自己用 File System Access 读，不经桥接）
+ * 附带把原文做一次短指纹（stamp）：调用方拿它做缓存键，改了配置不必重开 AI 窗口。 */
+async function readDbConfigSources(dir) {
+    if (!dir) return { sources: [], note: '工作目录未授权', stamp: 'no-dir' };
+    let text;
+    try { text = (await readFile(dir.handle, 'flit/config.json', Infinity)).content; }
+    catch { return { sources: [], note: '工作目录没有 flit/config.json', stamp: 'no-file' }; }
+    let parsed;
+    try { parsed = JSON.parse(text); } catch { return { sources: [], note: 'flit/config.json 不是有效 JSON', stamp: 'bad-json' }; }
+    const raw = parsed && (parsed.data_sources || parsed.database);
+    const sources = (Array.isArray(raw) ? raw : (raw && typeof raw === 'object' ? Object.values(raw) : []))
+        .filter(s => s && typeof s === 'object');
+    let stamp = text.length + ':';
+    for (let i = 0; i < text.length; i += 97) stamp += (text.charCodeAt(i) ^ (i % 31)).toString(36);
+    return { sources, note: sources.length ? '' : 'flit/config.json 未登记 data_sources', stamp };
+}
+
+/** 从候选源里挑一个能用来看日线的：优先登记了日线表的、其次 docker+库名齐全的 */
+function pickDailySource(list) {
+    const arr = (Array.isArray(list) ? list : [list]).filter(s => s && typeof s === 'object');
+    return arr.find(s => s.tables && (s.tables.daily || s.tables.daily_view || s.tables.kline))
+        || arr.find(s => s.access === 'docker' && s.container && s.database)
+        || arr.find(s => s.database || s.name) || null;
+}
+
+/** 按列签名在真实 schema 里找日线表 / 股票基础信息表（config 没写表名时用） */
+function probeTables(columns) {
+    const byTable = new Map();
+    for (const c of columns || []) {
+        if (!c || !c.table) continue;
+        if (!byTable.has(c.table)) byTable.set(c.table, new Set());
+        byTable.get(c.table).add(String(c.column).toLowerCase());
+    }
+    const names = [...byTable.keys()];
+    const hasAll = (t, need) => need.every(n => byTable.get(t).has(n));
+    const daily = names.filter(t => hasAll(t, KLINE_DB_REQUIRED)
+            && !/today|weekly|monthly|temp|backup|test/i.test(t))
+        .sort((a, b) => (/daily/i.test(b) ? 1 : 0) - (/daily/i.test(a) ? 1 : 0) || a.localeCompare(b));
+    const basic = names.filter(t => hasAll(t, ['name'])
+            && (byTable.get(t).has('ts_code') || byTable.get(t).has('code') || byTable.get(t).has('symbol')))
+        .sort((a, b) => (/basic|list|info/i.test(b) ? 1 : 0) - (/basic|list|info/i.test(a) ? 1 : 0) || a.localeCompare(b));
+    const basicCodeCol = basic.length
+        ? (['ts_code', 'code', 'symbol'].find(n => byTable.get(basic[0]).has(n)) || 'ts_code') : null;
+    return { daily, basic, basicCodeCol, setOf: t => byTable.get(t) || new Set() };
+}
+
+/**
+ * 解析「用哪个源、哪张表、什么复权口径」。flit/config.json 优先 → 配置为空再让桥接按
+ * 工作目录（flit/memory.md、AGENTS.md、README.md）推断 → 表名没登记就按列签名探。
+ * 都拿不到时 error='no_database'，由调用方换成对用户的话术。
+ */
+async function resolveKlineDbPlan(dir) {
+    const diag = [];
+    if (!state.bridgeEnabled) return { error: 'bridge_disabled', diag: ['AI 设置未启用 Agent 桥接'] };
+    if (!state.workspaceRootPath) return { error: 'workspace_not_set', diag: ['尚未设置主工作目录'] };
+    const root = dir || await primaryRoot();
+    const { sources, note, stamp } = await readDbConfigSources(root);
+    let source = pickDailySource(sources);
+    if (!source) {
+        diag.push(note || 'flit/config.json 没有可用数据源');
+        const ctx = await bridgeRequest('/v1/workspace/context', { workspace_root: state.workspaceRootPath });
+        const inferred = ctx && ctx.ok !== false ? ((ctx.context && ctx.context.database) || []) : [];
+        source = pickDailySource(Array.isArray(inferred) ? inferred : [inferred]);
+        if (source) diag.push('按工作目录搜索到候选数据源：' + (source.name || '(未命名)'));
+    }
+    if (!source) return { error: 'no_database', diag };
+
+    const cacheKey = state.workspaceRootPath + '|' + String(source.name || source.database || '') + '|' + (stamp || '');
+    const cached = dbPlanCache.get(cacheKey);
+    if (cached) return { ...cached, diag };
+
+    const tables = source.tables || {};
+    let table = tables.daily || tables.daily_view || tables.kline || null;
+    if (table && !SAFE_TABLE_RE.test(table)) return { error: 'bad_table', diag: [...diag, '登记的表名不合法：' + table] };
+    let columns = [];
+    const sch = await bridgeRequest('/v1/database/schema', {
+        workspace_root: state.workspaceRootPath, source: source.name || undefined, timeout_ms: DB_TIMEOUT_MS,
+    }, { timeoutMs: DB_TIMEOUT_MS + 3000 });
+    if (sch && sch.ok !== false) columns = sch.tables || [];
+    else diag.push('读取表结构失败：' + ((sch && sch.error && sch.error.message) || '未知错误'));
+
+    const probed = probeTables(columns);
+    if (table && !probed.setOf(table.toLowerCase()).size && columns.length) {
+        // 大小写/引号差异：information_schema 里通常是小写
+        const exact = columns.filter(c => String(c.table).toLowerCase() === String(table).toLowerCase());
+        if (exact.length) table = exact[0].table;
+        else { diag.push('登记的表 ' + table + ' 在库里不存在，改按列签名搜索'); table = null; }
+    }
+    if (!table) table = probed.daily[0] || null;
+    let tableGuessed = false;
+    if (!table && !columns.length) {
+        // 桥接不可达且 config 没登记表名：先按默认表名试一次，让真正的报错从查询里出来（比猜「没库」更诚实），
+        // 但这个表名**未经验证**，不能当成 `数据表` 回给用户（见 P1-5）。
+        table = 'a_share_daily';
+        tableGuessed = true;
+        diag.push('未读到表结构且 config 未登记表名，暂按 a_share_daily 试查（表名未经验证）');
+    }
+    if (!table) return { error: 'no_table', diag: [...diag, '库里找不到含 code/date/open/high/low/close 的日线表'] };
+
+    const cols = probed.setOf(String(table).toLowerCase());
+    const plan = {
+        sourceName: source.name || undefined,
+        table,
+        tableGuessed,
+        adjust: (source.conventions && source.conventions.adjust) || 'qfq',
+        hasAdjust: cols.has('adjust'),
+        basicTable: probed.basic[0] || tables.stock_basic || null,
+        basicCodeCol: probed.basicCodeCol || 'ts_code',
+    };
+    dbPlanSet(cacheKey, plan);
+    return { ...plan, diag };
+}
+
+/** 只一次 SQL 取多只股票的已收盘日线（库里是 EOD，不含当日未收盘 bar） */
+async function readKlineFromDb(dir, codes, days) {
+    const uniq = [...new Set((codes || []).filter(Boolean).map(c => String(c).toUpperCase()))];
+    const out = new Map(uniq.map(c => [c, []]));
+    if (!uniq.length) return { map: out, diag: [], plan: null };
+    const plan = await resolveKlineDbPlan(dir);
+    if (plan.error) return { map: out, diag: plan.diag || [], error: plan.error, plan };
+    const byShort = new Map(uniq.map(c => [String(c).split('.')[0], c]));
+    // 带后缀与 6 位两种写法一起给：不依赖库里 code 的写法，且仍能走 (adjust,code,date) 主键索引
+    const inList = [...byShort.keys(), ...uniq].map(c => sqlText(c)).join(',');
+    const sql = 'WITH ranked AS (SELECT ' + KLINE_DB_COLUMNS.join(', ')
+        + ', ROW_NUMBER() OVER (PARTITION BY substr(code, 1, 6) ORDER BY date DESC) AS rn'
+        + ' FROM ' + plan.table
+        + ' WHERE code IN (' + inList + ')'
+        + (plan.hasAdjust ? ' AND adjust = ' + sqlText(plan.adjust) : '')
+        + ' AND date >= ' + sqlText(klineStartDate(days)) + ')'
+        + ' SELECT ' + KLINE_DB_COLUMNS.join(', ') + ' FROM ranked WHERE rn <= ' + Number(days) + ' ORDER BY code, date';
+    const q = await dbQuery(sql, KLINE_DB_COLUMNS, plan.sourceName);
+    if (!q.ok) return { map: out, diag: [...(plan.diag || []), '查询 ' + plan.table + ' 失败：' + q.message], error: 'query_failed', plan };
+    for (const r of q.rows) {
+        const target = byShort.get(String(r.code || '').slice(0, 6));
+        if (target) out.get(target).push(dbKlineRow(r));
+    }
+    let hit = 0;
+    for (const [c, list] of out) {
+        const byDate = new Map(list.map(r => [r.date, r]));
+        const rows = [...byDate.values()].sort((a, b) => (a.date < b.date ? -1 : 1));
+        out.set(c, rows);
+        if (rows.length) hit++;
+    }
+    const last = [...out.values()].filter(l => l.length).map(l => l[l.length - 1].date).sort();
+    const diag = [...(plan.diag || []), `本地库 ${plan.table}${plan.hasAdjust ? '(' + plan.adjust + ')' : ''} 命中 ${hit}/${uniq.length} 只`
+        + (last.length ? '，末行 ' + (last[0] === last[last.length - 1] ? last[0] : last[0] + '~' + last[last.length - 1]) : '')];
+    return { map: out, diag, plan, table: plan.tableGuessed ? null : plan.table, adjust: plan.adjust };
+}
+
+/** K 线拿不到本地库时给模型的话术（桥接/目录问题单独说，别一律甩「联系作者」） */
+function klineDbUnavailable(res) {
+    const diag = (res && res.diag || []).join('；');
+    const hint = '实时行情（现价/涨跌幅）仍可用 get_stock_quote / get_portfolio_quotes，不需要数据库。';
+    if (res.error === 'bridge_disabled') {
+        return { error: '本地数据库不可用：AI 设置里未启用「Agent 桥接」。K 线只从工作目录 flit/config.json 登记的数据库读取，请先启用桥接并启动 flit_bridge（node flit_bridge/server.js），再重开 AI 窗口。', 取数诊断: diag, hint };
+    }
+    if (res.error === 'workspace_not_set') {
+        return { error: '本地数据库不可用：尚未设置主工作目录，请在 AI 窗口顶部选择工作目录（其中需有 flit/config.json）。', 取数诊断: diag, hint };
+    }
+    if (res.error === 'query_failed' || res.error === 'bad_table' || res.error === 'bridge_unreachable' || res.error === 'schema_failed') {
+        return { error: '工作目录登记了数据库，但日线表读取失败或桥接不可用：' + (diag || '详见 取数诊断') + '。若持续失败，请联系项目作者。', 取数诊断: diag, hint };
+    }
+    return {
+        error: '由于工作目录不存在可用数据库，当前无法查询 K 线，若有需求请联系项目作者。',
+        取数诊断: diag || 'flit/config.json 与工作目录记忆中都没有可用的数据源',
+        排查: ['工作目录 flit/config.json 的 data_sources[].tables.daily', 'flit_bridge 是否在运行（/health）', '桥接目前仅支持 access=docker 的 PostgreSQL'],
+        hint,
+    };
+}
+
+/**
+ * 「本地日线库不够最新已收盘交易日 → 免费渠道 →（仅限小缺口）小石」补齐链。
+ * 库里只缺 1~2 根时才升级到小石逐只接口（gapDays <= 1，weekdaysBetween 不含两端）；
+ * 缺口更大不抽额度，直接让模型告知用户本地日线库待更新（库由用户自己的定时任务维护，扩展不跑同步脚本）。
+ * 盘中拼接实时 bar 时，库里残存的当日未收盘行不计入缺口判断（否则永远判定为“已最新”）。
+ */
+async function fillKlineFromApi(code, days, cache, expected, { liveToday = false } = {}) {
+    let source = cache.length ? 'db' : 'none';
     let apiRows = [];
     let apiWarning = null;
-    const cacheLast = cache.length ? cache[cache.length - 1].date : '';
-    if (!cache.length || cacheLast < expected) {
+    const isEtf = isEtfCode(code);
+    const today = localDateStr(new Date());
+    // 盘中拼接实时 bar 时，先丢掉库里残留的当日未收盘行再算缺口（否则永远判定为“已最新”，补不到上一交易日）
+    let refCache = cache;
+    if (liveToday && refCache.length && refCache[refCache.length - 1].date === today) {
+        refCache = refCache.slice(0, -1);
+    }
+    const cacheLast = refCache.length ? refCache[refCache.length - 1].date : '';
+    const gapDays = weekdaysBetween(cacheLast, expected);
+    if (!refCache.length || cacheLast < expected) {
+        // 1）免费：股票走东财 push2his（内部已带回退同花顺/百度），ETF 只有同花顺一源
         try {
-            apiRows = await xiaoshiDailyKline(code, { limit: days, timeoutMs: 15000 });
-            source = cache.length ? 'parquet+xiaoshi' : 'xiaoshi';
+            trackCall('免费日线(东财/同花顺)');
+            const freeRows = isEtf
+                ? await adataGetMarketEtfDaily(code.split('.')[0], { startDate: klineStartDate(days) })
+                : await adataGetMarketDaily(code.split('.')[0], { startDate: klineStartDate(days), adjustType: 1 });
+            apiRows = adataToKlineRows(freeRows);
+            if (apiRows.length) source = cache.length ? 'db+adata' : 'adata';
         } catch (e) {
-            dbg('xiaoshi kline fetch failed', e);
-            apiWarning = '小石 API 未补齐（' + (e && e.message || e) + '）';
-            try {
-                const isEtf = isEtfCode(code);
-                const adataRows = isEtf
-                    ? await adataGetMarketEtfDaily(code.split('.')[0], { startDate: klineStartDate(days) })
-                    : await adataGetMarketDaily(code.split('.')[0], { startDate: klineStartDate(days), adjustType: 1 });
-                apiRows = adataToKlineRows(adataRows);
-                source = cache.length ? 'parquet+adata' : 'adata';
-                apiWarning = '小石 API 不可用，已改用东方财富/同花顺数据';
-            } catch (e2) {
-                dbg('adata kline fetch failed', e2);
-                apiWarning += '；东方财富 adata 也未补齐（' + (e2 && e2.message || e2) + '）';
+            dbg('adata kline fetch failed', e);
+            apiRows = [];
+        }
+        // 2）免费渠道拿不到：缺口只有一两个交易日才升级小石，大缺口不抽额度
+        if (!apiRows.length) {
+            if (gapDays <= 1) {
+                try {
+                    trackCall('小石日线');
+                    // 小石的股票日线接口不认 ETF：需显式 instrument=etf，且历史只放未复权价（实测 adjust 只能 none）
+                    apiRows = await xiaoshiDailyKline(code, isEtf
+                        ? { limit: days, timeoutMs: 15000, instrument: 'etf', adjust: 'none' }
+                        : { limit: days, timeoutMs: 15000 });
+                    if (apiRows.length) source = cache.length ? 'db+xiaoshi' : 'xiaoshi';
+                } catch (e) {
+                    dbg('xiaoshi kline fetch failed', e);
+                    apiWarning = '免费渠道与小石均未补齐（' + (e && e.message || e) + '）';
+                }
+                if (!apiRows.length && !apiWarning) apiWarning = '免费渠道返回空且小石未补齐（数据可能滞后）';
+            } else {
+                apiWarning = `本地日线库缺 ${gapDays} 个交易日（${cacheLast || '无'} → ${expected}），缺口过大不逐只调用小石接口；请告知用户本地日线库待更新后重试（本项目不代为同步），当前价改用 get_stock_quote / get_portfolio_quotes 取`;
             }
         }
     }
-    const rows = mergeKlineRows(cache, apiRows, days);
-    return { rows, source, cacheLast, apiRows, apiWarning };
+    const rows = mergeKlineRows(refCache, apiRows, days + (liveToday ? 1 : 0));
+    return { rows, source, cacheLast, apiRows, apiWarning, gapDays };
+}
+
+/** 实时行情取数（新浪+腾讯→小石批量→小石单只），返回 { map, diag } */
+// 实时行情：单批只数 / 单渠道超时 / 小石单只兜底上限（公开接口偶尔挂住或一颗脏代码带崩整批）
+const LIVE_BATCH_MAX = 60;
+const LIVE_TIMEOUT_MS = 6000;
+const LIVE_SINGLE_MAX = 12;
+
+/** 包一层超时，避免某个渠道挂住把整个工具调用拖死 */
+function withTimeout(promise, ms, label) {
+    let timer;
+    return Promise.race([
+        Promise.resolve(promise).finally(() => clearTimeout(timer)),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`${label}超时 ${ms}ms`)), ms); }),
+    ]);
+}
+
+/** 异常摘要（去掉长 body/堆栈，只留一句能给模型看的原因） */
+function errBrief(e) {
+    const s = String((e && e.message) || e || '未知错误');
+    return s.length > 120 ? s.slice(0, 120) + '…' : s;
+}
+
+/**
+ * 实时行情（全链路免费优先）：新浪+腾讯合并 → 小石批量 → 小石单只接口。
+ * 返回 { map: Map<6 位代码, quote>, diag: string[] }；diag 是逐渠道结果，随工具结果回给模型，
+ * 让模型（和排错的人）看得到“优先走了哪个渠道、为何降级”。
+ * 小石批量接口对不存在的代码会整批 5xx，所以单只接口是必要的兜底。
+ */
+async function fetchLiveQuotes(codes6) {
+    const out = new Map();
+    const uniq = [...new Set((codes6 || []).filter(Boolean))].map(c => String(c).split('.')[0]);
+    const diag = [];
+    if (!uniq.length) return { map: out, diag };
+    const put = (code, q, source) => {
+        if (!q || !Number.isFinite(q.price) || q.price <= 0) return;
+        out.set(String(code), {
+            name: q.name || null,
+            price: q.price,
+            open: q.open ?? null,
+            high: q.high ?? null,
+            low: q.low ?? null,
+            last_close: q.last_close ?? q.previous_close ?? null,
+            change: q.change ?? null,
+            change_pct: q.change_pct ?? null,
+            volume: q.volume ?? null,
+            amount: q.amount ?? null,
+            turnover_pct: q.turnover_pct ?? null,
+            time: q.time || q.quote_time || null,
+            source,
+        });
+    };
+    // 1）免费全字段批量（模块内部新浪+腾讯合并）
+    for (let i = 0; i < uniq.length; i += LIVE_BATCH_MAX) {
+        const chunk = uniq.slice(i, i + LIVE_BATCH_MAX);
+        try {
+            trackCall('实时批量(新浪/腾讯)');
+            for (const r of await withTimeout(adataListMarketFull(chunk, diag), LIVE_TIMEOUT_MS, '免费实时')) {
+                put(r.stock_code, r, '免费(新浪/腾讯)');
+            }
+        } catch (e) {
+            dbg('adata live quotes failed', e);
+            diag.push('免费实时异常：' + errBrief(e));
+        }
+    }
+    if (out.size >= uniq.length) return { map: out, diag };
+    const miss = uniq.filter(c => !out.has(c));
+    const before = out.size;
+    // 2）小石批量（只为缺的那几只；Key 未配置就直接说明）
+    try {
+        const apiKey = await getXiaoshiApiKey();
+        if (!apiKey) {
+            diag.push('小石 Key 未配置，跳过小石渠道');
+        } else {
+            const pull = async (list, instrument) => {
+                if (!list.length) return;
+                trackCall('小石批量');
+                const r = await xiaoshiBatchQuotes(list, { apiKey, instrument });
+                for (const it of r.items || []) put(it.code, it, 'xiaoshi');
+                if (r.missing_codes && r.missing_codes.length) diag.push('小石批量未返回：' + r.missing_codes.join(','));
+            };
+            await pull(miss.filter(c => !isEtfCode(c)), 'stock');
+            await pull(miss.filter(c => isEtfCode(c)), 'etf');
+            diag.push(`小石批量 命中 ${out.size - before}/${miss.length}`);
+        }
+    } catch (e) {
+        diag.push('小石批量 失败：' + errBrief(e));
+    }
+    // 3）小石单只接口兜底（批量整批 5xx 时单只往往仍可用），限 12 只、并发 4，避免拖时
+    const still = uniq.filter(c => !out.has(c));
+    if (still.length) {
+        const apiKey = await getXiaoshiApiKey().catch(() => '');
+        if (apiKey) {
+            const list = still.slice(0, LIVE_SINGLE_MAX);
+            const base = out.size;
+            let lastErr = null;
+            const got = await mapWithLimit(list, API_CONCURRENCY, async (c) => {
+                try {
+                    trackCall('小石单只');
+                    const q = await xiaoshiQuote(c, { timeoutMs: 8000 });
+                    return q && Number.isFinite(q.price) ? [c, q] : null;
+                } catch (e) {
+                    lastErr = errBrief(e);
+                    return null;
+                }
+            });
+            for (const g of got) if (g) put(g[0], g[1], 'xiaoshi(单只)');
+            diag.push(`小石单只兜底 命中 ${out.size - base}/${list.length}${lastErr ? '，末错：' + lastErr : ''}${still.length > list.length ? `（尚有 ${still.length - list.length} 只未试）` : ''}`);
+        } else {
+            diag.push('小石 Key 未配置，无法用单只接口兜底');
+        }
+    }
+    if (!out.size) diag.push('实时行情全渠道不可用，可稍后重试或改用页面刷新模式');
+    return { map: out, diag };
+}
+
+/**
+ * 把当日实时行情拼成日线最后一根（未收盘）。
+ * 已有当日行（免费接口盘中也会返回未收盘的当日 bar）则覆盖，没有则追加，总行数仍限 days 根（“近 7 日”=6 根收盘 + 1 根实时）。
+ */
+function applyIntradayBar(rows, quote, today, days) {
+    if (!quote || !Number.isFinite(quote.price) || quote.price <= 0) return { rows, spliced: false };
+    const bar = {
+        date: today,
+        open: quote.open ?? null,
+        high: quote.high ?? null,
+        low: quote.low ?? null,
+        close: quote.price,
+        volume: quote.volume ?? null,
+        amount: quote.amount ?? null,
+        change_pct: quote.change_pct ?? null,
+        turnover_pct: quote.turnover_pct ?? null,
+        intraday: true,                     // 未收盘标识
+        as_of: quote.time || null,          // 行情时刻，便于模型判断当日量已成交多少
+        quote_source: quote.source || null,
+    };
+    const base = rows.filter(r => r.date !== today);
+    return { rows: [...base, bar].sort((a, b) => (a.date < b.date ? -1 : 1)).slice(-(days || (base.length + 1))), spliced: true };
 }
 
 // 并发受限的 map（接口补齐用：12 只串行要 30s+，无限并发又会压城 API 限流）
@@ -997,15 +1407,12 @@ function klineSummary(code, name, rows, { source, warning } = {}) {
             ? round2((Number(last.high) - lastClose) / prevClose * 100) : null,               // 冲高回落（上影）幅度%
         turnover_pct: round2(firstFinite(last.turnover_pct)),
         closes: closes.slice(-5).map(v => round2(v)).join(','),
+        // 末行是当日未收盘实时 bar 时才输出这两个字段，模型据此区分“现价”与“收盘价”
+        intraday: last.intraday === true ? true : undefined,
+        as_of: last.intraday === true ? (last.as_of || null) : null,
         source: source || null,
         warning: warning || null,
     });
-}
-
-function fmtKlineDate(d) {
-    if (!d) return '';
-    if (d instanceof Date) return d.toISOString().slice(0, 10);
-    return String(d).slice(0, 10);
 }
 
 function mergeKlineRows(cache, api, days) {
@@ -1022,13 +1429,148 @@ function isEtfCode(code) {
     return c.startsWith('159') || c.startsWith('51') || c.startsWith('58');
 }
 
-function lastTradingDayStr(date) {
+// ============ A股交易时段与数据时效口径（工具结果与系统提示共用唯一一处） ============
+
+// 09:30 开盘 / 11:30–13:00 午休 / 15:00 收盘，全天 240 分钟。未建模节假日，长假只影响时段提示。
+const SESSION_OPEN = 9 * 60 + 30;
+const MORNING_END = 11 * 60 + 30;
+const AFTERNOON_START = 13 * 60;
+const SESSION_CLOSE = 15 * 60;
+const SESSION_MINUTES = 240;
+
+function localDateStr(date) {
+    const d = new Date(date);
+    const p = v => String(v).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+/** 严格早于 ref 的最近工作日（用本地年月日拼接，不用 toISOString，避开跨时区少一天） */
+function prevWeekdayStr(date) {
     const d = new Date(date);
     d.setHours(12, 0, 0, 0);
+    do { d.setDate(d.getDate() - 1); } while (d.getDay() === 0 || d.getDay() === 6);
+    return localDateStr(d);
+}
+
+/** 给模型的实时拼接说明（未拼接/拼接失败时也说清楚，避免模型自己猜末行是不是今天） */
+function liveSpliceInfo(now, splicedCount, totalCount, asOf, channel, diag) {
+    if (!hasLiveSession(now)) return undefined;
+    const info = {
+        当日bar: localDateStr(now),
+        覆盖只数: splicedCount + '/' + totalCount,
+        量能说明: sessionVolumeNote(marketPhase(now).tradedMinutes),
+    };
+    if (!splicedCount) {
+        info.说明 = '未拼接到当日实时行情（下列渠道均失败），末行仍为上一交易日收盘';
+    } else {
+        info.行情时间 = asOf || null;
+        info.渠道 = channel || null;
+    }
+    if (Array.isArray(diag) && diag.length) info.渠道诊断 = diag.slice(-4).join('；');
+    return info;
+}
+/** 时段信息 { phase: weekend|pre|intraday|lunch|closed, label, tradedMinutes } */
+function marketPhase(now = new Date()) {
+    const d = new Date(now);
     const dow = d.getDay();
-    if (dow === 0) d.setDate(d.getDate() - 2);
-    else if (dow === 6) d.setDate(d.getDate() - 1);
-    return d.toISOString().slice(0, 10);
+    const minute = d.getHours() * 60 + d.getMinutes();
+    if (dow === 0 || dow === 6) return { phase: 'weekend', label: '周末休市（未建模节假日）', tradedMinutes: 0 };
+    if (minute < SESSION_OPEN) return { phase: 'pre', label: '盘前（尚未开盘）', tradedMinutes: 0 };
+    if (minute <= MORNING_END) return { phase: 'intraday', label: '盘中（上午）', tradedMinutes: minute - SESSION_OPEN };
+    if (minute < AFTERNOON_START) return { phase: 'lunch', label: '午间休市', tradedMinutes: 120 };
+    if (minute <= SESSION_CLOSE) return { phase: 'intraday', label: '盘中（下午）', tradedMinutes: 120 + (minute - AFTERNOON_START) };
+    return { phase: 'closed', label: '已收盘', tradedMinutes: SESSION_MINUTES };
+}
+
+/** 当日已有成交但未收盘（盘中/午休）——日线工具据此拼接实时 bar */
+function hasLiveSession(now = new Date()) {
+    const { phase } = marketPhase(now);
+    return phase === 'intraday' || phase === 'lunch';
+}
+
+/**
+ * 日线序列「应当已有的最后一根」日期：盘中/午休为上一交易日（当日由实时拼接提供），
+ * 其余时段（盘前/收盘后/休市）等于最新已收盘交易日。
+ */
+function expectedDailyLastDate(now = new Date()) {
+    return hasLiveSession(now) ? prevWeekdayStr(now) : lastClosedSessionStr(now);
+}
+
+/** 两个交易日之间隔了多少个工作日（不含两端：少 1 根 = 0、少 2 根 = 1）；只用于判断缺口大小 */
+function weekdaysBetween(fromDate, toDate) {
+    if (!fromDate || !toDate || toDate <= fromDate) return 0;
+    const d = new Date(fromDate + 'T12:00:00');
+    let n = 0;
+    for (let i = 0; i < 400; i++) {
+        d.setDate(d.getDate() + 1);
+        if (localDateStr(d) >= toDate) break;
+        if (d.getDay() !== 0 && d.getDay() !== 6) n++;
+    }
+    return n;
+}
+
+// ============ 接口调用计数（近 10 分钟窗口，用于向模型自证“没反复抽小石”） ============
+const CALL_WINDOW_MS = 10 * 60 * 1000;
+const callLog = {
+    '免费日线(东财/同花顺)': [],
+    '实时批量(新浪/腾讯)': [],
+    '本地数据库': [],
+    '小石日线': [],
+    '小石批量': [],
+    '小石单只': [],
+    '小石搜索': [],
+};
+
+function trackCall(key) {
+    const arr = callLog[key];
+    if (!arr) return;
+    const t = Date.now();
+    while (arr.length && t - arr[0] > CALL_WINDOW_MS) arr.shift();
+    arr.push(t);
+}
+
+function apiCallsNote() {
+    const t = Date.now();
+    const parts = [];
+    for (const [k, arr] of Object.entries(callLog)) {
+        while (arr.length && t - arr[0] > CALL_WINDOW_MS) arr.shift();
+        if (arr.length) parts.push(`${k} ${arr.length} 次`);
+    }
+    return parts.length ? '近 10 分钟接口调用：' + parts.join('｜') : null;
+}
+
+/**
+ * 最新「已收盘交易日」（YYYY-MM-DD）：工作日 15:00 之后算当天，否则回退上一工作日。
+ * 只看时段，不管本地日线库是否已更新：盘中由实时行情补当日 bar，历史缺口再按免费/小石链路处理。
+ */
+function lastClosedSessionStr(now = new Date()) {
+    const d = new Date(now);
+    const dow = d.getDay();
+    const minute = d.getHours() * 60 + d.getMinutes();
+    if (dow >= 1 && dow <= 5 && minute >= SESSION_CLOSE) return localDateStr(d);
+    return prevWeekdayStr(d);
+}
+
+/** 当日成交量能不能跟整日量直接比较，给模型的量比/缩量口径提示 */
+function sessionVolumeNote(tradedMinutes) {
+    const pct = Math.round(tradedMinutes / SESSION_MINUTES * 100);
+    if (tradedMinutes >= 210) return `当日已成交 ${tradedMinutes}/${SESSION_MINUTES} 分钟（${pct}%），成交量已接近全天量，量比/缩量可基本按整日解读`;
+    if (tradedMinutes <= 0) return '当日尚无成交';
+    return `当日仅成交 ${tradedMinutes}/${SESSION_MINUTES} 分钟（${pct}%），末行成交量远小于全天量，量比/缩量等量能指标对末行不可直接比较，需按时段比例放大后再判`;
+}
+
+/**
+ * 注入系统提示的「当前时间」上下文：日期 + 星期 + A股时段 + 最新已收盘交易日。
+ * 旧版只给 HH:MM:SS（shared/utils.js 的 getDateTime），模型无从判断“日线最新一天是不是今天”，
+ * 于是会把上一交易日收盘价当成现价输出。
+ */
+function nowContext(now = new Date()) {
+    const d = new Date(now);
+    const week = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'][d.getDay()];
+    const { label, tradedMinutes } = marketPhase(d);
+    return `${fmtDateTimeStr(d.getTime())} ${week}｜A股${label}，当日已成交 ${tradedMinutes}/${SESSION_MINUTES} 分钟`
+        + `｜最新已收盘交易日 ${lastClosedSessionStr(d)}`
+        + (hasLiveSession(d) ? '｜日线工具已拼接当日实时未收盘 bar（各项标 intraday）' : '');
 }
 
 function klineStartDate(days) {
@@ -1143,17 +1685,20 @@ export function buildSystemPrompt() {
     const bridgeHardRules = bridgeEnabled
         ? '[桥接硬约束] 各组详细规则以 load_tool_group 返回的 rule 为准，不得推测表名/字段，先读 get_workspace_context 与 workflow 再查询。若 bridge_health 返回 bridge_unreachable，立即停止工具调用，只把 start_command 里的 pwsh 命令输出给用户手动执行；绝对禁止用 run_workspace_process 等工具自行启动 flit_bridge。凭据只能写入被 .gitignore 忽略的 flit/config.json，不得写入 memory.md。'
         : '[桥接] 当前未启用。若用户需要本地脚本或数据库查询，告知在 AI 设置中启用桥接、授权目录并启动 flit_bridge 后，重开 AI 窗口并新建会话。';
-    const dataRules = '[取数纪律] 多只股票必须一次批量取数（日线用 read_stocks_kline，最多 12 只；实时行情用 get_portfolio_quotes），禁止逐只重复 query；最多 2 轮数据收集就要给出结论，超过 3 轮会触发旧工具结果驱逐（早期原始数据被丢弃）；结果被截断或已驱逐时不要反复重试同一查询，必要时缩小范围重取。';
+    const dataRules = '[取数纪律] 多只股票必须一次批量取数（日线用 read_stocks_kline，最多 12 只；实时行情用 get_portfolio_quotes），禁止逐只重复 query；同一批股票的同一类查询只调一次，不要把刚拿过的数据再拉一遍（每次调用都会真花免费接口额度并叠加延时）；最多 2 轮数据收集就要给出结论，超过 3 轮会触发旧工具结果驱逐（早期原始数据被丢弃）；结果被截断或已驱逐时不要反复重试同一查询，必要时缩小范围重取；工具提示本地缓存缺口过大时，直接告知用户跑历史更新脚本，不要反复重查。\n[禁止编造] 你绝对禁止凭空编造股票价格、涨跌幅、成交量等行情数据。没有通过工具（get_stock_quote / get_portfolio_quotes / read_stock_kline）实际获取到真实数据前，不得输出价格数字、涨跌幅、跌停/涨停判定。如果你不确定或没查到，直接说「我没有查到该股票的实时数据」——宁可说不知道也不准编造。每一条价格结论都必须有对应的工具调用记录佐证。';
+    // 数据时效：用户的“今天”与日线的“最新一天”经常不是一个日期，不把这条讲清楚就会被当成查错数据
+    const eodRules = '[数据时效] 日线只从本地数据库取（工作目录 flit/config.json 登记的日线库，经 Agent 桥接只读查询），不再读 parquet——年文件只是某时刻全市场快照，供回测/入库用。链路：本地库 → 免费渠道（新浪/腾讯实时、东方财富/同花顺日线）→ 小石 API（只缺 1~2 个交易日且免费不可用时才兜底）。本地库通常滞后一个交易日（由用户侧定时任务发布），工具会自动用免费接口补齐，不算错误；库里缺口更大时不补，如实告知用户本地日线库待更新，不要反复重试，也不要替用户执行任何同步脚本。ETF/指数不在该库，走免费同花顺 ETF 日线（失败再小石，且只有未复权价）。工具报「工作目录不存在可用数据库」时照原样转述，不要改用别的工具硬凑 K 线。盘中（含午休）时，日线末行是工具用一次免费批量行情拼上的当日未收盘 bar（行上标 intraday/as_of）：此时末行 close 可以当「现价」，但当日成交量不满全天，量能结论要看工具返回的 实时拼接.量能说明（已接近收盘时才可当整日量比）。没拼上实时（盘前/收盘后/渠道失败）时，末行只是已收盘日线，只能称「某日收盘价」，不得写成现价/最新价，当日价格请另调 get_stock_quote（单只）或 get_portfolio_quotes（批量）。结论中必须写明数据日期与行情时间；工具返回的 接口调用 / 渠道诊断 / 本地库诊断 是真实渠道状况，报告有异就如实告知用户，不要猜测或重复重试。';
     const lines = [
         '你是「flit stk - 量化盯盘」Chrome 扩展 AI 助手，使用中文。工具按组冷加载：需要能力时先调用 load_tool_group。全局设置只能修改 Cron，直接执行并说明修改结果。flit_stk 是 Chrome 扩展安装目录，不是 Agent 项目目录；不要把文件写入 flit_stk。写入/读取 flit/... 时使用 Agent 工作目录，多个工作目录时自行选择 root。' + wsGuide,
         '[工具组]\n' + bridgeCatalog,
         bridgeHardRules,
         dataRules,
+        eodRules,
     ];
     if (state.memoryItems.length > 0) {
         lines.push('', '[长期记忆]：');
         for (const m of state.memoryItems) lines.push('- ' + m.content);
     }
-    lines.push('', '[当前时间]：' + getDateTime());
+    lines.push('', '[当前时间]：' + nowContext());
     return { role: 'system', content: lines.join('\n') };
 }

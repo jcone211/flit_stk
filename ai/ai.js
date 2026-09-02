@@ -374,11 +374,44 @@ async function runAgentLoop(initialMessages, initialToolGroups = []) {
                 content: result.content || '',
                 tool_calls: sanitizedCalls.map(tc => ({
                     id: tc.id, type: 'function',
-                    function: { name: tc.name, arguments: tc.arguments },
+                    function: { name: tc.function?.name || tc.name, arguments: tc.arguments },
                 })),
             });
             apiMessages.push(...await executeToolCalls(sanitizedCalls));
             continue;
+        }
+        // Code-level guard: detect fabricated stock data (模型未调工具就编造价格/K线)
+        // 注意：如果本轮或之前轮次已调过行情工具(含 get_stock_quote/get_portfolio_quotes/read_stock_kline/read_stocks_kline)，
+        // 说明模型是拿着真实数据在回复，不拦截，避免误伤正常流程。
+        if (!result.__hallucinationRetry) {
+            const hasCalledQuoteTool = apiMessages.some(m =>
+                m.role === 'assistant' && m.tool_calls && m.tool_calls.some(tc =>
+                    /^(get_stock_quote|get_portfolio_quotes|read_stock_kline|read_stocks_kline)$/.test(tc.function?.name || '')
+                )
+            );
+            if (!hasCalledQuoteTool) {
+                const lastUserText = (() => {
+                    for (let i = apiMessages.length - 1; i >= 0; i--) {
+                        if (apiMessages[i].role === 'user') {
+                            const c = apiMessages[i].content;
+                            return typeof c === 'string' ? c : '';
+                        }
+                    }
+                    return '';
+                })();
+                const replyText = result.content || '';
+                const stockQuery = /(现价|价格|行情|走势|K线|涨跌|日线|开盘|收盘|股价|涨幅|跌幅|实时)/.test(lastUserText);
+                const hasPriceData = /(元|涨跌幅|收盘|开盘|最高|最低|成交量|成交额|换手|跌停|涨停)/.test(replyText);
+                const hasTable = /^\|/.test(replyText.trim()) && /\|\s*\d/.test(replyText);
+                if (stockQuery && (hasPriceData || hasTable) && state.activeToolGroups.size > 0) {
+                    result.__hallucinationRetry = true;
+                    apiMessages.push({
+                        role: 'system',
+                        content: '【强制纠正】你刚才在没有调用任何工具的情况下直接输出了股票行情数据，这些数据是编造的，不可使用。请立即调用 get_stock_quote（单只实时）或 read_stock_kline / read_stocks_kline（日线）获取真实数据后再回答。'
+                    });
+                    continue;
+                }
+            }
         }
         commitAssistant(result.content);
         if (result.finish_reason === 'length') {
@@ -1343,7 +1376,8 @@ async function handleSend() {
     setGenerating(true);
     if (imageCount > 0) appendMessage('system', imageCount + ' 张图片已作为视觉输入传给模型');
     try {
-        await runAgentLoop();
+        // 把当前已加载工具组传入，避免新消息丢失之前加载的 market 等组
+        await runAgentLoop(undefined, [...state.activeToolGroups]);
     } catch (err) {
         console.error('[thswc:ai] 循环异常:', err);
         appendMessage('error', '发生异常：' + err.message);

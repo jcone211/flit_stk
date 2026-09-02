@@ -20,3 +20,6 @@ credentials.json
 # 回归脚本临时工作目录（docs/verify-free-first.mjs 跑完会自删）
 .verify-workspaces/
 .verify-empty-root/
+
+# 演示录制与 Playwright 剧本（两条路线，不参与打包）
+/demo/

@@ -8,6 +8,7 @@ import {
     DEFAULT_AI_BASE_URL, DEFAULT_AI_MODEL,
     MAX_TOOL_RESULT_CHARS, MAX_MESSAGES, MAX_MESSAGE_CHARS,
     MAX_MEMORY_ITEMS, MEMORY_KEY,
+    MAX_RETAIN_CHARS, MAX_RETAINED_ENTRIES, MAX_RETAINED_TOTAL,
     summarizeList, pickStockView, findStockByName, stockSearchUrl,
 } from './ai_state.js';
 import {
@@ -48,8 +49,8 @@ export const TOOL_DEFS = [
     { type: 'function', function: { name: 'list_dir', description: '列出工作目录（或子目录）内容。root 缺省为主目录，可传附加目录名；软链接条目无法访问（浏览器安全限制）', parameters: { type: 'object', properties: { path: { type: 'string', description: '相对所选目录的路径，空为根目录' }, root: { type: 'string', description: '工作目录名，可用 list_workspaces 查询；缺省为主目录' } }, required: [] } } },
     { type: 'function', function: { name: 'read_file', description: '读取工作目录中的文本文件内容，支持 Markdown、JSON、JavaScript、CSS、TXT、CSV 等文本文件；路径相对当前工作区；内容过长时会截断', parameters: { type: 'object', properties: { path: { type: 'string' }, root: { type: 'string' } }, required: ['path'] } } },
     { type: 'function', function: { name: 'read_parquet', description: '读取工作目录中的 Parquet 数据文件，返回列名、总行数和限定数量的行。适合查看回测/备份用的 parquet 文件；path 必须是相对授权工作目录的路径，root 缺省为主目录。默认最多返回 100 行，可用 columns 选择列。本工具不参与股票 K 线取数；查询股票 K 线请走 read_stock_kline / read_stocks_kline（它们只读本地数据库）。', parameters: { type: 'object', properties: { path: { type: 'string', description: '相对工作目录的 .parquet 文件路径' }, root: { type: 'string', description: '工作目录名，缺省为主目录' }, columns: { type: 'array', items: { type: 'string' }, description: '要读取的列名；缺省读取全部列' }, row_start: { type: 'integer', minimum: 0, description: '起始行，缺省 0' }, limit: { type: 'integer', minimum: 1, maximum: 500, description: '最多返回行数，缺省 100，最大 500' } }, required: ['path'] } } },
-    { type: 'function', function: { name: 'read_stock_kline', description: '获取股票近 N 天日线 K 线（开/高/低/收/成交量/成交额/涨跌幅）。数据只从工作目录 flit/config.json 登记的本地日线库读取（经 Agent 桥接只读查询，不读 parquet）；库里缺交易日时先用免费渠道（东方财富/同花顺）补齐，只缺 1~2 个交易日且免费不可用时才用少量小石额度。ETF/指数不在该库内，自动改走免费同花顺 ETF 日线（失败再小石，ETF 只有未复权价）。盘中（含午休）自动把当日未收盘 bar 拼到末尾（行上标 intraday/as_of，实时价走新浪/腾讯免费批量）。返回含 数据表 / 数据日期 / 最新已收盘交易日 / 实时拼接 / 接口调用；报「工作目录不存在可用数据库」时直接把结论转述给用户，不要重试或改用别的工具硬凑 K 线。支持按股票名称或代码。', parameters: { type: 'object', properties: { name: { type: 'string', description: '股票名称，如「德明利」；与 code 二选一' }, code: { type: 'string', description: '股票代码：6 位数字（如 001309）或带市场后缀（如 001309.SZ），不要使用 SH:600519 等冒号前缀形式；与 name 二选一' }, days: { type: 'integer', minimum: 1, maximum: 60, description: '近 N 个交易日（盘中含拼接的当日实时 bar，共 N 根），缺省 30' }, root: { type: 'string', description: '工作目录名，缺省为主目录（parquet 数据目录的根，如含 data/a_share_daily 的目录）' } }, required: [] } } },
-    { type: 'function', function: { name: 'read_stocks_kline', description: '批量获取多只股票近 N 个交易日的日线「派生指标摘要」（收盘/涨跌幅/MA5・10・20/距 20 日高点回撤/量比/连续下跌天数/缩量天数/振幅/换手/近 5 日收盘），一条 SQL 取回全部标的，一次调用代替逐只 read_stock_kline；多只股票必须优先用本工具。detail=true 才附带原始 OHLCV 行。数据源为工作目录登记的本地日线库（不读 parquet），缺口再走免费/小石。返回含 数据表 / 本地库诊断 / 数据日期 / 最新已收盘交易日 / 实时拼接（盘中自动用一次免费批量实时行情把当日未收盘 bar 拼到末行，各项标 intraday+as_of）/ 接口调用；末行 intraday=true 时可直接当现价，否则现价请另调 get_stock_quote 或 get_portfolio_quotes。', parameters: { type: 'object', properties: { names: { type: 'array', items: { type: 'string' }, description: '股票名称数组，最多 12 只' }, codes: { type: 'array', items: { type: 'string' }, description: '股票代码数组（6 位或带 .SZ/.SH 后缀），可与 names 混用' }, days: { type: 'integer', minimum: 1, maximum: 60, description: '近 N 个交易日，缺省 18' }, detail: { type: 'boolean', description: 'true 时返回原始 K 线行，缺省 false 只返回摘要' }, max_rows: { type: 'integer', minimum: 1, maximum: 18, description: 'detail=true 时每只最多返回行数，缺省 5' }, root: { type: 'string', description: '工作目录名，缺省为主目录' } }, required: [] } } },
+    { type: 'function', function: { name: 'read_stock_kline', description: '获取股票近 N 天日线 K 线（开/高/低/收/成交量/成交额/涨跌幅）。数据只从工作目录 flit/config.json 登记的本地日线库读取（经 Agent 桥接只读查询，不读 parquet）；库里缺交易日时先用免费渠道（东方财富/同花顺）补齐，只缺 1~2 个交易日且免费不可用时才用少量小石额度。ETF/指数不在该库内，自动改走免费同花顺 ETF 日线（失败再小石，ETF 只有未复权价）。盘中（含午休）自动把当日未收盘 bar 拼到末尾（行上标 intraday/as_of，实时价走新浪/腾讯免费批量）。返回含 数据表 / 数据日期 / 最新已收盘交易日 / 实时拼接 / 接口调用；报「工作目录不存在可用数据库」时直接把结论转述给用户，不要重试或改用别的工具硬凑 K 线。支持按股票名称或代码。注意：days > 7 时免费渠道与小石接口均不启用（保护免费渠道），仅返回本地数据库已有数据；若库里不全则提示「保护免费渠道，仅支持查询近7日日K数据，或自备数据源和做项目适配，或联系项目作者」。', parameters: { type: 'object', properties: { name: { type: 'string', description: '股票名称，如「德明利」；与 code 二选一' }, code: { type: 'string', description: '股票代码：6 位数字（如 001309）或带市场后缀（如 001309.SZ），不要使用 SH:600519 等冒号前缀形式；与 name 二选一' }, days: { type: 'integer', minimum: 1, maximum: 60, description: '近 N 个交易日（盘中含拼接的当日实时 bar，共 N 根），缺省 30。注意：超过 7 天时免费渠道不会启用，仅靠本地数据库；若数据库数据不全，将提示「保护免费渠道，仅支持查询近7日日K数据，或自备数据源和做项目适配，或联系项目作者」' }, root: { type: 'string', description: '工作目录名，缺省为主目录（parquet 数据目录的根，如含 data/a_share_daily 的目录）' } }, required: [] } } },
+    { type: 'function', function: { name: 'read_stocks_kline', description: '批量获取多只股票近 N 个交易日的日线「派生指标摘要」（收盘/涨跌幅/MA5・10・20/距 20 日高点回撤/量比/连续下跌天数/缩量天数/振幅/换手/近 5 日收盘），一条 SQL 取回全部标的，一次调用代替逐只 read_stock_kline；多只股票必须优先用本工具。detail=true 才附带原始 OHLCV 行。数据源为工作目录登记的本地日线库（不读 parquet），缺口再走免费/小石。返回含 数据表 / 本地库诊断 / 数据日期 / 最新已收盘交易日 / 实时拼接（盘中自动用一次免费批量实时行情把当日未收盘 bar 拼到末行，各项标 intraday+as_of）/ 接口调用；末行 intraday=true 时可直接当现价，否则现价请另调 get_stock_quote 或 get_portfolio_quotes。注意：days > 7 时免费渠道与小石接口均不启用（保护免费渠道），仅返回本地数据库已有数据；若库里不全则提示「保护免费渠道，仅支持查询近7日日K数据，或自备数据源和做项目适配，或联系项目作者」。', parameters: { type: 'object', properties: { names: { type: 'array', items: { type: 'string' }, description: '股票名称数组，最多 12 只' }, codes: { type: 'array', items: { type: 'string' }, description: '股票代码数组（6 位或带 .SZ/.SH 后缀），可与 names 混用' }, days: { type: 'integer', minimum: 1, maximum: 60, description: '近 N 个交易日，缺省 18。注意：超过 7 天时免费渠道不会启用，仅靠本地数据库；若数据库数据不全，将提示「保护免费渠道，仅支持查询近7日日K数据，或自备数据源和做项目适配，或联系项目作者」' }, detail: { type: 'boolean', description: 'true 时返回原始 K 线行，缺省 false 只返回摘要' }, max_rows: { type: 'integer', minimum: 1, maximum: 18, description: 'detail=true 时每只最多返回行数，缺省 5' }, root: { type: 'string', description: '工作目录名，缺省为主目录' } }, required: [] } } },
     { type: 'function', function: { name: 'get_stock_quote', description: '【必调】获取股票实时行情（最新价/涨跌幅/昨收/最高/最低/成交量/成交额/换手率），不经页面直接调用免费+付费混合接口。回答任何股票价格问题前必须先调用本工具或 get_portfolio_quotes。支持按股票名称或代码。', parameters: { type: 'object', properties: { name: { type: 'string', description: '股票名称，如「德明利」；与 code 二选一' }, code: { type: 'string', description: '股票代码：6 位数字（如 001309）或带市场后缀（如 001309.SZ），不要使用 SH:600519 等冒号前缀形式；与 name 二选一' } }, required: [] } } },
     { type: 'function', function: { name: 'get_portfolio_quotes', description: '批量获取指定组合全部股票的实时行情（最新价/涨跌幅/昨收/最高/最低/成交量/成交额/换手率）。一次调用返回所有股票，无需逐只查询', parameters: { type: 'object', properties: { portfolio: { type: 'string', description: '组合名，如「持仓」「观察」；缺省为当前活动组合' } }, required: [] } } },
 
@@ -60,8 +61,8 @@ export const TOOL_DEFS = [
     { type: 'function', function: { name: 'query_local_database', description: '使用当前工作区配置查询本地数据库，返回结构化 JSON 行，无需读取记忆文件或拼接 Docker/PowerShell 命令', parameters: { type: 'object', properties: { sql: { type: 'string' }, source: { type: 'string' }, columns: { type: 'array', items: { type: 'string' } }, timeout_ms: { type: 'integer' }, debug: { type: 'boolean' } }, required: ['sql'] } } },
     { type: 'function', function: { name: 'save_workspace_database_config', description: '保存已验证可用的完整数据库连接配置到 flit/config.json，并自动创建 flit/.gitignore 忽略 config.json；仅在数据库连接实际验证成功后调用，凭据不会写入记忆文件', parameters: { type: 'object', properties: { config: { type: 'object', description: '完整工作区配置对象，必须包含 data_sources；可包含 version、market 等字段' }, source: { type: 'object', description: '已验证的数据源对象，包含 name、type、access、host、port、database、user、password 或 url 等实际连接字段' } }, required: ['source'] } } },
     { type: 'function', function: { name: 'record_workspace_memory', description: '按固定格式将不含凭据的已确认经验追加到 flit/memory.md；文件最上方必须保留“## 数据库连接状态”并优先记录连接是否已验证，后续记录 workflow 入口和查询约定；若经验对应可复用流程，先创建 flit/workflow/ 下描述清晰的通用流程，再登记入口；不能修改 flit/ 之外的文件', parameters: { type: 'object', properties: { content: { type: 'string' }, database_status: { type: 'string', enum: ['verified', 'unverified', 'unknown'], description: '当前数据库连接状态；已实际连接成功时传 verified' } }, required: ['content'] } } },
-    { type: 'function', function: { name: 'run_workspace_process', description: '在当前工作目录内执行程序或脚本；cwd 使用相对路径，可执行 flit/ 外已有脚本和 flit/ 内新建脚本，支持 Python、Node、Git、Docker 等。禁止用此工具启动 flit_bridge；桥接未启动时必须把 bridge_health 返回的 pwsh 启动命令原样输出给用户，让用户自行执行后再继续', parameters: { type: 'object', properties: { program: { type: 'string' }, argv: { type: 'array', items: { type: 'string' } }, cwd: { type: 'string' }, stdin: { type: 'string' }, timeout_ms: { type: 'integer' } }, required: ['program'] } } },
-    { type: 'function', function: { name: 'bridge_health', description: '检查本地 flit_bridge HTTP 服务是否在线。若未启动，只返回供用户手动执行的 pwsh 启动命令；Agent 不得调用任何工具自行启动桥接服务', parameters: { type: 'object', properties: {}, required: [] } } },
+    { type: 'function', function: { name: 'run_workspace_process', description: '在当前工作目录内执行程序或脚本；cwd 使用相对路径，可执行 flit/ 外已有脚本和 flit/ 内新建脚本，支持 Python、Node、Git、Docker 等。禁止用此工具启动 flit_bridge；桥接未启动时必须把 bridge_health 返回的 pwsh 启动命令（含 start_note 安装说明）原样输出给用户，让用户自行执行后再继续', parameters: { type: 'object', properties: { program: { type: 'string' }, argv: { type: 'array', items: { type: 'string' } }, cwd: { type: 'string' }, stdin: { type: 'string' }, timeout_ms: { type: 'integer' } }, required: ['program'] } } },
+    { type: 'function', function: { name: 'bridge_health', description: '检查本地 flit_bridge HTTP 服务是否在线。若未启动，只返回供用户手动执行的 pwsh 启动命令（含 start_note 说明是否首次启用需跑 install）；Agent 不得调用任何工具自行启动桥接服务', parameters: { type: 'object', properties: {}, required: [] } } },
 ];
 
 export const TOOL_GROUPS = {
@@ -75,15 +76,18 @@ export const TOOL_GROUPS = {
 };
 export const TOOL_GROUP_RULES = {
     portfolio: '组合和股票工具：需要组合名时先读取组合结构，按用户指定组合操作。',
-    market: '行情工具：实时行情批量用 get_portfolio_quotes（一次返回组合全部股票）；多只股票日线用 read_stocks_kline（一次返回多只派生指标摘要），仅单只需要看原始 OHLCV 时才用 read_stock_kline。取数侧已做免费优先（本地数据库→新浪/腾讯实时、东财/同花顺日线→小石兜底），你不需要特意指定渠道；ETF 不在本地库内，由免费接口负责。若工具报「工作目录不存在可用数据库」，照原样转述给用户，不要改用其他工具硬凑 K 线（实时现价仍可查）。结论里要标数据日期：末行带 intraday 的是当日实时未收盘价（可称现价），不带的是已收盘日线（只能称"某日收盘"）；量能能不能当整日用看 实时拼接.量能说明。\n[禁止编造] 绝对禁止凭空编造行情数据。没有通过工具实际获取到真实数据前，不得输出价格数字、涨跌幅、跌停/涨停判定。宁可说「我没有查到」也不准编造。',
+    market: '行情工具：实时行情批量用 get_portfolio_quotes（一次返回组合全部股票）；多只股票日线用 read_stocks_kline（一次返回多只派生指标摘要），仅单只需要看原始 OHLCV 时才用 read_stock_kline。取数侧已做免费优先（本地数据库→新浪/腾讯实时、东财/同花顺日线→小石兜底）；日 K 超过 7 天时为保护免费渠道，只能查询本地数据库，不得改用免费或小石接口补齐；无数据库时原样转述保护提示。你不需要特意指定渠道；ETF 不在本地库内，由免费接口负责。若工具报「工作目录不存在可用数据库」，照原样转述给用户，不要改用其他工具硬凑 K 线（实时现价仍可查）。结论里要标数据日期：末行带 intraday 的是当日实时未收盘价（可称现价），不带的是已收盘日线（只能称"某日收盘"）；量能能不能当整日用看 实时拼接.量能说明。\n[上下文口径] tool 原始返回不跨轮保留（下一轮只剩一行「哪个工具成功/失败」的记录）；后面还要用这份数据就在本轮调 retain_tool_data 登记成隐藏便签，不必抄进正文。没登记又没写进正文的数据就是没了，只能重新调用（再花一次免费额度）。\n[禁止编造] 绝对禁止凭空编造行情数据。没有通过工具实际获取到真实数据前，不得输出价格数字、涨跌幅、跌停/涨停判定。宁可说「我没有查到」也不准编造。',
     events: '要点/事件工具：先读取已有要点；事件 content 只写股票名称。',
     settings: '设置工具：仅 Cron 可修改；修改前校验表达式，成功后立即生效。',
     workspace: '工作区工具：root 用目录名定位，只访问用户已授权目录；Agent 可直接维护当前工作目录下的 flit/ 文件。',
     memory: '记忆工具：仅保存用户明确要求长期记住的偏好。',
-    bridge: '桥接工具：优先使用结构化工作区上下文和数据库 schema 查询；Agent 只能写 flit/，但可读取和执行工作目录其他目录中的已有脚本。低 Token 固定链路：先调用 get_workspace_context；若返回 config 或 memory，先使用其中的 verified_connection、database 和 workflows，不要重复读取旧文档；有匹配 workflow 时先 read_file 该流程，按其表结构和基础 SQL 执行，除非查询失败或流程明确要求，否则跳过 discover_database_schema。只有 config/memory/workflow 都不足时，才用 list_dir/read_file 搜索其他配置和脚本。发现错误时将修正经验记录到 flit/memory.md。数据库查询任务只有在“数据查询成功、连接配置已验证并保存（若原先不存在）、可复用流程已封装（若值得复用）、memory.md 已登记入口”后才算完成；不得只返回数据就结束。连接验证成功后必须调用 save_workspace_database_config 保存完整配置，该工具会同时创建 flit/.gitignore 并忽略 config.json。workflow 必须使用通用、可复用标题和文件名，不得绑定具体股票名称或本次日期，例如“查询股票近 N 个交易日行情”；内容必须包含适用条件、已验证连接/数据源名称（不得包含密码）、相关表及关键字段、历史表与当日快照的优先级和去重规则、可替换参数、可直接执行的基础 SQL，以及何时需要重新 discover_database_schema。若本次已验证出值得复用的正确执行流程，先创建 flit/workflow/ 下该流程，再调用 record_workspace_memory；memory.md 必须遵循固定格式，最上方先写“## 数据库连接状态”，明确 verified/unverified/unknown，随后只记录不含凭据的 workflow 入口、用途和触发条件；不要把完整过程、失败尝试或 SQL 结果重复写入记忆。桥接服务未启动时，bridge_health 会返回 pwsh 启动命令；此时必须停止工具调用，只把命令和“请用户执行后重试”告知用户，绝对禁止通过 run_workspace_process 或其他工具启动 flit_bridge。',
+    bridge: `桥接工具：优先使用结构化工作区上下文和数据库 schema 查询；Agent 只能写 flit/，但可读取和执行工作目录其他目录中的已有脚本。低 Token 固定链路：先调用 get_workspace_context；若返回 config 或 memory，先使用其中的 verified_connection、database 和 workflows，不要重复读取旧文档；有匹配 workflow 时先 read_file 该流程，按其表结构和基础 SQL 执行，除非查询失败或流程明确要求，否则跳过 discover_database_schema。只有 config/memory/workflow 都不足时，才用 list_dir/read_file 搜索其他配置和脚本。发现错误时将修正经验记录到 flit/memory.md。数据库查询任务只有在“数据查询成功、连接配置已验证并保存（若原先不存在）、可复用流程已封装（若值得复用）、memory.md 已登记入口”后才算完成；不得只返回数据就结束。连接验证成功后必须调用 save_workspace_database_config 保存完整配置，该工具会同时创建 flit/.gitignore 并忽略 config.json。workflow 必须使用通用、可复用标题和文件名，不得绑定具体股票名称或本次日期，例如“查询股票近 N 个交易日行情”；内容必须包含适用条件、已验证连接/数据源名称（不得包含密码）、相关表及关键字段、历史表与当日快照的优先级和去重规则、可替换参数、可直接执行的基础 SQL，以及何时需要重新 discover_database_schema。若本次已验证出值得复用的正确执行流程，先创建 flit/workflow/ 下该流程，再调用 record_workspace_memory；memory.md 必须遵循固定格式，最上方先写“## 数据库连接状态”，明确 verified/unverified/unknown，随后只记录不含凭据的 workflow 入口、用途和触发条件；不要把完整过程、失败尝试或 SQL 结果重复写入记忆。桥接服务未启动时，bridge_health 会返回 pwsh 启动命令（含 start_note 说明首次启用需跑 install）；此时必须停止工具调用，只把命令和“请用户执行后重试”告知用户，绝对禁止通过 run_workspace_process 或其他工具启动 flit_bridge。
+[桥接不通时无级可降] bridge 报 config_invalid / bridge_unreachable / query_failed 时，表示数据源配置未落到 bridge 能读取的位置或桥接不在运行。**不要** docker inspect 查容器标签、不要搜 bridge 源码找 label key、不要推测 bridge 内部发现逻辑——这些是你没有源码权或权威文档的信息。正确做法：
+- 如果用户要的是 ≤7 天 K 线或实时行情 → 告知用户桥接配置问题后，直接降级走免费渠道出数据（不卡住）。
+- 如果用户要的是 >7 天 K 线 → 桥接不通就是彻底无路可走。直接告诉用户「flit/config.json 已写入工作目录，但桥接不认该配置；请确保 flit_bridge 已启动。当前无法查 30 日 K 线，可选方案：让用户只查 7 天内；或自行启动桥接后重试；或自备数据源联系项目作者」。**不要卡在桥接问题上 debug、不要 docker exec/psql 直连数据库绕过桥接、不要把 7 天保护口径扔到 >7 天查询上假装有数据**。
+[快速降级] ≤7 天 K 线或实时行情：1 次重试后仍不通，立即降级走免费渠道，不要连续超过 2 轮 debug 桥接问题。`
 };
-export const TOOL_BY_NAME = new Map(TOOL_DEFS.map(def => [def.function.name, def]));
-// 工具组一行摘要（进系统提示）；详细规则不重复列，由 load_tool_group 返回的 rule 字段给出（T1-4 去重）
+
 export const TOOL_GROUP_SUMMARY = {
     portfolio: '组合/股票列表增删改查、切换活动组合与视图',
     market: '实时行情与日线取数（一律优先批量）',
@@ -93,6 +97,7 @@ export const TOOL_GROUP_SUMMARY = {
     memory: '长期记忆保存',
     bridge: '本地脚本执行与本地数据库查询',
 };
+
 export const TOOL_GROUP_DEF = {
     type: 'function',
     function: {
@@ -106,6 +111,18 @@ export const TOOL_GROUP_DEF = {
     },
 };
 export const TOOL_CATALOG = Object.keys(TOOL_GROUPS).map(group => `${group}: ${TOOL_GROUP_SUMMARY[group] || TOOL_GROUP_RULES[group]}`).join('\n');
+
+// 常驻工具：不经 load_tool_group冷加载，和 load_tool_group 一起每轮都发（所以描述要短）
+export const CONTEXT_TOOL_DEFS = [
+    { type: 'function', function: {
+        name: 'retain_tool_data',
+        description: '把本轮某个工具刚返回的原始数据登记为「跨轮上下文便签」：不进对话界面、不必抄进回复正文，下一轮起作为隐藏上下文回灌给你。tool 传本轮已调用且成功的工具名（如 read_stocks_kline），note 可选一句话说明用途。工具原始返回默认只在本轮有效，回复结束就没了；后续还要基于它分析就调本工具。',
+        parameters: { type: 'object', properties: {
+            tool: { type: 'string', description: '要保留的工具名（本轮调用过且成功）；不传则返回本轮可登记清单' },
+            note: { type: 'string', description: '可选：一句话说明这份数据的用途/口径，便于后续判断是否过期' },
+        }, required: [] },
+    } },
+];
 
 export function getLoadedToolDefs() {
     const names = new Set();
@@ -452,6 +469,7 @@ export const toolExecutors = {
                 ...result.error,
                 message: `${result.error.message}。请在 PowerShell 7 中执行以下命令启动桥接服务：`,
                 start_command: `pwsh -NoProfile -File "${startScript}"`,
+                start_note: '(可管理员运行 pwsh .\install设置永久开启)'
             },
         };
     },
@@ -606,7 +624,11 @@ export const toolExecutors = {
         // 盘中/午休：当日未收盘 bar 由实时行情拼接，因此不让补齐链去追当日，也不看库里残留的当日行
         const liveNeeded = hasLiveSession(now);
         const db = await readKlineFromDb(dir, [code], days);
-        if (db.error && !isEtfCode(code6)) return { root: dir.name, code, name, ...klineDbUnavailable(db) };
+        if (db.error && !isEtfCode(code6)) {
+            return days > 7
+                ? { root: dir.name, code, name, ...klineRangeProtection(db) }
+                : { root: dir.name, code, name, ...klineDbUnavailable(db) };
+        }
         const { rows, source, cacheLast, apiRows, apiWarning } = await fillKlineFromApi(code, days, db.map.get(String(code).toUpperCase()) || [], expectedDailyLastDate(now), { liveToday: liveNeeded });
         if (!rows.length) {
             return {
@@ -668,7 +690,7 @@ export const toolExecutors = {
         const hasStock = codesForCache.some(c => !isEtfCode(String(c).split('.')[0]));
         const dbError = cacheRes.error && hasStock ? klineDbUnavailable(cacheRes) : null;
         if (dbError && !codesForCache.some(c => isEtfCode(String(c).split('.')[0]))) {
-            return { days, ...dbError, total: codesForCache.length };
+            return { days, ...(days > 7 ? klineRangeProtection(cacheRes) : dbError), total: codesForCache.length };
         }
         // 盘中/午休：一次免费批量实时行情覆盖全部标的（不逐只调接口），把当日未收盘 bar 拼到末尾
         const live = liveNeeded
@@ -679,7 +701,13 @@ export const toolExecutors = {
         const stocks = await mapWithLimit(resolved, API_CONCURRENCY, async (r) => {
             if (!r || r.error) return { name: (r && r.name) || null, code: (r && r.code) || null, error: r && r.error || '代码解析失败' };
             const code6 = String(r.code).split('.')[0];
-            if (dbError && !isEtfCode(code6)) return { name: r.name || null, code: r.code, error: dbError.error };
+            if (dbError && !isEtfCode(code6)) {
+                return {
+                    name: r.name || null,
+                    code: r.code,
+                    error: days > 7 ? KLINE_RANGE_PROTECTION : dbError.error,
+                };
+            }
             const { rows, source, apiWarning } = await fillKlineFromApi(r.code, days, cacheMap.get(String(r.code).toUpperCase()) || [], expected, { liveToday: liveNeeded });
             const sp = liveNeeded ? applyIntradayBar(rows, liveMap.get(code6), today, days) : { rows, spliced: false };
             if (sp.spliced) {
@@ -688,10 +716,13 @@ export const toolExecutors = {
                 liveChannel = liveChannel || (liveMap.get(code6) && liveMap.get(code6).source);
             }
             if (!sp.rows.length) {
-                return { name: r.name || null, code: r.code, error: '无数据（本地日线库无记录且免费/小石接口未补齐）' + (apiWarning ? '：' + apiWarning : '') };
+                return { name: r.name || null, code: r.code, error: apiWarning || '无数据（本地日线库无记录且免费/小石接口未补齐）' };
             }
             // 批量路径不带 per-stock warning（文本重复占字），数据源由 source 字段体现
-            const item = klineSummary(r.code, r.name, sp.rows, { source: sp.spliced ? source + '+live' : source });
+            const item = klineSummary(r.code, r.name, sp.rows, {
+                source: sp.spliced ? source + '+live' : source,
+                warning: apiWarning,
+            });
             if (detail) item.rows = sp.rows.slice(-maxRows);
             return item;
         });
@@ -720,8 +751,10 @@ export const toolExecutors = {
                 未处理: want.slice(MAX_BATCH_KLINE).map(w => w.name || w.code),
                 说明: '只处理了前 ' + MAX_BATCH_KLINE + ' 只，剩下的请再调一次',
             } : undefined,
-            warning: stocks.some(s => s.source && s.source !== 'db')
-                ? '部分数据不全部来自本地日线库（见各项 source：db 为本地库，adata 为免费东财/同花顺，xiaoshi 为小石接口，+live 为当日实时未收盘 bar）' : undefined,
+            warning: days > 7
+                ? '超过 7 天仅查询本地数据库，未调用免费/小石日线接口；数据库数据不全时不会补齐'
+                : stocks.some(s => s.source && s.source !== 'db')
+                    ? '部分数据不全部来自本地日线库（见各项 source：db 为本地库，adata 为免费东财/同花顺，xiaoshi 为小石接口，+live 为当日实时未收盘 bar）' : undefined,
             hint: '指标均由本地从日线行算出；末行 intraday=true 时为当日实时价（可当现价），否则最新价请另调 get_stock_quote / get_portfolio_quotes；需原始 OHLCV 才传 detail=true',
             stocks,
         };
@@ -821,6 +854,37 @@ export const toolExecutors = {
         const dir = await readyRoot(state.workspaceHandles, args && args.root);
         return appendFile(dir.handle, args.path, args.content);
     },
+    // 只拿本轮缓存的原文（ai.js executeToolCalls 负责填 state.turnToolResults）：
+    // 上一轮的原始返回本来就不在上下文里，不允许模型凭记忆登记一份「想象中的数据」
+    async retain_tool_data(args) {
+        // 常驻工具的结果没保留价值（规则文本 / 本工具自己的回执），不列入可登记清单也登不上
+        const META = new Set(['load_tool_group', 'retain_tool_data']);
+        const cache = (state.turnToolResults || []).filter(r => r && !META.has(r.name));
+        const available = () => [...new Set(cache.filter(r => r.ok).map(r => r.name))];
+        const tool = String((args && args.tool) || '').trim();
+        if (!tool) return { error: '请传 tool（本轮已调用过的工具名）', 本轮可登记: available() };
+        const hits = cache.filter(r => r.name === tool);
+        if (!hits.length) {
+            return { error: `本轮没有 ${tool} 的调用结果可登记`, 说明: '工具原始返回只在当轮内缓存，更早的已经不在上下文里了；需要它就重新调一次该工具再登记', 本轮可登记: available() };
+        }
+        const src = hits[hits.length - 1];
+        if (!src.ok) return { error: `${tool} 本轮没有取到数据，无内容可保留`, 它的返回: String(src.text || '').slice(0, 200) };
+        const note = String((args && args.note) || '').slice(0, 160);
+        const text = src.text.length > MAX_RETAIN_CHARS
+            ? src.text.slice(0, MAX_RETAIN_CHARS) + `\n（便签已截断，原长 ${src.text.length} 字）` : src.text;
+        const pending = (state.pendingRetains || []).filter(n => n && n.tool !== tool);
+        pending.push({ tool, argsText: src.argsText, note, text, ts: src.ts || Date.now() });
+        while (pending.length > 1
+            && (pending.length > MAX_RETAINED_ENTRIES || pending.reduce((n, x) => n + x.text.length, 0) > MAX_RETAINED_TOTAL)) {
+            pending.shift();
+        }
+        state.pendingRetains = pending;
+        return {
+            ok: true, 已登记: tool, 字符: text.length,
+            生效: '你本轮回复结束后，下一轮起作为隐藏上下文回灌（对话界面不展示，不落用户可见正文）',
+            当前便签: pending.map(n => `${n.tool}(${n.text.length}字)`).join('、'),
+        };
+    },
 };
 
 // ============== K 线辅助 ==============
@@ -902,6 +966,7 @@ const DB_TIMEOUT_MS = 12000;
 // 库侧列名与工具行字段一致（parquet_to_postgres 约定：adjust,market,code,date,OHLC,volume,amount,change_pct,turnover_pct）
 const KLINE_DB_COLUMNS = ['code', 'date', 'open', 'high', 'low', 'close', 'volume', 'amount', 'change_pct', 'turnover_pct'];
 const KLINE_DB_REQUIRED = ['code', 'date', 'open', 'high', 'low', 'close'];
+const KLINE_RANGE_PROTECTION = '保护免费渠道，仅支持查询近7日日K数据，或自备数据源和做项目适配，或联系项目作者';
 const SAFE_TABLE_RE = /^[A-Za-z_][A-Za-z0-9_.]*$/;
 // 一次会话内按「工作目录 + 数据源 + config 指纹」缓存探测结果，避免每次查 K 线都摸一遍 schema；
 // 带指纹是为了改了 flit/config.json 不必重开 AI 窗口（P1-4），只留最近几个库的探测结果。
@@ -992,10 +1057,10 @@ function probeTables(columns) {
     const names = [...byTable.keys()];
     const hasAll = (t, need) => need.every(n => byTable.get(t).has(n));
     const daily = names.filter(t => hasAll(t, KLINE_DB_REQUIRED)
-            && !/today|weekly|monthly|temp|backup|test/i.test(t))
+        && !/today|weekly|monthly|temp|backup|test/i.test(t))
         .sort((a, b) => (/daily/i.test(b) ? 1 : 0) - (/daily/i.test(a) ? 1 : 0) || a.localeCompare(b));
     const basic = names.filter(t => hasAll(t, ['name'])
-            && (byTable.get(t).has('ts_code') || byTable.get(t).has('code') || byTable.get(t).has('symbol')))
+        && (byTable.get(t).has('ts_code') || byTable.get(t).has('code') || byTable.get(t).has('symbol')))
         .sort((a, b) => (/basic|list|info/i.test(b) ? 1 : 0) - (/basic|list|info/i.test(a) ? 1 : 0) || a.localeCompare(b));
     const basicCodeCol = basic.length
         ? (['ts_code', 'code', 'symbol'].find(n => byTable.get(basic[0]).has(n)) || 'ts_code') : null;
@@ -1105,6 +1170,16 @@ async function readKlineFromDb(dir, codes, days) {
     return { map: out, diag, plan, table: plan.tableGuessed ? null : plan.table, adjust: plan.adjust };
 }
 
+/** 超过 7 天且本地库不可用时，禁止调用免费渠道，统一返回保护提示。 */
+function klineRangeProtection(res) {
+    const diag = (res && res.diag || []).join('；');
+    return {
+        error: KLINE_RANGE_PROTECTION,
+        取数诊断: diag,
+        hint: '超过 7 天的日 K 仅支持本地数据库查询；实时行情仍可用 get_stock_quote / get_portfolio_quotes。',
+    };
+}
+
 /** K 线拿不到本地库时给模型的话术（桥接/目录问题单独说，别一律甩「联系作者」） */
 function klineDbUnavailable(res) {
     const diag = (res && res.diag || []).join('；');
@@ -1115,8 +1190,8 @@ function klineDbUnavailable(res) {
     if (res.error === 'workspace_not_set') {
         return { error: '本地数据库不可用：尚未设置主工作目录，请在 AI 窗口顶部选择工作目录（其中需有 flit/config.json）。', 取数诊断: diag, hint };
     }
-    if (res.error === 'query_failed' || res.error === 'bad_table' || res.error === 'bridge_unreachable' || res.error === 'schema_failed') {
-        return { error: '工作目录登记了数据库，但日线表读取失败或桥接不可用：' + (diag || '详见 取数诊断') + '。若持续失败，请联系项目作者。', 取数诊断: diag, hint };
+    if (res.error === 'query_failed' || res.error === 'bad_table' || res.error === 'bridge_unreachable' || res.error === 'schema_failed' || res.error === 'config_invalid') {
+        return { error: '工作目录登记了数据库，但桥接不可用或配置未被识别：' + (diag || '详见 取数诊断') + '。当前 30 日 K 线完全依赖本地数据库，桥接不通则无法查询。请确保 flit_bridge 已通过 start-server.ps1 启动且运行正常。可选替代：让用户只查 7 天内的 K 线（走免费渠道，无需数据库）；或自行修好桥接后重试；或联系项目作者做数据源适配。', 取数诊断: diag, hint: '7 天内 K 线可走免费渠道（无需数据库），实时行情也可用 get_stock_quote / get_portfolio_quotes。超过 7 天无降级路径，必须修好桥接。' };
     }
     return {
         error: '由于工作目录不存在可用数据库，当前无法查询 K 线，若有需求请联系项目作者。',
@@ -1145,6 +1220,15 @@ async function fillKlineFromApi(code, days, cache, expected, { liveToday = false
     }
     const cacheLast = refCache.length ? refCache[refCache.length - 1].date : '';
     const gapDays = weekdaysBetween(cacheLast, expected);
+    // 【保护免费渠道】days > 7 时禁止走免费/小石接口，只返回本地数据库已有数据（含实时拼接）
+    if (days > 7 && (!refCache.length || cacheLast < expected)) {
+        // 只给保护文案会把「库里陈旧」说成「不给查」，库内有数据时得把缺口天数一并讲清（不代为补齐也不抽额度）
+        apiWarning = refCache.length
+            ? `${KLINE_RANGE_PROTECTION}；本地日线库缺 ${gapDays} 个交易日（${cacheLast} → ${expected}），缺口过大不逐只调用小石接口；请告知用户本地日线库待更新后重试（本项目不代为同步），当前价改用 get_stock_quote / get_portfolio_quotes 取`
+            : KLINE_RANGE_PROTECTION;
+        const rows = mergeKlineRows(refCache, [], days + (liveToday ? 1 : 0));
+        return { rows, source, cacheLast, apiRows: [], apiWarning, gapDays };
+    }
     if (!refCache.length || cacheLast < expected) {
         // 1）免费：股票走东财 push2his（内部已带回退同花顺/百度），ETF 只有同花顺一源
         try {
@@ -1683,11 +1767,11 @@ export function buildSystemPrompt() {
         ? TOOL_CATALOG
         : TOOL_CATALOG.split('\n').filter(l => !l.startsWith('bridge:')).join('\n') + '\nbridge: 本地脚本/数据库查询（当前未启用）';
     const bridgeHardRules = bridgeEnabled
-        ? '[桥接硬约束] 各组详细规则以 load_tool_group 返回的 rule 为准，不得推测表名/字段，先读 get_workspace_context 与 workflow 再查询。若 bridge_health 返回 bridge_unreachable，立即停止工具调用，只把 start_command 里的 pwsh 命令输出给用户手动执行；绝对禁止用 run_workspace_process 等工具自行启动 flit_bridge。凭据只能写入被 .gitignore 忽略的 flit/config.json，不得写入 memory.md。'
+        ? '[桥接硬约束] 各组详细规则以 load_tool_group 返回的 rule 为准，不得推测表名/字段，先读 get_workspace_context 与 workflow 再查询。若 bridge_health 返回 bridge_unreachable，立即停止工具调用，只把 start_command 里的 pwsh 命令连同 start_note 的内容一起输出给用户手动执行；绝对禁止用 run_workspace_process 等工具自行启动 flit_bridge。凭据只能写入被 .gitignore 忽略的 flit/config.json，不得写入 memory.md。\n[桥接不通时无级可降] bridge 报 config_invalid / bridge_unreachable / query_failed 时，**不要** docker inspect 查容器标签、不要搜 bridge 源码找 label key、不要推测 bridge 内部机制。两种情况：① 用户要 ≤7 天 K 线或实时行情 → 告知桥接问题后立即降级免费渠道；② 用户要 >7 天 K 线 → 桥接不通就是彻底无路可走，直接告知用户「flit/config.json 已写入但桥接不认，请确保启动；当前无法查 30 日 K，可选：只查 7 天 / 修桥接 / 自备数据源」。禁止 docker exec/psql 直连绕过桥接。1 次重试即降级，不超 2 轮 debug。'
         : '[桥接] 当前未启用。若用户需要本地脚本或数据库查询，告知在 AI 设置中启用桥接、授权目录并启动 flit_bridge 后，重开 AI 窗口并新建会话。';
-    const dataRules = '[取数纪律] 多只股票必须一次批量取数（日线用 read_stocks_kline，最多 12 只；实时行情用 get_portfolio_quotes），禁止逐只重复 query；同一批股票的同一类查询只调一次，不要把刚拿过的数据再拉一遍（每次调用都会真花免费接口额度并叠加延时）；最多 2 轮数据收集就要给出结论，超过 3 轮会触发旧工具结果驱逐（早期原始数据被丢弃）；结果被截断或已驱逐时不要反复重试同一查询，必要时缩小范围重取；工具提示本地缓存缺口过大时，直接告知用户跑历史更新脚本，不要反复重查。\n[禁止编造] 你绝对禁止凭空编造股票价格、涨跌幅、成交量等行情数据。没有通过工具（get_stock_quote / get_portfolio_quotes / read_stock_kline）实际获取到真实数据前，不得输出价格数字、涨跌幅、跌停/涨停判定。如果你不确定或没查到，直接说「我没有查到该股票的实时数据」——宁可说不知道也不准编造。每一条价格结论都必须有对应的工具调用记录佐证。';
+    const dataRules = '[取数纪律] 多只股票必须一次批量取数（日线用 read_stocks_kline，最多 12 只；实时行情用 get_portfolio_quotes），禁止逐只重复 query；[免费渠道保护] 查询股票日 K 超过 7 天时只能走本地数据库，禁止调用免费或小石日线接口；若无数据库或数据库数据不全，提示「保护免费渠道，仅支持查询近7日日K数据，或自备数据源和做项目适配，或联系项目作者」。同一批股票的同一类查询只调一次，不要把刚拿过的数据再拉一遍（每次调用都会真花免费接口额度并叠加延时）；最多 2 轮数据收集就要给出结论，超过 3 轮会触发旧工具结果驱逐（早期原始数据被丢弃）；结果被截断或已驱逐时不要反复重试同一查询，必要时缩小范围重取；工具提示本地缓存缺口过大时，直接告知用户跑历史更新脚本，不要反复重查。\n[禁止编造] 你绝对禁止凭空编造股票价格、涨跌幅、成交量等行情数据。没有通过工具（get_stock_quote / get_portfolio_quotes / read_stock_kline）实际获取到真实数据前，不得输出价格数字、涨跌幅、跌停/涨停判定。如果你不确定或没查到，直接说「我没有查到该股票的实时数据」——宁可说不知道也不准编造。每一条价格结论都必须有对应的工具调用记录佐证。\n[上下文口径] 工具的原始返回只在当轮有效：你给出回复后，tool 结果不进入后续上下文（下一轮只能看到一份「哪个工具调过、成功还是失败」的记账）。某份原始数据后面还要用（行情数值、K 线行、库配置、文件要点、SQL 结果），就在本轮调 retain_tool_data 登记成「跨轮上下文便签」：它以隐藏消息回灌给你、不出现在用户界面，也不必抄进回复正文；不登记就等于丢掉，需要时只能重新调用工具。正文只写给用户看的结论与必要数据。反过来，记账里标「失败」的查询从未给过你数据，后续任何一轮都不得把它的结果编成数值。';
     // 数据时效：用户的“今天”与日线的“最新一天”经常不是一个日期，不把这条讲清楚就会被当成查错数据
-    const eodRules = '[数据时效] 日线只从本地数据库取（工作目录 flit/config.json 登记的日线库，经 Agent 桥接只读查询），不再读 parquet——年文件只是某时刻全市场快照，供回测/入库用。链路：本地库 → 免费渠道（新浪/腾讯实时、东方财富/同花顺日线）→ 小石 API（只缺 1~2 个交易日且免费不可用时才兜底）。本地库通常滞后一个交易日（由用户侧定时任务发布），工具会自动用免费接口补齐，不算错误；库里缺口更大时不补，如实告知用户本地日线库待更新，不要反复重试，也不要替用户执行任何同步脚本。ETF/指数不在该库，走免费同花顺 ETF 日线（失败再小石，且只有未复权价）。工具报「工作目录不存在可用数据库」时照原样转述，不要改用别的工具硬凑 K 线。盘中（含午休）时，日线末行是工具用一次免费批量行情拼上的当日未收盘 bar（行上标 intraday/as_of）：此时末行 close 可以当「现价」，但当日成交量不满全天，量能结论要看工具返回的 实时拼接.量能说明（已接近收盘时才可当整日量比）。没拼上实时（盘前/收盘后/渠道失败）时，末行只是已收盘日线，只能称「某日收盘价」，不得写成现价/最新价，当日价格请另调 get_stock_quote（单只）或 get_portfolio_quotes（批量）。结论中必须写明数据日期与行情时间；工具返回的 接口调用 / 渠道诊断 / 本地库诊断 是真实渠道状况，报告有异就如实告知用户，不要猜测或重复重试。';
+    const eodRules = '[数据时效] 日线只从本地数据库取（工作目录 flit/config.json 登记的日线库，经 Agent 桥接只读查询），不再读 parquet——年文件只是某时刻全市场快照，供回测/入库用。日 K 查询超过 7 天时为保护免费渠道，只能走本地数据库；无数据库或库中数据不全时，必须提示「保护免费渠道，仅支持查询近7日日K数据，或自备数据源和做项目适配，或联系项目作者」，不得调用免费/小石接口补齐。近 7 天以内才允许按工具规则使用免费渠道。链路：本地库 → 免费渠道（新浪/腾讯实时、东方财富/同花顺日线）→ 小石 API（只缺 1~2 个交易日且免费不可用时才兜底）。本地库通常滞后一个交易日（由用户侧定时任务发布），工具会自动用免费接口补齐，不算错误；库里缺口更大时不补，如实告知用户本地日线库待更新，不要反复重试，也不要替用户执行任何同步脚本。ETF/指数不在该库，走免费同花顺 ETF 日线（失败再小石，且只有未复权价）。工具报「工作目录不存在可用数据库」时照原样转述，不要改用别的工具硬凑 K 线。盘中（含午休）时，日线末行是工具用一次免费批量行情拼上的当日未收盘 bar（行上标 intraday/as_of）：此时末行 close 可以当「现价」，但当日成交量不满全天，量能结论要看工具返回的 实时拼接.量能说明（已接近收盘时才可当整日量比）。没拼上实时（盘前/收盘后/渠道失败）时，末行只是已收盘日线，只能称「某日收盘价」，不得写成现价/最新价，当日价格请另调 get_stock_quote（单只）或 get_portfolio_quotes（批量）。结论中必须写明数据日期与行情时间；工具返回的 接口调用 / 渠道诊断 / 本地库诊断 是真实渠道状况，报告有异就如实告知用户，不要猜测或重复重试。';
     const lines = [
         '你是「flit stk - 量化盯盘」Chrome 扩展 AI 助手，使用中文。工具按组冷加载：需要能力时先调用 load_tool_group。全局设置只能修改 Cron，直接执行并说明修改结果。flit_stk 是 Chrome 扩展安装目录，不是 Agent 项目目录；不要把文件写入 flit_stk。写入/读取 flit/... 时使用 Agent 工作目录，多个工作目录时自行选择 root。' + wsGuide,
         '[工具组]\n' + bridgeCatalog,

@@ -56,7 +56,22 @@ async function idbPut(record) {
 // 读取全部工作目录 [{ name, handle }]（主目录在首位）；兼容旧版单目录记录迁移
 export async function getWorkspaceHandles() {
     const record = await idbGet(HANDLE_KEY);
-    if (record && Array.isArray(record.items)) return record.items;
+    if (record && Array.isArray(record.items)) {
+        // 按 name 去重（保留首次出现的位置），防止意外重复
+        const seen = new Set();
+        const deduped = [];
+        for (const item of record.items) {
+            if (!seen.has(item.name)) {
+                seen.add(item.name);
+                deduped.push(item);
+            }
+        }
+        if (deduped.length !== record.items.length) {
+            // 有重复，持久化去重后的列表
+            await idbPut({ name: HANDLE_KEY, items: deduped });
+        }
+        return deduped;
+    }
     const legacy = await idbGet(LEGACY_HANDLE_KEY);
     if (legacy && legacy.handle) {
         const items = [{ name: legacy.handle.name, handle: legacy.handle }];
@@ -83,12 +98,10 @@ export async function pickPrimaryWorkspace(expectedName = '') {
     if (expectedName && handle.name !== expectedName) {
         throw new Error(`选择的目录是“${handle.name}”，与填写路径的末级目录“${expectedName}”不一致，请重新选择`);
     }
-    const items = await getWorkspaceHandles();
-    if (items.length > 0 && items[0].name === handle.name) {
-        items[0].handle = handle;
-    } else {
-        items.unshift({ name: handle.name, handle });
-    }
+    let items = await getWorkspaceHandles();
+    // 移除其他位置的同名条目（防止作为附加目录时重复）
+    items = items.filter(d => d.name !== handle.name);
+    items.unshift({ name: handle.name, handle });
     await saveWorkspaceHandles(items);
     return handle;
 }

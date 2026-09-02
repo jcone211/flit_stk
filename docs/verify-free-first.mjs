@@ -391,7 +391,12 @@ await run(`D3 库里有数据（末行=${EXPECTED}）→ source=db${LIVE ? '+liv
         check('D3', '实时拼接.覆盖只数 = 1/1', r.实时拼接 && r.实时拼接.覆盖只数 === '1/1', JSON.stringify(r.实时拼接));
         check('D3', 'source 带 +live', /\+live$/.test(String(r.source)), r.source);
     } else {
-        check('D3', '非交易时段不拼当日 bar、无 实时拼接 字段', last.date !== TODAY && r.实时拼接 === undefined, `${last.date} / ${r.实时拼接}`);
+        // 口径：盘后不拼实时 bar 的判据是「末行没有 intraday 标记 / 无 实时拼接 字段」。
+        // 不能用 last.date !== TODAY：本用例 fixture 就是 dbLast=EXPECTED，收盘后 EXPECTED 即当日，
+        // 库里合法地已经有当日已收盘行（15:01 后跑会误挂）。
+        check('D3', '非交易时段不拼当日 bar（末行无 intraday、无 实时拼接 字段、source 不带 +live）',
+            last.intraday === undefined && r.实时拼接 === undefined && !/live/.test(String(r.source || '')),
+            `${last.date} intraday=${last.intraday} / 实时拼接=${r.实时拼接} / source=${r.source}`);
     }
     console.log('  接口调用（累计窗口原文）: ' + r.接口调用);
 });
@@ -687,6 +692,55 @@ await run('C9 系统提示注入（buildSystemPrompt）', async () => {
     check('C9', '提示明确「不替用户执行同步脚本」与「照原样转述不可用结论」', /不要替用户执行任何同步脚本/.test(content) && /照原样转述/.test(content));
     check('C9', '提示不再教模型读 parquet 取 K 线', !/读取.*parquet.*年文件|read_stock_kline.*parquet/i.test(content));
     check('C9', '提示角色字段完整', p && p.role === 'system');
+    check('C9', '跨轮口径：教模型用 retain_tool_data 保存关键原始数据', /retain_tool_data/.test(content), content.match(/.{0,30}retain_tool_data.{0,20}/)?.[0]);
+    check('C9', '不再要求把工具数据拄进回复正文（避免复述式烧 token）', !/必须在本次回复正文里以表格或列表完整写出/.test(content));
+    check('C9', '仍保留「禁止编造 + 失败的查询不得补写数值」口径', /禁止编造/.test(content) && /不得把它的结果编成数值/.test(content));
+});
+
+// ---------------------------------------------------------------- 4.9 R 系列：跨轮上下文（账本 / 数据便签）
+await run('R1 retain_tool_data 登记与拒收口径（0 次接口）', async () => {
+    const savedResults = state.turnToolResults;
+    const savedPending = state.pendingRetains;
+    const now = Date.now();
+    state.pendingRetains = [];
+    state.turnToolResults = [
+        { name: 'load_tool_group', argsText: '{"group":"market"}', text: '{"ok":true}', ok: true, ts: now },
+        { name: 'read_stock_kline', argsText: '{"code":"600206","days":7}', text: JSON.stringify({ code: '600206.SH', 数据日期: EXPECTED, rows: [{ date: EXPECTED }] }), ok: true, ts: now },
+        { name: 'get_stock_quote', argsText: '{"code":"600206"}', text: JSON.stringify({ error: '实时行情拉取失败：免费渠道与小石均不可用', 渠道诊断: '新浪 0、腾讯 0' }), ok: false, ts: now },
+    ];
+    try {
+        let r = await toolExecutors.retain_tool_data({ tool: 'read_stock_kline', note: '后续算 MA' });
+        console.log('  ' + brief(r));
+        check('R1', '本轮成功的原始返回可登记，且告知不走用户界面', r.ok === true && r.已登记 === 'read_stock_kline' && /界面/.test(String(r.生效)), brief(r));
+        check('R1', '登记结果先进 pendingRetains，等 ai.js 本轮结束排空落库',
+            state.pendingRetains.length === 1 && state.pendingRetains[0].tool === 'read_stock_kline',
+            state.pendingRetains.map(n => n.tool).join(','));
+
+        r = await toolExecutors.retain_tool_data({ tool: 'get_stock_quote' });
+        check('R1', '取数失败的调用不得登记（不能把报错当数据留一份）', !!r.error && /没有取到数据/.test(r.error), r.error);
+
+        r = await toolExecutors.retain_tool_data({ tool: 'read_stocks_kline' });
+        check('R1', '本轮没调过的工具不得登记，并回可登记清单（只能凭真拿到的原文登记）',
+            !!r.error && /本轮没有/.test(r.error) && Array.isArray(r.本轮可登记) && r.本轮可登记.includes('read_stock_kline'), brief(r));
+
+        r = await toolExecutors.retain_tool_data({ tool: 'load_tool_group' });
+        check('R1', 'load_tool_group 等常驻工具不入可登记清单', !!r.error && !r.本轮可登记.includes('load_tool_group'), `${r.error}|${r.本轮可登记}`);
+
+        await toolExecutors.retain_tool_data({ tool: 'read_stock_kline', note: '换成这一份' });
+        check('R1', '同一工具重复登记只留最新一份', state.pendingRetains.filter(n => n.tool === 'read_stock_kline').length === 1,
+            state.pendingRetains.map(n => n.tool).join(','));
+
+        state.turnToolResults.push({ name: 'query_local_database', argsText: '{"sql":"SELECT 1"}', text: 'x'.repeat(9000), ok: true, ts: now });
+        await toolExecutors.retain_tool_data({ tool: 'query_local_database' });
+        const total = state.pendingRetains.reduce((n, x) => n + x.text.length, 0);
+        check('R1', '单条超 MAX_RETAIN_CHARS 会截断', state.pendingRetains.every(n => n.text.length <= 3100),
+            state.pendingRetains.map(n => n.text.length).join(','));
+        check('R1', '总量超 MAX_RETAINED_TOTAL 丢最旧、最新一份必在',
+            total <= 6000 && state.pendingRetains.some(n => n.tool === 'query_local_database'), `total=${total}`);
+    } finally {
+        state.turnToolResults = savedResults;
+        state.pendingRetains = savedPending;
+    }
 });
 
 // ---------------------------------------------------------------- 5. E 系列：真实桥接 + 真实库（--bridge=real 才跑）

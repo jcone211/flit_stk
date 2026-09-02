@@ -84,6 +84,13 @@
  *      finishThinking 必须在每轮 sendRound 返回后调用（含 tool_calls / 报错 / 超时路径），否则折叠块残留。
  *  10. evictToolResults 只改 tool 消息的 content 并打 m.evicted 标记（不动 role / tool_call_id，
  *      否则 OpenAI 协议报错）；末尾连续的 tool 消息 = 最近一轮结果，绝不驱逐。
+ *  11. tool 原始返回不跨轮：chatMessages 只存 user/assistant 正文 + 两条隐藏条目（kind:'tool_trace' 账本、
+ *      kind:'retained_data' 数据便签，均由 pushToolTrace / pushRetainedNotes 落入，role 用 TRACE_MESSAGE_ROLE）。
+ *      不要把真正的 tool 消息塞进 chatMessages——OpenAI 协议要求 tool 消息紧跟携带同名 tool_call_id 的
+ *      assistant 消息，成对缺失直接 400。内部标记（kind / evicted / chars）在 sendRound 走线前由
+ *      toWireMessage 剥掉，只发协议字段。
+ *  12. 模型想跨轮拿住一份数据只能调 retain_tool_data（登记本轮缓存的原文）；模型只能登记工具真返回过的原文，自己写不了自定义内容进隐藏上下文，
+ *      这是故意的——防止模型把编出来的数字登记成事实。guard 的跨轮证据也只看登记进便签的原文与账本里的成功记录。
  */
 
 import {
@@ -91,6 +98,9 @@ import {
     storageGet, storageSet, genUid,
     MAX_TOOL_RESULT_CHARS, MAX_MESSAGES, MAX_MESSAGE_CHARS,
     toolResultLimitChars, MAX_ROUND_TOOL_CHARS, MAX_CONTEXT_CHARS,
+    TRACE_MESSAGE_ROLE, MAX_TRACE_CHARS, MAX_TRACE_CALLS, MAX_KEEP_TRACES,
+    MAX_RETAINED_ENTRIES, MAX_RETAINED_TOTAL, MAX_TURN_TOOL_RESULTS,
+    fmtDateTimeStr,
     REQUEST_IDLE_TIMEOUT_MS, REQUEST_MAX_TIMEOUT_MS, KEEPALIVE_INTERVAL_MS, THINKING_TAIL_CHARS,
     CHAT_KEY,
     messagesEl, scrollDownBtn, chatInput, sendBtn, stopBtn,
@@ -101,6 +111,7 @@ import {
 import {
     TOOL_DEFS, TOOL_GROUPS, TOOL_GROUP_DEF, TOOL_GROUP_RULES, TOOL_CATALOG,
     getLoadedToolDefs, toolExecutors,
+    CONTEXT_TOOL_DEFS,
     loadMemory, buildSystemPrompt, todayStr,
 } from './core/ai_tools.js';
 import {
@@ -115,6 +126,7 @@ import { readyRoot, writeUpload, getBridgeHandle, workspacePermission } from './
 import {
     loadDebugFlag, applyRemoteDebugFlag, isDebugOn, beginDebugSession, dropDebugSession,
     record, recordRepeat, recordMessage, withDebugMuted, bindDebugButton, bindDebugGlobals,
+    flattenContent,
 } from './core/ai_debug.js';
 
 // ============== port 连接 ==============
@@ -253,7 +265,8 @@ async function sendRound(apiMessages, tools, { stream = true, provider = activeP
             state.port.postMessage({
                 action: 'aiChatStream',
                 requestId,
-                messages: apiMessages,
+                // 只送协议字段：kind / evicted 一类内部标记不得跟着走线（部分供应商不接受未知字段）
+                messages: (apiMessages || []).map(toWireMessage),
                 tools,
                 stream,
                 baseUrl: provider.baseUrl,
@@ -307,9 +320,30 @@ function logResponse(result) {
     });
 }
 
+/**
+ * 一次用户提问 = 一整串 function-calling 轮。
+ * 外层只负责兜底：不管正常收工 / 报错 / 中断 / 轮数耗尽，本轮的工具账本都要落到 chatMessages，
+ * 否则下一轮模型既不知道自己查过什么，也不知道哪些查失败了（docs/debug.txt 的根因）。
+ */
 async function runAgentLoop(initialMessages, initialToolGroups = []) {
-    const apiMessages = initialMessages || state.chatMessages.map(m => ({ role: m.role, content: m.content }));
+    const turnCalls = [];
+    // 本轮的工具原始返回缓存与待落库便签逐轮重置（retain_tool_data 只能登记本轮的东西）
+    state.turnToolResults = [];
+    state.pendingRetains = [];
+    try {
+        await runAgentLoopBody(initialMessages, initialToolGroups, turnCalls);
+    } finally {
+        pushToolTrace(turnCalls);
+        pushRetainedNotes();
+    }
+}
+
+async function runAgentLoopBody(initialMessages, initialToolGroups, turnCalls) {
+    const apiMessages = initialMessages || state.chatMessages.map(toApiMessage);
     state.activeToolGroups = new Set(initialToolGroups);
+    // 本轮是否真拿到过行情数据（guard 的唯一硬证据）与「强制纠正只做一次」的闭锁
+    let quoteEvidence = false;
+    let guardRetried = false;
     const requestProvider = selectRequestProvider(apiMessages);
     if (!String(requestProvider.apiKey || '').trim()) {
         appendMessage('error', '请设置一个供应商 API Key');
@@ -323,7 +357,7 @@ async function runAgentLoop(initialMessages, initialToolGroups = []) {
         finishThinking();
         evictToolResults(apiMessages);
         const requestMessages = [buildSystemPrompt(), ...apiMessages];
-        const tools = [TOOL_GROUP_DEF, ...getLoadedToolDefs()];
+        const tools = [TOOL_GROUP_DEF, ...CONTEXT_TOOL_DEFS, ...getLoadedToolDefs()];
         let result = await sendRound(requestMessages, tools, { stream: true, provider: requestProvider });
         removeWaitingAssistant();
         finishThinking();
@@ -377,39 +411,40 @@ async function runAgentLoop(initialMessages, initialToolGroups = []) {
                     function: { name: tc.function?.name || tc.name, arguments: tc.arguments },
                 })),
             });
-            apiMessages.push(...await executeToolCalls(sanitizedCalls));
+            apiMessages.push(...await executeToolCalls(sanitizedCalls, turnCalls));
+            quoteEvidence = turnCalls.some(c => QUOTE_TOOLS.has(c.name) && c.ok);
             continue;
         }
-        // Code-level guard: detect fabricated stock data (模型未调工具就编造价格/K线)
-        // 注意：如果本轮或之前轮次已调过行情工具(含 get_stock_quote/get_portfolio_quotes/read_stock_kline/read_stocks_kline)，
-        // 说明模型是拿着真实数据在回复，不拦截，避免误伤正常流程。
-        if (!result.__hallucinationRetry) {
-            const hasCalledQuoteTool = apiMessages.some(m =>
-                m.role === 'assistant' && m.tool_calls && m.tool_calls.some(tc =>
-                    /^(get_stock_quote|get_portfolio_quotes|read_stock_kline|read_stocks_kline)$/.test(tc.function?.name || '')
-                )
-            );
-            if (!hasCalledQuoteTool) {
-                const lastUserText = (() => {
-                    for (let i = apiMessages.length - 1; i >= 0; i--) {
-                        if (apiMessages[i].role === 'user') {
-                            const c = apiMessages[i].content;
-                            return typeof c === 'string' ? c : '';
-                        }
-                    }
-                    return '';
-                })();
-                const replyText = result.content || '';
-                const stockQuery = /(现价|价格|行情|走势|K线|涨跌|日线|开盘|收盘|股价|涨幅|跌幅|实时)/.test(lastUserText);
-                const hasPriceData = /(元|涨跌幅|收盘|开盘|最高|最低|成交量|成交额|换手|跌停|涨停)/.test(replyText);
-                const hasTable = /^\|/.test(replyText.trim()) && /\|\s*\d/.test(replyText);
-                if (stockQuery && (hasPriceData || hasTable) && state.activeToolGroups.size > 0) {
-                    result.__hallucinationRetry = true;
+        // 反编造 guard：本轮没拿到过行情数据，上一轮账本里也没有成功的取数，却输出了价格/表格 → 判定为编造。
+        // 口径：tool 原始返回不跨轮，所以“上一轮的数据”只能以当时写进回复正文的形式存在（系统提示 [上下文口径] 已要求）。
+        if (state.activeToolGroups.size > 0 && !quoteEvidence && !hasPriorQuoteEvidence()) {
+            const replyText = result.content || '';
+            const hasPriceData = /(现价|收盘|开盘|最高价|最低价|涨跌幅|涨跌额|成交量|成交额|换手率|跌停|涨停|股价)/.test(replyText);
+            const hasTable = /^\|/.test(replyText.trim()) && /\|\s*\d/.test(replyText);
+            if (hasPriceData || (hasTable && quoteTopicNearby(apiMessages))) {
+                if (!guardRetried) {
+                    guardRetried = true;
+                    record('guard', { 处理: '注入强制纠正', 文本字符: replyText.length, 表格: hasTable, 价格字样: hasPriceData });
+                    appendMessage('system', '本轮未检测到取数成功的工具调用，已要求重新取数');
                     apiMessages.push({
                         role: 'system',
-                        content: '【强制纠正】你刚才在没有调用任何工具的情况下直接输出了股票行情数据，这些数据是编造的，不可使用。请立即调用 get_stock_quote（单只实时）或 read_stock_kline / read_stocks_kline（日线）获取真实数据后再回答。'
+                        content: '【强制纠正】本轮没有任何取数成功的工具调用（上一轮工具记录也未显示行情数据），刚才那段数字是编造的，不可使用。'
+                            + '请立即调用 get_stock_quote / get_portfolio_quotes（实时）或 read_stock_kline / read_stocks_kline（日线）拿真实数据后再回答；'
+                            + '取不到就只说「没有取到数据」并原样转述工具给的原因，不得输出任何价格、涨跌幅、成交量或 K 线表格。'
+                            + '后面还要用的数据，取到后本轮调 retain_tool_data 登记成隐藏便签（tool 原始返回下一轮就不在你的上下文里了）。',
                     });
                     continue;
+                }
+                // 纠正一次仍在编：强价格信号（写了收盘/成交量等）直接丢正文；
+                // 只有「表格 + 话题像行情」的弱信号则放行加免责，避免误伤「列文件/列表名」这类正常回答
+                if (!hasPriceData) {
+                    record('guard', { 处理: '二次命中，弱信号放行并提示', 文本字符: replyText.length });
+                    appendMessage('system', '本轮没有取数成功的工具调用，下面内容里的数值没有工具来源，请自行核对');
+                } else {
+                    record('guard', { 处理: '二次命中，丢弃正文', 文本字符: replyText.length });
+                    dropAssistantBubble();
+                    appendMessage('error', '模型在未取到真实数据的情况下再次直接给出行情数值，该回复已被拦截。请先让取数链路可用（启用 Agent 桥接查本地库，或改问 7 日内走免费渠道）再问一次。');
+                    return;
                 }
             }
         }
@@ -420,6 +455,172 @@ async function runAgentLoop(initialMessages, initialToolGroups = []) {
         return;
     }
     appendMessage('system', '工具调用轮数已达上限（' + state.maxToolIterations + '），已结束本轮');
+}
+
+// ============== 跨轮工具记录（账本）==============
+
+// guard 与账本共用的「有真实数据来源」口径：行情接口 + 会带回库存价格/SQL 行的工具
+// （get_stock_list 回的是本地库已落地数据并带 数据时间，query_local_database 回原始行，都算真实来源）
+const QUOTE_TOOLS = new Set([
+    'get_stock_quote', 'get_portfolio_quotes', 'read_stock_kline', 'read_stocks_kline',
+    'get_stock_list', 'query_local_database',
+]);
+
+// 账本开头那段话就是给模型看的核心提示：原始返回不存上下文，有价值的数据自己写进正文
+const TOOL_TRACE_HEAD = '[工具调用记录·系统自动登记，非用户发言] 上一轮工具调用的原始返回已不在你的上下文里，只剩下面这份账本。'
+    + '当时觉得有价值的原始数据如果没调 retain_tool_data 登记成跨轮便签，现在就是丢了：要么重新调用工具（会再花一次免费接口额度），要么只能告诉用户拿不到了。'
+    + '标为「失败」的查询从来没有给过你数据，不得把它们的结论当成已知事实，更不得补写数值。';
+
+/** chatMessages → API 消息：只回灌 role/content（外加内部 kind 标记，走线前由 toWireMessage 剥掉） */
+function toApiMessage(m) {
+    const role = ['user', 'assistant', 'system', 'tool'].includes(m.role) ? m.role : 'assistant';
+    const msg = { role, content: m.content };
+    if (m.kind) msg.kind = m.kind;
+    return msg;
+}
+
+/** 发给供应商前剩掉一切内部字段（kind / evicted / 旧版误存的 tool_calls 名等），只留 OpenAI 协议字段 */
+function toWireMessage(m) {
+    const out = { role: m.role, content: m.content };
+    if (typeof m.name === 'string' && m.name) out.name = m.name;
+    if (m.tool_call_id) out.tool_call_id = m.tool_call_id;
+    if (Array.isArray(m.tool_calls)) out.tool_calls = m.tool_calls;
+    return out;
+}
+
+function clipText(v, n) {
+    const s = String(v == null ? '' : v);
+    return s.length > n ? s.slice(0, n) + '…' : s;
+}
+
+/** 把一次工具调用压成一行账：名字(参数) 耗时 → 成功（列几个要点）/ 失败（原因+诊断） */
+function summarizeToolCall(name, argsText, resultText, ms, truncated, failed) {
+    let obj = null;
+    try { obj = JSON.parse(resultText); } catch { /* 纯文本结果 */ }
+    const payload = obj && typeof obj === 'object' ? obj : {};
+    // 业务失败看返回里的 error 键；抛异常/未知工具是纯文本结果，看 failed 标记
+    const errText = typeof payload.error === 'string' ? payload.error : (failed ? String(resultText || '执行失败') : '');
+    const ok = !errText;   // 截断不算失败（数据仍部分有效），只在行里标一句
+    const bits = [];
+    if (ok) {
+        for (const key of ['rows', 'stocks', 'quotes', 'list', 'items']) {
+            if (Array.isArray(payload[key])) { bits.push(`${key} ${payload[key].length}`); break; }
+        }
+        if (payload.failed) bits.push('其中失败 ' + payload.failed);
+        if (payload['数据日期']) bits.push('数据日期 ' + clipText(payload['数据日期'], 12));
+        if (payload['渠道']) bits.push('渠道 ' + clipText(payload['渠道'], 24));
+        if (typeof payload.size === 'number') bits.push(payload.size + ' 字节');
+        if (payload.table || payload['数据表']) bits.push('数据表 ' + clipText(payload.table || payload['数据表'], 30));
+        bits.push((resultText || '').length + ' 字' + (truncated ? '（已截断）' : ''));
+    } else {
+        const diag = payload['取数诊断'] || payload['本地库诊断'] || payload['渠道诊断'] || payload['排查'] || payload.hint || '';
+        bits.push('失败：' + clipText(errText || resultText, 120) + (diag ? '（' + clipText(diag, 80) + '）' : ''));
+    }
+    return { name, ok, ms, text: `- ${name}(${clipText(argsText, 120)}) ${ms}ms → ${bits.join('，')}` };
+}
+
+/**
+ * 一轮结束后把账本落进 chatMessages（不弹对话气泡，回灌时只带文本）。
+ * 只留最近 MAX_KEEP_TRACES 轮：更早的原始数据本来也拿不回来，留着只会撑预算、让模型引用过期数值。
+ */
+function pushToolTrace(calls) {
+    const list = (calls || []).filter(c => c && c.name && c.name !== 'load_tool_group');
+    if (!list.length) return;
+    const shown = list.slice(-MAX_TRACE_CALLS);
+    let body = shown.map(c => c.text).join('\n');
+    if (list.length > shown.length) body = `- （更早 ${list.length - shown.length} 次调用已省略）\n` + body;
+    if (body.length > MAX_TRACE_CHARS) body = clipText(body, MAX_TRACE_CHARS);
+    const entry = pushHiddenEntry('tool_trace', TOOL_TRACE_HEAD + '\n' + body, {
+        calls: shown.map(c => ({ name: c.name, ok: c.ok === true })),
+    });
+    trimHiddenEntries();
+    trimChat();
+    saveChat();
+    record('tool_trace', { name: '本轮 ' + list.length + ' 次调用', 调用次数: list.length, 行情成功: list.some(c => QUOTE_TOOLS.has(c.name) && c.ok), 内容: entry.content });
+}
+/** 隐藏上下文条目统一入口：不弹气泡、不渲染到对话区，只进 chatMessages 喂给后续轮的模型 */
+function pushHiddenEntry(kind, content, meta) {
+    const entry = {
+        role: TRACE_MESSAGE_ROLE,
+        kind,
+        content,
+        ts: Date.now(),
+        uid: genUid('m'),
+        ...(meta || {}),
+    };
+    state.chatMessages.push(entry);
+    return entry;
+}
+
+/**
+ * 排空 retain_tool_data 登记的便签，落成隐藏上下文条目（下一轮起回灌）。
+ * 同一个工具只留一份（后登记覆盖前面的），总量超 MAX_RETAINED_TOTAL / 条数超 MAX_RETAINED_ENTRIES 时丢最旧。
+ */
+function pushRetainedNotes() {
+    const notes = state.pendingRetains || [];
+    state.pendingRetains = [];
+    if (!notes.length) return;
+    for (const n of notes) {
+        const head = '[跨轮数据便签·系统自动登记，非用户发言] 这是你在之前轮次用 retain_tool_data 保留的工具原始数据，对话界面不展示。'
+            + '它是登记当时的快照：只要话题需要现价/当日数据，仍然必须重新取数，不得拿它当最新行情引用。\n';
+        const src = `来源 ${n.tool}(${n.argsText || '{}'}) 登记于 ${fmtDateTimeStr(n.ts)}${n.note ? '｜用途：' + n.note : ''}\n`;
+        pushHiddenEntry('retained_data', head + src + n.text, { source: n.tool, chars: n.text.length });
+        record('retained', { name: n.tool, 字符: n.text.length, 用途: n.note || '', 内容: n.text });
+    }
+    trimHiddenEntries();
+    trimChat();
+    saveChat();
+}
+
+/** 账本与便签的容量口径：条数/总量超限先丢最旧的，避免隐藏上下文反过来吃掉 MAX_CONTEXT_CHARS */
+function trimHiddenEntries() {
+    const kept = [];
+    let totalRetained = 0;
+    for (let i = state.chatMessages.length - 1; i >= 0; i--) {
+        const m = state.chatMessages[i];
+        if (m.kind === 'retained_data') {
+            const chars = Number(m.chars) || (m.content || '').length;
+            if (kept.filter(k => k.kind === 'retained_data').length >= MAX_RETAINED_ENTRIES || totalRetained + chars > MAX_RETAINED_TOTAL) continue;
+            totalRetained += chars;
+        } else if (m.kind === 'tool_trace' && kept.filter(k => k.kind === 'tool_trace').length >= MAX_KEEP_TRACES) {
+            continue;
+        }
+        kept.push(m);
+    }
+    if (kept.length !== state.chatMessages.length) {
+        const keep = new Set(kept);
+        state.chatMessages = state.chatMessages.filter(m => keep.has(m));
+    }
+}
+
+/** 跨轮证据：历史隐藏条目里有没有真实的行情数据（已登记的行情便签，或最近账本里成功的行情调用） */
+function hasPriorQuoteEvidence() {
+    // 两类条目本身已被 trimHiddenEntries 限在最近几条，直接全扫即可，不必只盯最近一条
+    return state.chatMessages.some(m => (m.kind === 'retained_data' && QUOTE_TOOLS.has(m.source))
+        || (m.kind === 'tool_trace' && (m.calls || []).some(c => QUOTE_TOOLS.has(c.name) && c.ok === true)));
+}
+
+/** 话题是不是接着行情问的：往回看 4 条用户消息与途中助手回复（用户只回「好的」时，关键词在上一轮） */
+function quoteTopicNearby(apiMessages) {
+    const re = /(现价|价格|行情|走势|K\s*线|日k|日线|涨跌|开盘|收盘|股价|涨幅|跌幅|实时|报价)/i;
+    let users = 0;
+    for (let i = apiMessages.length - 1; i >= 0; i--) {
+        const m = apiMessages[i];
+        if (m.kind === 'tool_trace' || m.kind === 'retained_data') continue;   // 隐藏条目里本身就带「K 线/行情」字样，不能当话题证据
+        if (m.role !== 'user' && m.role !== 'assistant') continue;
+        if (typeof m.content === 'string' && re.test(m.content)) return true;
+        if (Array.isArray(m.content) && re.test(flattenContent(m.content))) return true;
+        if (m.role === 'user' && ++users >= 4) break;
+    }
+    return false;
+}
+
+/** 丢弃当前流式中的助手气泡（guard 二次命中时用，不把假数据落库也不留页面） */
+function dropAssistantBubble() {
+    if (state.currentAssistantEl) state.currentAssistantEl.remove();
+    state.currentAssistantEl = null;
+    state.currentAssistantEntry = null;
+    state.currentAssistantRaw = '';
 }
 
 function commitAssistant(content) {
@@ -434,7 +635,7 @@ function commitAssistant(content) {
     return entry;
 }
 
-async function executeToolCalls(toolCalls) {
+async function executeToolCalls(toolCalls, traceSink) {
     const toolMessages = [];
     let roundBudget = MAX_ROUND_TOOL_CHARS; // 单轮工具结果总预算（T1-3）
     for (const call of toolCalls) {
@@ -474,6 +675,14 @@ async function executeToolCalls(toolCalls) {
             result: resultText,
         });
         renderToolEntry(call.name, call.arguments || '{}', resultText);
+        const trace = summarizeToolCall(call.name, call.arguments, resultText, Date.now() - startedAt,
+            resultText.length > cap, failed);
+        if (traceSink) traceSink.push(trace);
+        // 本轮原文缓存：只存本轮（retain_tool_data 只能登记本轮拿到的东西，不允许凭记忆编一份）
+        if (call.name !== 'load_tool_group' && call.name !== 'retain_tool_data') {
+            state.turnToolResults.push({ name: call.name, argsText: clipText(call.arguments, 120), text: resultText, ok: trace.ok, ts: Date.now() });
+            if (state.turnToolResults.length > MAX_TURN_TOOL_RESULTS) state.turnToolResults.shift();
+        }
         toolMessages.push({ role: 'tool', tool_call_id: call.id, content: resultText });
     }
     return toolMessages;
@@ -903,6 +1112,15 @@ function renderHistory() {
         state.thinkingRaw = '';
         state.chatMessages.forEach(m => { if (!m.uid) m.uid = genUid('m'); });
         for (const m of state.chatMessages) {
+            // 工具账本不弹当对话气泡，只补一行短提示（原始结果不落库，回放时至少告诉用户当时调过什么）
+            if (m.kind === 'tool_trace') {
+                appendMessage('system', '工具记录（原始返回不跨轮保留）：' + (m.calls || []).map(c => c.name + (c.ok ? '' : '(失败)')).join('、'));
+                continue;
+            }
+            if (m.kind === 'retained_data') {
+                appendMessage('system', '已登记的跨轮数据便签（仅回灌给模型，界面不展开）：' + m.source + '·' + (m.chars || 0) + ' 字');
+                continue;
+            }
             appendMessage(m.role === 'user' ? 'user' : 'assistant', m.content || '', m);
         }
         state.followStream = true;

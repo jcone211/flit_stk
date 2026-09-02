@@ -30,6 +30,19 @@ export const MAX_ROUND_TOOL_CHARS = 16000;
 // 送入模型的上下文字符预算（超限逐轮驱逐旧 tool 结果，见 ai.js evictToolResults：
 // 仅驱逐「最近一轮以外」的旧结果，驱逐到预算内即停）
 export const MAX_CONTEXT_CHARS = 24000;
+// 跨轮「工具调用记录」：tool 的原始返回只在当轮 function-calling 循环内有效，用户发下一条消息时
+// 会被 chatMessages 的 {role,content} 重建抹掉（docs/debug.txt 里模型就是靠这个空档凭空补了 7 根 K 线）。
+// 每轮结束只留一行账本（调了哪些工具、成功还是失败、失败原因）；原始数据想跨轮存活只能靠 retain_tool_data 登记便签。
+export const TRACE_MESSAGE_ROLE = 'user';    // 隐藏上下文回灌时用的 role：统一用 user（会话中途的 system 个别供应商不接受）
+export const MAX_TRACE_CHARS = 900;           // 单轮账本字符上限
+export const MAX_TRACE_CALLS = 12;            // 单轮账本最多列出的调用条数
+export const MAX_KEEP_TRACES = 2;             // 上下文里保留最近几轮的账本（更早的没有参考价值，还压预算）
+// 「跨轮数据便签」：模型自己判断某份工具原始数据关键时调 retain_tool_data 登记，
+// 不占用可见正文、不进 UI 气泡，只在下一轮起作为隐藏上下文回灌（不再要求「把数据抄进回复正文」）
+export const MAX_RETAIN_CHARS = 3000;         // 单条便签正文上限（超出截断）
+export const MAX_RETAINED_ENTRIES = 3;        // 同时保留几条便签（满了丢最旧）
+export const MAX_RETAINED_TOTAL = 6000;       // 便签总字数量上限（相对 MAX_CONTEXT_CHARS=24000，给对话本身留位）
+export const MAX_TURN_TOOL_RESULTS = 8;       // 本轮可被登记的工具原始返回缓存条数
 // 单轮 LLM 请求超时：滑动空闲 + 硬上限双档。
 // 思考型模型可能长时间只输出 reasoning_content（无正文 delta），固定总超时会误杀，
 // 故每收到一个 delta（正文或思考）就重置空闲计时；空闲满 45s 判无响应，300s 为硬上限兜底。
@@ -67,6 +80,10 @@ export const state = {
     pendingImages: [],
     lastFailUi: null,
     activeToolGroups: new Set(),
+    // 本轮（一次用户提问内含若干 function-calling 轮）的工具原始返回缓存，以及待落库的「跨轮数据便签」；
+    // 两者都由 ai.js 逐轮重置/排空，retain_tool_data 只读写这两个字段
+    turnToolResults: [],
+    pendingRetains: [],
     followStream: true,
     currentAssistantEl: null,
     currentAssistantRaw: '',

@@ -58,11 +58,10 @@ $trigger = New-ScheduledTaskTrigger -AtLogOn
 $settings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries `
-    -StartWhenAvailable `
-    -RestartCount: 3 `
-    -RestartInterval (New-TimeSpan -Minutes 1)
+    -StartWhenAvailable
 
-$principal = New-ScheduledTaskPrincipal -UserId "INTERACTIVE" -LogonType S4U
+$username = "$env:USERDOMAIN\$env:USERNAME"
+$principal = New-ScheduledTaskPrincipal -UserId $username -LogonType S4U
 
 try {
     Register-ScheduledTask `
@@ -81,6 +80,7 @@ try {
     Write-Host "  计划任务: $taskPath$taskName" -ForegroundColor White
     Write-Host "  脚本路径: $watchScript" -ForegroundColor White
     Write-Host "  服务地址: http://127.0.0.1:17321" -ForegroundColor White
+    Write-Host "  健康检查: curl http://127.0.0.1:17321/health" -ForegroundColor White
     Write-Host "" -ForegroundColor White
     Write-Host "  下次登录时自动启动，或立即启动：" -ForegroundColor White
     Write-Host "  Start-ScheduledTask -TaskPath '$taskPath' -TaskName '$taskName'" -ForegroundColor Yellow

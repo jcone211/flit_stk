@@ -4,20 +4,34 @@
 
 ## 安装
 
-在 PowerShell 7 中运行：
+在 **PowerShell 7** 中运行（不需要管理员）：
 
 ```powershell
 .\install.ps1
+# 立即启动（不必等下次登录）：
 Start-ScheduledTask -TaskPath '\flit_bridge\' -TaskName 'flit_bridge_watcher'
 ```
 
-调试时可直接运行：
+安装后注册为 **Windows 计划任务**（任务名 `flit_bridge_watcher`），用户登录时自动后台启动，**无控制台窗口**（通过 S4U 登录类型 + `-WindowStyle Hidden` 双重隐藏）。底层由 `node.exe` 运行 `server.js`，`pwsh` 仅作为启动过程的中转，启动后即隐形。
+
+调试时可直接前台运行：
 
 ```powershell
 .\start-server.ps1
 ```
 
 服务默认监听 `http://127.0.0.1:17321`。
+
+### 管理服务
+
+| 操作 | 命令或方法 |
+|------|-----------|
+| 查看运行状态 | `curl http://127.0.0.1:17321/health` |
+| 查看计划任务状态 | `install.ps1 -Status` |
+| 停止服务 | `Stop-ScheduledTask -TaskPath '\flit_bridge\' -TaskName 'flit_bridge_watcher'` |
+| 进程强行结束 | 任务管理器 → 找 `node.exe`（参数含 `server.js`）→ 结束任务；或 `netstat -ano \| findstr :17321` → `taskkill /PID <PID> /F` |
+| 卸载计划任务 | `install.ps1 -Uninstall`（当前运行的服务须手动停止） |
+| 重装计划任务 | `install.ps1 -Uninstall` → `install.ps1` |
 
 在扩展中启用本地桥接并设置 Agent 工作目录。服务会自动发现：
 
@@ -63,10 +77,12 @@ Start-ScheduledTask -TaskPath '\flit_bridge\' -TaskName 'flit_bridge_watcher'
 # 工作区记忆
 
 ## 数据库连接状态
+
 - status: verified
 - source: local-postgres
 
 ## 可复用流程与查询约定
+
 - workflow: flit/workflow/query-stock-daily.md
 - 用途：查询股票近 N 个交易日行情
 ```

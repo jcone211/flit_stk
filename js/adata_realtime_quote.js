@@ -150,6 +150,145 @@ export async function listMarketCurrent(codeList) {
 }
 
 /**
+ * 新浪全字段实时行情(主源)
+ * url: https://hq.sinajs.cn/list=sh600519,sz000001   注意:不加 s_ 前缀才是全字段
+ * 返回字段索引:0 名称 1 今开 2 昨收 3 最新价 4 最高 5 最低 8 成交量(股) 9 成交额(元) 30 日期 31 时间
+ * 浏览器扩展页无法设置 Referer(禁止头),新浪常被 CORS 拦下,由 listMarketFull 回退腾讯
+ */
+export async function listMarketFullSina(codeList) {
+  const query = codeList
+    .map((code) => getExchangeByStockCode(code).toLowerCase() + code)
+    .join(',');
+  const res = await fetch('https://hq.sinajs.cn/list=' + query, { headers: SINA_HEADERS });
+  if (!res.ok) return [];
+  const text = await decodeResponse(res);
+
+  const rows = [];
+  for (const dataStr of text.split('\n')) {
+    const line = dataStr.trim();
+    if (!line.includes('=')) continue;
+    const idx = line.indexOf('=');
+    const stockCode = line.slice(idx - 6, idx); // 去掉 sh/sz/bj 前缀,取 6 位代码
+    const f = line.slice(idx + 2, -1).split(','); // 跳过 =" 与结尾 "
+    if (f.length < 32) continue;
+    const price = toNumSafe(f[3]);
+    if (price === null) continue;               // 停牌/无效返回 0 价也走这个分支以外的判断由调用方兜
+    rows.push({
+      stock_code: stockCode,
+      short_name: f[0],
+      price,
+      open: toNumSafe(f[1]),
+      high: toNumSafe(f[4]),
+      low: toNumSafe(f[5]),
+      last_close: toNumSafe(f[2]),
+      volume: toNumSafe(f[8]),                 // 股
+      amount: toNumSafe(f[9]),                 // 元
+      quote_time: `${f[30]} ${f[31]}`,
+    });
+  }
+  return rows;
+}
+
+/**
+ * 腾讯全字段实时行情(回退源,浏览器可用)
+ * url: https://qt.gtimg.cn/q=sh600519,sz000001   不加 s_ 前缀
+ * 返回字段索引:1 名称 2 代码 3 最新价 4 昨收 5 今开 6 成交量(手) 33 最高 34 最低 31 涨跌额 32 涨跌幅 37 成交额(万元) 30 行情时间(YYYYMMDDHHMMSS)
+ */
+export async function listMarketFullQQ(codeList) {
+  const query = codeList
+    .map((code) => getExchangeByStockCode(code).toLowerCase() + code)
+    .join(',');
+  const res = await fetch('https://qt.gtimg.cn/r=' + Math.random() + '&q=' + query);
+  if (!res.ok) return [];
+  const text = await decodeResponse(res);
+
+  const rows = [];
+  for (const dataStr of text.split(';')) {
+    if (!dataStr.includes('=')) continue;
+    const f = dataStr.split('~');
+    if (f.length < 39) continue;
+    const price = toNumSafe(f[3]);
+    const timeRaw = String(f[30] || '');
+    if (price === null) continue;
+    rows.push({
+      stock_code: f[2],
+      short_name: f[1],
+      price,
+      open: toNumSafe(f[5]),
+      high: toNumSafe(f[33]),
+      low: toNumSafe(f[34]),
+      last_close: toNumSafe(f[4]),
+      volume: toNumSafe(f[6]) === null ? null : toNumSafe(f[6]) * 100,  // 手 -> 股
+      amount: toNumSafe(f[37]) === null ? null : toNumSafe(f[37]) * 10000, // 万元 -> 元
+      quote_time: timeRaw.length >= 14
+        ? `${timeRaw.slice(0, 4)}-${timeRaw.slice(4, 6)}-${timeRaw.slice(6, 8)} ${timeRaw.slice(8, 10)}:${timeRaw.slice(10, 12)}:${timeRaw.slice(12, 14)}`
+        : '',
+    });
+  }
+  return rows.filter((r) => codeList.includes(r.stock_code));
+}
+
+/** 数值安全转换：空串/'-'/'--'/非法 -> null（全字段接口停牌时会给 0 价，由调用方判断） */
+function toNumSafe(v) {
+  if (v === null || v === undefined || v === '') return null;
+  const s = String(v).trim();
+  if (!s || s === '-' || s === '--') return null;
+  const n = parseFloat(s);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * 全字段实时行情（新浪 + 腾讯合并）
+ * 浏览器里新浪常被 CORS 拦下、腾讯偶尔部分代码为空，所以两路都跑、按代码合并去重（新浪优先），
+ * 不能“新浪为空就丢弃腾讯”或反之。
+ * @param {string[]} codeList 6 位代码数组
+ * @param {string[]} [diag] 传入数组则逐渠道追加诊断文字，便于工具向模型说明“为什么走到了下一路”
+ * @returns {Promise<Array<{stock_code, short_name, price, open, high, low, last_close, volume, amount, quote_time}>>}
+ */
+export async function listMarketFull(codeList, diag = null) {
+  if (!codeList || !codeList.length) return [];
+  const total = codeList.length;
+  const note = (text) => { if (Array.isArray(diag)) diag.push(text); };
+  // 两路并发：一路挂掉不影响另一路（各自 catch，失败只写诊断）
+  const [sinaRes, qqRes] = await Promise.all([
+    listMarketFullSina(codeList).then(r => ({ rows: r, err: null })).catch(e => ({ rows: [], err: shortErr(e) })),
+    listMarketFullQQ(codeList).then(r => ({ rows: r, err: null })).catch(e => ({ rows: [], err: shortErr(e) })),
+  ]);
+  if (sinaRes.err) note('免费·新浪 失败：' + sinaRes.err);
+  if (qqRes.err) note('免费·腾讯 失败：' + qqRes.err);
+  const merged = mergeQuotesByCode(sinaRes.rows, qqRes.rows);
+  note(merged.length
+    ? `免费实时 命中 ${merged.length}/${total}（新浪 ${sinaRes.rows.length}、腾讯补 ${merged.length - sinaRes.rows.length}）`
+    : `免费实时 无可用数据（新浪 ${sinaRes.rows.length}、腾讯 ${qqRes.rows.length}）`);
+  return merged.map((r) => ({
+    ...r,
+    change: r.price !== null && r.last_close !== null ? Number((r.price - r.last_close).toFixed(3)) : null,
+    change_pct: r.price !== null && r.last_close
+      ? Math.round((r.price - r.last_close) / r.last_close * 10000) / 100 : null,
+  }));
+}
+
+/** 按代码去重合并：前者优先，后者只填前者没拿到的代码 */
+function mergeQuotesByCode(primary, secondary) {
+  const out = [];
+  const seen = new Set();
+  for (const r of [...(primary || []), ...(secondary || [])]) {
+    const code = r && r.stock_code;
+    if (!code || seen.has(code)) continue;
+    if (!Number.isFinite(r.price) || r.price <= 0) continue;   // 停牌/脏数据不计入命中
+    seen.add(code);
+    out.push(r);
+  }
+  return out;
+}
+
+/** 异常摘要（去掉堆栈与长 body，只留一句能给模型看的原因） */
+function shortErr(e) {
+  const s = String((e && e.message) || e || '未知错误');
+  return s.length > 90 ? s.slice(0, 90) + '…' : s;
+}
+
+/**
  * 统一批量行情入口（与小石 xiaoshi_realtime_quote.js 的 batchQuotes 签名一致）
  * @param {string[]} codes - 6 位数字股票代码
  * @param {object}   [opts] - 预留（adata 为公开接口，无需 apiKey）

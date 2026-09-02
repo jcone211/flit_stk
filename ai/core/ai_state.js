@@ -146,7 +146,20 @@ export function pickStockView(s) {
         inTrash: !!s.inTrash,
         stopRunning: !!s.stopRunning,
         lastUpdateAt: s.lastUpdateAt ?? null,
+        // currentPrice 是哪一刻的价：epoch 毫秒模型读不出，给一份人可读时间，避免把旧价当现价
+        数据时间: fmtDateTimeStr(s.lastUpdateAt),
     };
+}
+
+/** 时间戳 → 「YYYY-MM-DD HH:MM:SS」（空/非法返回 null） */
+export function fmtDateTimeStr(ms) {
+    const n = Number(ms);
+    if (!Number.isFinite(n) || n <= 0) return null;
+    const d = new Date(n);
+    if (Number.isNaN(d.getTime())) return null;
+    const p = v => String(v).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
+        + ` ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
 // 按名称匹配股票

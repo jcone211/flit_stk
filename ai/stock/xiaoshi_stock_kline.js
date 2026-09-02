@@ -91,11 +91,14 @@ export async function xiaoshiSearchStock(q, opts = {}) {
     return data.items || [];
 }
 
-// 日线 K 线（period=daily, adjust=qfq），返回近 limit 天 [{ date, open, high, low, close, volume, amount, ... }]
-// code 传 6 位数字（如 001309）或带后缀（001309.SZ）；接口内部只用数字部分
-export async function xiaoshiDailyKline(code, { limit = 250, since, to, apiKey, timeoutMs, maxRetries } = {}) {
+// 日线 K 线（period=daily），返回近 limit 天 [{ date, open, high, low, close, volume, amount, ... }]
+// code 传 6 位数字（如 001309）或带后缀（001309.SZ）；接口内部只用数字部分。
+// instrument='etf'：股票主表不认 ETF（实测 404「证券代码不在A股股票主表」），需显式切 ETF 口径，
+// 且小石 ETF 历史目前只放未复权价（实测 adjust 只能 'none'，传 qfq 会被拒）。
+export async function xiaoshiDailyKline(code, { limit = 250, since, to, apiKey, timeoutMs, maxRetries, instrument = 'stock', adjust = 'qfq' } = {}) {
     const symbol = String(code).split('.')[0];
-    const params = { period: 'daily', adjust: 'qfq', limit };
+    const params = { period: 'daily', adjust: instrument === 'stock' ? adjust : 'none', limit };
+    if (instrument !== 'stock') params.instrument = instrument;
     if (since) params.since = since;
     if (to) params.to = to;
     const data = await xiaoshiFetch('/data/kline/' + symbol, { apiKey, params, timeoutMs, maxRetries });

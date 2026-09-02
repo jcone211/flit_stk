@@ -36,12 +36,40 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - AI 对话链路可靠性（T0）：单轮请求为「滑动空闲 45s + 硬上限 300s」双档超时（`REQUEST_IDLE_TIMEOUT_MS` / `REQUEST_MAX_TIMEOUT_MS`），每收 ready/chunk/reasoning 重置空闲计时，超时主动发 `aiChatStop` 中止 SW 在途流；后台 `AI_CHAT_IDLE_TIMEOUT_MS=60s`/`MAX=360s` 只作兜底（均比页面宽一档）。请求在途时每 20s `aiChatPing` 保活 SW（MV3 下光靠 long-lived port 吊不住）；port `onDisconnect` 立即把 pending 全部以 `{retriable:true}` 收尾（`failAllPending`），重连由 `ensurePortReady` 在下一次发送前兜住——改超时/重连逻辑时不要再回到固定总超时。
 - AI 思考过程（T0）：`ai_backend.js` 解析 `delta.reasoning_content`（兼容 `delta.reasoning`）并 emit `reasoning` 事件，后台转 `AI_CHAT_REASONING`，页面 `beginThinking/appendToCurrentThinking/finishThinking` 渲染可折叠灰字（不并入正文、不落库）。供应商可选 `disableThinking`，开启后请求体才注入 `enable_thinking:false` + `chat_template_kwargs`。
 - AI 字符量控制（T1）：多只股票日线一律走 `read_stocks_kline`（一次读年文件 `filter: {code:{$in:[...]}}` + `mapWithLimit` 并发 4，只回 `klineSummary` 派生指标）；工具结果按 `TOOL_RESULT_CHARS` 分级上限截断，单轮总预算 `MAX_ROUND_TOOL_CHARS=16000`，上下文超 `MAX_CONTEXT_CHARS=24000` 时 `evictToolResults` 驱逐最旧几轮 tool 结果（只改 content，保留 role/tool_call_id 配对，最近一轮不驱）。系统提示只留一行工具组目录（`TOOL_GROUP_SUMMARY`）与硬约束，详细规则由 `load_tool_group` 的 `rule` 字段给出。
-- AI 助手 DEBUG 模式（优化与排错）：开关在「AI 设置 → 全局设置」复选框，存 sync `aiDebugMode`；记录器 `ai/core/ai_debug.js` 按会话记录用户问题、AI 回复、工具调用方法与传参、工具返回、思考过程（reasoning）、上下文驱逐（evict）、请求/响应元信息与报错（含 window error / unhandledrejection），存 local `aiDebugLogs`（单会话 300 条、单字段 4000 字符、最多 8 个会话，落库前先读最新存量再合并写回，与数据落地同一套并发约定）。开启后头部目录行最右侧显示「Debug信息」按钮（`debugInfoBtn`，由 `syncDebugBtn` 控制显隐），点击即把当前会话记录以纯文本复制到剪切板（clipboard API 失败降级 `execCommand`）。
+- AI 助手 DEBUG 模式（优化与排错）：开关在「AI 设置 → 全局设置」复选框，存 sync `aiDebugMode`；记录器 `ai/core/ai_debug.js` 按会话记录用户问题、AI 回复、工具调用方法与传参、工具返回、思考过程（reasoning）、上下文驱逐（evict）、请求/响应元信息与报错（含 window error / unhandledrejection），存 local `aiDebugLogs`（单会话 300 条、单字段 4000 字符、最多 8 个会话，落库前先读最新存量再合并写回，与数据落地同一套并发约定）。开启后头部目录行最右侧显示「Debug信息」按钮（`debugInfoBtn`，由 `syncDebugBtn` 控制显隐），点击即把当前会话记录以纯文本复制到剪切板（clipboard API 失败降级 `execCommand`）。同类连续报错走 `recordRepeat(kind, data)`（`ai/core/ai_debug.js`）折叠：key = kind + text，同组（两次间隔 ≤ `REPEAT_COLLAPSE_WINDOW_MS`=120s，允许其他类型日志插入）只留首条与一条「滚动末条」，后续重复就地带新字段并移到末尾（附 `连续重复: N` / `首次发生`），长期挂机时「SW 每 30s 断连重连」不再刷屏；`__rk`/`__roll`/`__n`/`__firstTs` 为内部字段，formatEvent 不输出。
 
 ## 编码约定
 
 - 界面文案与注释使用中文；变量名、消息 action 名使用英文。
 - 消息协议两套字段并存：`action`（控制指令：`startRefresh` / `stopRefresh` / `getStatus` / `refresh` / `setView` / `aiChatStream` / `aiChatStop` / `aiChatPing`，内部另有 background→offscreen 的 `parseDocument`）与 `type`（数据上报：`DOCUMENT_CAPTURED`，background→popup 的 `DATA_LANDED`/`DATA_LAND_ERROR`，background→AI 窗口的 `AI_CHAT_READY`/`AI_CHAT_CHUNK`/`AI_CHAT_REASONING`/`AI_CHAT_DONE`/`AI_CHAT_ERROR`/`AI_CHAT_ABORTED`/`AI_CHAT_PONG`），新增消息沿用此风格。
+
+## plugins 目录（外部技能/工具引用，可选存在）
+
+- `plugins/` 用来存放外部下载的技能包与工具引用，与扩展运行时无关：不被 `manifest.json` 加载、不参与打包、目录或其中条目随时可能被删除。**当前仅有** `plugins/skills/xiaoshi-quant-expert/`（`SKILL.md` + `references/` 下 11 个文档：`api.md`、`data-contracts.md`、`backtest-protocol.md`、`local-quant-runner.md`、`strategy-contract.md`、`strategy-modes.md`、`event-scoring.md`、`risk-evolution.md`、`medium-low-frequency-data.md`、`history-sync-and-delivery.md`、`miniqmt-data-adapter.md`）。
+- **禁止代码依赖**：任何扩展内文件（含 `manifest.json` 的 `web_accessible_resources`）不得 `import`/`require`/`fetch` `plugins/` 下的内容，也不得因该目录缺失而中断工作；它只作为开发期「查资料」的引用。缺文档时按本项目代码与 README 继续实现即可。
+- 与代码的对应关系（小石 / Xiaoshi，`https://api.shizixi.com/api/v3`）：`ai/stock/xiaoshi_stock_kline.js`（搜索 / 单只行情 / 日线，含 429 与重试）、`js/xiaoshi_realtime_quote.js` 与 `js/quote_batch.js`（批量行情，单次 100 只上限；`background/background.js` 的 API 直取模式由 `refreshAllByApi` 按全局设置 `dataSource`（`'xiaoshi'` / `'adata'`，缺省 `'adata'`）在 `js/adata_realtime_quote.js` 与小石之间**二选一**，两者互为可替代的行情源而非自动回退链）、`ai/core/ai_tools.js`（`read_stock_kline` / `read_stocks_kline` / `get_stock_quote` 等的 parquet → 小石 → adata 回退链）。
+- **何时读**：改动小石接口调用、新增端点、历史数据 / R2 presigned 下载、限流（429 `rate_limit_exceeded` / `bulk_download_required`）、字段语义（`adjust`、`amount_quality`、`history_status`、`available_at` / `retrieved_at` 等）或回测相关功能时，按需读 `SKILL.md` 与 `references/api.md` 取权威口径，不要凭猜测加参数；不需要时不必加载，也不要整包全量读入上下文。
+- 该技能包自带的「manifest + sha256 版本巡检」是小石平台的 Agent 侧机制，开发本项目代码时无需照做；要升级文档直接替换文件即可。真实 API Key 不写入本文件、`plugins/` 或任何提交内容（扩展 Key 存 `chrome.storage.sync` 的 `apiKey`，日志与文档一律脱敏）。
+
+## Skills 清单（仅本项目开发期使用）
+
+> **扩展内置的「AI 助手」（`ai/` 窗口）不接入 skills 体系**：它的能力由 `ai/core/ai_tools.js` 中硬编码的 function tools + `load_tool_group` 分组决定，新增或删除 skill 不会给 AI 助手增加任何能力。下列清单只面向在本仓库里干活的编码代理（Claude Code / pi 等）。
+
+**A. `.claude/skills/` — superpowers-zh 工作流技能（20 个，本地安装、已在 `.gitignore` 中，不随仓库分发）**
+
+完整逐条说明见本文件末尾由 superpowers-zh 托管的 `<!-- superpowers-zh:begin/end -->` 区块，勿在此重复抄写、也勿在托管区块内改动（会被重新安装覆盖）。按用途速记：
+
+- 流程类：`brainstorming`、`writing-plans`、`executing-plans`、`subagent-driven-development`、`dispatching-parallel-agents`、`finishing-a-development-branch`、`using-git-worktrees`
+- 质量类：`test-driven-development`、`verification-before-completion`、`systematic-debugging`、`requesting-code-review`、`receiving-code-review`
+- 中文协作参考：`chinese-code-review`、`chinese-commit-conventions`、`chinese-documentation`、`chinese-git-workflow`
+- 元能力：`using-superpowers`、`writing-skills`、`mcp-builder`、`workflow-runner`
+- 本项目基调：无测试、无构建，**不自动匹配 skill**；除用户显式点名，简单改动直接读写代码 + 语法/diff 检查（详见「任务处理节奏」）。
+
+**B. `plugins/skills/` — 外部数据源技能（可选存在，仅按需读取）**
+
+- `xiaoshi-quant-expert`：小石大数据 API 使用手册——行情 / 新闻 / 人物 / 宏观 / 机构研报 / 事件时间轴 / 因子库 / 历史 Parquet 批量下载（R2 presigned）/ 防未来函数（PIT）/ 本地回测协议 / 风控与策略进化门禁。**开发期参考文档**，用于校准本项目对 `api.shizixi.com` 的调用与数据口径；不做自动触发，涉及小石接口时再读。
+
+**维护约定**：新增/删除技能时，只在上面加/删一行，写清「路径 + 何时用 + 是否自动触发」，不复制 `SKILL.md` 正文；A 组的详细清单交给托管区块生成，B 组随 `plugins/` 的实际存在情况更新（目录被删时本节改为「暂无」）。
 
 ## 任务处理节奏
 

@@ -120,8 +120,13 @@ const importBtnEl = document.getElementById('importBtn');
 const importFileInputEl = document.getElementById('importFileInput');
 const exportChoiceOverlayEl = document.getElementById('exportChoiceOverlay');
 const closeExportChoiceBtnEl = document.getElementById('closeExportChoiceBtn');
+const exportCopyBtnEl = document.getElementById('exportCopyBtn');
 const exportDefaultBtnEl = document.getElementById('exportDefaultBtn');
 const exportSensitiveBtnEl = document.getElementById('exportSensitiveBtn');
+const copyComboOverlayEl = document.getElementById('copyComboOverlay');
+const closeCopyComboBtnEl = document.getElementById('closeCopyComboBtn');
+const copyComboListEl = document.getElementById('copyComboList');
+const confirmCopyComboBtnEl = document.getElementById('confirmCopyComboBtn');
 const comboSwitchesEl = document.getElementById('comboSwitches');
 const comboLabelEl = document.getElementById('comboLabel');
 const sortToggleEls = document.querySelectorAll('.sort-toggle');
@@ -440,6 +445,117 @@ function promptComboName(message, prefilled) {
     return name;
 }
 
+// 格式化时间戳（毫秒）为 YYYYMMDD 紧凑格式
+function formatDateCompact(ts) {
+    if (!ts) return '未知';
+    try {
+        const d = new Date(ts);
+        const y = d.getFullYear();
+        const m = String(d.getMonth() + 1).padStart(2, '0');
+        const day = String(d.getDate()).padStart(2, '0');
+        return `${y}${m}${day}`;
+    } catch {
+        return '未知';
+    }
+}
+
+// 格式化股票代码：有 prefix 则 "prefix:code"，否则原 code 或空
+function formatStockCode(stock) {
+    if (stock.prefix && stock.code) return `${stock.prefix}:${stock.code}`;
+    if (stock.code) return stock.code;
+    return '';
+}
+
+// 展示组合多选弹窗
+function showCopyComboOverlay() {
+    copyComboListEl.innerHTML = '';
+    const names = Object.keys(portfolios);
+    // 排序：默认组合在前，其余保持登记顺序
+    names.sort((a, b) => {
+        const ai = DEFAULT_PORTFOLIOS.indexOf(a);
+        const bi = DEFAULT_PORTFOLIOS.indexOf(b);
+        if (ai !== -1 && bi !== -1) return ai - bi;
+        if (ai !== -1) return -1;
+        if (bi !== -1) return 1;
+        return 0;
+    });
+    let hasAny = false;
+    names.forEach(name => {
+        const list = portfolios[name].stockList || [];
+        if (list.length === 0) return;
+        hasAny = true;
+        const label = document.createElement('label');
+        label.className = 'copy-combo-item';
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.value = name;
+        cb.checked = false; // 默认不勾选
+        const txt = document.createElement('span');
+        txt.textContent = name;
+        const count = document.createElement('span');
+        count.className = 'combo-stock-count';
+        count.textContent = `(${list.length} 支)`;
+        label.append(cb, txt, count);
+        copyComboListEl.appendChild(label);
+    });
+    if (!hasAny) {
+        copyComboListEl.textContent = '暂无有股票的组合';
+        confirmCopyComboBtnEl.disabled = true;
+    } else {
+        confirmCopyComboBtnEl.disabled = false;
+    }
+    copyComboOverlayEl.style.display = 'flex';
+}
+
+// 确认复制：收集选中的组合，生成文本并复制到剪贴板
+function handleCopyComboConfirm() {
+    const checked = copyComboListEl.querySelectorAll('input[type="checkbox"]:checked');
+    if (checked.length === 0) {
+        alert('请至少选择一个组合');
+        return;
+    }
+    const lines = [];
+    lines.push('我的当前组合信息（股票名称-代码-加入价格-加入时间）：');
+    for (const cb of checked) {
+        const name = cb.value;
+        const stocks = portfolios[name].stockList || [];
+        if (stocks.length === 0) continue;
+        const parts = stocks.map(s => {
+            const codeStr = formatStockCode(s);
+            const dateStr = formatDateCompact(s.createdAt);
+            const priceStr = s.importPrice != null ? String(s.importPrice) : '';
+            const nameStr = s.name || '(待抓取)';
+            // 格式：股票名称-代码-初始价-创建时间
+            return `${nameStr}-${codeStr}-${priceStr}-${dateStr}`;
+        });
+        lines.push(`'${name}'组合：${parts.join('；')}`);
+    }
+    if (lines.length <= 1) {
+        alert('选中的组合中无股票数据可复制');
+        return;
+    }
+    const text = lines.join('\n');
+    copyTextToClipboard(text);
+    copyComboOverlayEl.style.display = 'none';
+    alert('已复制到剪贴板');
+}
+
+// 复制文本到剪贴板
+async function copyTextToClipboard(text) {
+    try {
+        await navigator.clipboard.writeText(text);
+    } catch {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+    }
+}
+
 // 全量导出：导出插件全部数据和配置
 // 两种导出都不携带对话中的 base64 原始图片/文件数据，均以占位文本代替：
 //   上传的图片/文件保留原「[用户上传图片/文件：<文件名>...]」占位，粘贴图片替换为「[用户上传图片：粘贴图片]」；
@@ -742,10 +858,17 @@ function buildQuickOpenUrl(item) {
 quickOpenEl.addEventListener('keydown', (event) => {
     if (event.key === 'Enter' && !event.shiftKey && quickOpenEl.value) {
         event.preventDefault();
+        const items = splitQuickOpenInput();
+        if (items.length === 0) return;
         // 放开抓取窗口：监控未运行时，打开的页面抓取也能回填解析
         chrome.runtime.sendMessage({ action: 'armCapture' });
-        splitQuickOpenInput().forEach((item) => {
-            chrome.tabs.create({ url: buildQuickOpenUrl(item) });
+        // 逐个延迟打开，避免一次性打开过多页面（1.5-2.2s 随机间隔）
+        let delay = 0;
+        items.forEach((item) => {
+            delay += 1500 + Math.random() * 700;
+            setTimeout(() => {
+                chrome.tabs.create({ url: buildQuickOpenUrl(item) });
+            }, delay);
         });
     }
 });
@@ -992,6 +1115,17 @@ exportSensitiveBtnEl.addEventListener('click', () => {
     exportChoiceOverlayEl.style.display = 'none';
     handleExport(true);
 });
+
+// 复制仅分组和股票数据
+exportCopyBtnEl.addEventListener('click', () => {
+    exportChoiceOverlayEl.style.display = 'none';
+    showCopyComboOverlay();
+});
+closeCopyComboBtnEl.addEventListener('click', () => copyComboOverlayEl.style.display = 'none');
+copyComboOverlayEl.addEventListener('click', (e) => {
+    if (e.target === copyComboOverlayEl) copyComboOverlayEl.style.display = 'none';
+});
+confirmCopyComboBtnEl.addEventListener('click', handleCopyComboConfirm);
 importBtnEl.addEventListener('click', () => importFileInputEl.click());
 importFileInputEl.addEventListener('change', (e) => {
     const file = e.target.files[0];

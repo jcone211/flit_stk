@@ -1774,7 +1774,7 @@ async function parseAndRecordStockTrade(raw) {
     name = name.replace(/[。！!？?.,，、；;]+$/g, '').trim();
     if (!name) return { ok: false, text: '未识别到股票名称，请填写如「我买入了贵州茅台」' };
     if (action === 'buy') {
-        const res = await toolExecutors.add_stock_to_portfolio({ name, portfolio: '持仓' });
+        const res = await toolExecutors.add_stock_to_portfolio({ names: [name], portfolio: '持仓' });
         if (res && res.error) return { ok: false, text: res.error };
         return { ok: true, text: `已将「${name}」加入【持仓】组合${res && res.hint ? '（' + res.hint + '）' : ''}` };
     }

@@ -26,6 +26,9 @@ import { parseCronExpr, nextTradingCronTimes } from '../../shared/cron.js';
 import { etfPrefixForCode } from '../../shared/utils.js';
 import { bridgeRequest, bridgeHealth } from './bridge_client.js';
 
+// add_stock_to_portfolio 跨调用共享的页面打开时序计数器
+let nextRefreshOneAt = 0;
+
 export const TOOL_DEFS = [
     { type: 'function', function: { name: 'get_stock_list', description: '读取股票列表：不传 portfolio 读当前活动组合；传组合名读指定组合（组合名可用 get_portfolios 查询）', parameters: { type: 'object', properties: { portfolio: { type: 'string', description: '组合名，如「持仓」「观察」；缺省为当前活动组合' } }, required: [] } } },
     { type: 'function', function: { name: 'get_portfolios', description: '读取全部持仓组合结构（各组合名称与股票数量）及当前活动组合', parameters: { type: 'object', properties: {}, required: [] } } },
@@ -38,7 +41,7 @@ export const TOOL_DEFS = [
     { type: 'function', function: { name: 'create_event', description: '创建一条预测事件。事件内容(content)只填股票名称（如「百通能源」），禁止把分析/预测/操作文字写入 content；判断逻辑、时间与操作应体现为关联要点。关联要点(key_point_text)须优先从 get_key_points 已有的要点中选择（拿不准先用 get_key_points 查看现有要点再对应关联，不要臆造不存在的要点内容），现有要点与意图不完全匹配时才新建要点或留空。time 为 YYYY-MM-DD，缺省今天。若存在超过一周仍未归档的事件会一并提醒用户补充', parameters: { type: 'object', properties: { key_point_text: { type: 'string', description: '关联现有业已存在或本次新建的要点内容，可为空' }, content: { type: 'string', description: '事件内容，仅填股票名称' }, time: { type: 'string', description: '事件日期 YYYY-MM-DD' } }, required: ['content'] } } },
     { type: 'function', function: { name: 'update_event', description: '修改事件（按 id；已归档事件不可修改），可改关联要点/内容/日期/status（pending 待预测 / accurate 准确 / wrong 误判）。不能设置归档——归档只发生在手动点击或事件超 7 天且状态为准确/误判时自动进行，若刚改状态的事件因此被自动归档，结果会说明。当存在多条内容相同的事件时，默认修改其中 time 最早（最久远）的那条 id，并在回复中简略提醒用户还有其它日期存在相同内容事件', parameters: { type: 'object', properties: { id: { type: 'string', description: '事件 id（用 get_events 查询）' }, key_point_text: { type: 'string', description: '新的关联要点' }, content: { type: 'string', description: '新的事件内容' }, time: { type: 'string', description: '新的事件日期 YYYY-MM-DD' }, status: { type: 'string', description: '新状态：pending 待预测 / accurate 准确 / wrong 误判' } }, required: ['id'] } } },
     { type: 'function', function: { name: 'delete_event', description: '删除一条事件（按 id）', parameters: { type: 'object', properties: { id: { type: 'string', description: '事件 id（用 get_events 查询）' } }, required: ['id'] } } },
-    { type: 'function', function: { name: 'add_stock_to_portfolio', description: '按名称向指定组合添加一只股票（组合缺省「持仓」）。自动生成问财搜索页作为监控地址，ETF（159/51/58 开头）走雪球个股页', parameters: { type: 'object', properties: { name: { type: 'string', description: '股票名称' }, portfolio: { type: 'string', description: '目标组合名，缺省「持仓」' } }, required: ['name'] } } },
+    { type: 'function', function: { name: 'add_stock_to_portfolio', description: '按名称向指定组合批量添加一只或多只股票（组合缺省「持仓」）。自动生成问财搜索页作为监控地址，ETF（159/51/58 开头）走雪球个股页。一次调用可添加多只，调本工具即可，不需要再反复调多次', parameters: { type: 'object', properties: { names: { type: 'array', items: { type: 'string' }, description: '股票名称数组，如 ["贵州茅台", "五粮液"]；至少一项' }, portfolio: { type: 'string', description: '目标组合名，缺省「持仓」' } }, required: ['names'] } } },
     { type: 'function', function: { name: 'move_stock_to_combo', description: '把股票从来源组合移动到目标组合（按名称匹配、忽略首尾空格；来源缺省当前活动组合，目标缺省「观察」）。用于记录「卖出」等调仓：卖出时应传 source_portfolio 为实际持有该股的组合（通常「持仓」）；若目标组合已存在同名股票，则仅从来源组合删除、不重复添加', parameters: { type: 'object', properties: { name: { type: 'string', description: '股票名称' }, target_portfolio: { type: 'string', description: '目标组合名，缺省「观察」' }, source_portfolio: { type: 'string', description: '来源组合名（卖出的实际持仓组合），缺省当前活动组合' } }, required: ['name'] } } },
     { type: 'function', function: { name: 'get_current_view', description: '读取当前列表视图（股票列表或垃圾池）', parameters: { type: 'object', properties: {}, required: [] } } },
     { type: 'function', function: { name: 'get_settings', description: '读取扩展全局设置（刷新间隔/选择器/分页/cron 定时任务，不含任何密钥）', parameters: { type: 'object', properties: {}, required: [] } } },
@@ -51,7 +54,7 @@ export const TOOL_DEFS = [
     { type: 'function', function: { name: 'read_parquet', description: '读取工作目录中的 Parquet 数据文件，返回列名、总行数和限定数量的行。适合查看回测/备份用的 parquet 文件；path 必须是相对授权工作目录的路径，root 缺省为主目录。默认最多返回 100 行，可用 columns 选择列。本工具不参与股票 K 线取数；查询股票 K 线请走 read_stock_kline / read_stocks_kline（它们只读本地数据库）。', parameters: { type: 'object', properties: { path: { type: 'string', description: '相对工作目录的 .parquet 文件路径' }, root: { type: 'string', description: '工作目录名，缺省为主目录' }, columns: { type: 'array', items: { type: 'string' }, description: '要读取的列名；缺省读取全部列' }, row_start: { type: 'integer', minimum: 0, description: '起始行，缺省 0' }, limit: { type: 'integer', minimum: 1, maximum: 500, description: '最多返回行数，缺省 100，最大 500' } }, required: ['path'] } } },
     { type: 'function', function: { name: 'read_stock_kline', description: '获取单只股票近 N 个交易日日线（开/高/低/收/量/额/涨跌幅）。取数顺序：本地日线库 → 免费东财/同花顺 → 小石（仅缺 1~2 根时兜底）。≤7 个交易日不依赖 Agent 桥接，没库也能取；>7 个交易日只读本地库（保护免费渠道），库不可用时工具会返回「缺前置条件」的原因，照原样转述给用户即可，不要重试或换工具硬凑。ETF/指数不在本地库，自动走免费同花顺 ETF 日线（只有未复权价）。盘中（含午休）自动把当日未收盘 bar 拼到末行（标 intraday/as_of/quote_source）。name 与 code 二选一：按名称查询就传 name，代码解析由工具负责，不要自己猜代码。返回含 数据表 / 本地库诊断 / 数据日期 / 最新已收盘交易日 / 实时拼接 / 接口调用。', parameters: { type: 'object', properties: { name: { type: 'string', description: '股票名称，如「德明利」；与 code 二选一（代码由工具解析，不要自己猜）' }, code: { type: 'string', description: '股票代码：6 位数字（如 001309）或带市场后缀（如 001309.SZ），不要使用 SH:600519 等冒号前缀形式；与 name 二选一' }, days: { type: 'integer', minimum: 1, maximum: 60, description: '近 N 个交易日（盘中含拼接的当日实时 bar，共 N 根），缺省 30。≤7 天不依赖本地库；>7 天只读本地库，不启用免费/小石补齐' }, root: { type: 'string', description: '工作目录名，缺省为主目录（parquet 数据目录的根，如含 data/a_share_daily 的目录）' } }, required: [] } } },
     { type: 'function', function: { name: 'read_stocks_kline', description: '批量获取多只股票近 N 个交易日日线的派生指标摘要（收盘/涨跌幅/MA5・10・20/距 20 日高点回撤/量比/连续下跌/缩量/振幅/换手/近 5 日收盘），多只股票必须优先用本工具（一次取回整批）。detail=true 才附带原始 OHLCV 行。取数顺序与 7 天闸门同 read_stock_kline：≤7 天没库也能走免费，>7 天只读本地库、库不可用就照原样转述工具给的「缺前置条件」原因。ETF/指数不在本地库，自动走免费同花顺 ETF 日线。names 与 codes 可混用：按名称查询就传 names，代码解析由工具负责，不要自己猜代码。返回含 数据表 / 本地库诊断 / 数据日期 / 最新已收盘交易日 / 实时拼接 / 接口调用；末行 intraday=true 才可当现价，否则现价另调 get_stock_quote / get_portfolio_quotes。', parameters: { type: 'object', properties: { names: { type: 'array', items: { type: 'string' }, description: '股票名称数组，最多 12 只' }, codes: { type: 'array', items: { type: 'string' }, description: '股票代码数组（6 位或带 .SZ/.SH 后缀），可与 names 混用' }, days: { type: 'integer', minimum: 1, maximum: 60, description: '近 N 个交易日，缺省 18。≤7 天不依赖本地库；>7 天只读本地库，不启用免费/小石补齐' }, detail: { type: 'boolean', description: 'true 时返回原始 K 线行，缺省 false 只返回摘要' }, max_rows: { type: 'integer', minimum: 1, maximum: 18, description: 'detail=true 时每只最多返回行数，缺省 5' }, root: { type: 'string', description: '工作目录名，缺省为主目录' } }, required: [] } } },
-    { type: 'function', function: { name: 'get_stock_quote', description: '【必调】获取股票实时行情（最新价/涨跌幅/昨收/最高/最低/成交量/成交额/换手率），不经页面直接调用免费+付费混合接口。回答任何股票价格问题前必须先调用本工具或 get_portfolio_quotes。支持按股票名称或代码。', parameters: { type: 'object', properties: { name: { type: 'string', description: '股票名称，如「德明利」；与 code 二选一（代码由工具解析，不要自己猜）' }, code: { type: 'string', description: '股票代码：6 位数字（如 001309）或带市场后缀（如 001309.SZ），不要使用 SH:600519 等冒号前缀形式；与 name 二选一' } }, required: [] } } },
+    { type: 'function', function: { name: 'get_stock_quote', description: '【必调】获取一只或多只股票实时行情（最新价/涨跌幅/昨收/最高/最低/成交量/成交额/换手率），不经页面直接调用免费+付费混合接口。回答任何股票价格问题前必须先调用本工具或 get_portfolio_quotes。支持按股票名称或代码。names 与 codes 可混用，一次调可查询多只，不需要反复调多次', parameters: { type: 'object', properties: { names: { type: 'array', items: { type: 'string' }, description: '股票名称数组，如 ["德明利"]；与 codes 可混用' }, codes: { type: 'array', items: { type: 'string' }, description: '股票代码数组（6 位数字如 001309 或带 .SZ/.SH 后缀），可与 names 混用' } }, required: [] } } },
     { type: 'function', function: { name: 'get_portfolio_quotes', description: '批量获取指定组合全部股票的实时行情（最新价/涨跌幅/昨收/最高/最低/成交量/成交额/换手率）。一次调用返回所有股票，无需逐只查询', parameters: { type: 'object', properties: { portfolio: { type: 'string', description: '组合名，如「持仓」「观察」；缺省为当前活动组合' } }, required: [] } } },
 
     { type: 'function', function: { name: 'write_file', description: '自动创建或覆盖当前工作目录下 flit/ 子目录中的文件，用于维护 memory.md、config.json、脚本和用户适配文件；无需额外确认', parameters: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' }, root: { type: 'string' } }, required: ['path', 'content'] } } },
@@ -345,29 +348,48 @@ export const toolExecutors = {
         return { ok: true, id };
     },
     async add_stock_to_portfolio(args) {
-        const name = String(args.name || '').trim();
-        if (!name) return { error: '股票名称不能为空' };
+        const rawNames = Array.isArray(args.names) ? args.names : (args.name ? [args.name] : []);
+        const names = rawNames.map(n => String(n).trim()).filter(Boolean);
+        if (names.length === 0) return { error: '股票名称不能为空，请提供 names 数组' };
         const portfolio = String(args.portfolio || '持仓').trim();
         const { portfolios, activePortfolio, stockList } = await storageGet(chrome.storage.local, ['portfolios', 'activePortfolio', 'stockList']);
         const combos = portfolios || {};
         const target = combos[portfolio];
         if (!target) return { error: `组合「${portfolio}」不存在`, available: Object.keys(combos) };
         const list = target.stockList || (target.stockList = []);
-        const url = stockSearchUrl(name);
-        if (list.some(s => String(s.url || '') === url)) return { error: `「${name}」已在组合「${portfolio}」中` };
-        list.push({
-            url, name: '', code: '', prefix: '',
-            startPrice: null, currentPrice: null, percent: null,
-            importPrice: null,
-            targetPercentLe: null, targetPercentGe: null,
-            importTargetPercentLe: null, importTargetPercentGe: null,
-            stopRunning: false, notifiedDaily: false, notifiedImport: false,
-            inTrash: false, pinned: false, pinOrder: null, createdAt: Date.now(),
-        });
+        const added = [];
+        const skipped = [];
+        for (const name of names) {
+            const url = stockSearchUrl(name);
+            if (list.some(s => String(s.url || '') === url)) { skipped.push(name); continue; }
+            list.push({
+                url, name: '', code: '', prefix: '',
+                startPrice: null, currentPrice: null, percent: null,
+                importPrice: null,
+                targetPercentLe: null, targetPercentGe: null,
+                importTargetPercentLe: null, importTargetPercentGe: null,
+                stopRunning: false, notifiedDaily: false, notifiedImport: false,
+                inTrash: false, pinned: false, pinOrder: null, createdAt: Date.now(),
+            });
+            added.push({ name, url });
+        }
+        if (added.length === 0 && skipped.length > 0) return { error: `全部已在组合「${portfolio}」中：${skipped.join('、')}` };
         const mirror = (combos[activePortfolio] && combos[activePortfolio].stockList) || stockList || [];
         await storageSet(chrome.storage.local, { portfolios: combos, stockList: mirror });
-        chrome.runtime.sendMessage({ action: 'refreshOne', url });
-        return { ok: true, name, portfolio, url, hint: '已按手动添加流程保存并立即抓取回填' };
+        // 为每只股票安排延迟+抖动的页面打开（后台执行，不阻塞返回）
+        const now = Date.now();
+        if (nextRefreshOneAt < now) nextRefreshOneAt = now;
+        added.forEach(({ name, url }) => {
+            nextRefreshOneAt += 1500 + Math.random() * 700;
+            const scheduledTime = nextRefreshOneAt;
+            setTimeout(() => {
+                try { chrome.runtime.sendMessage({ action: 'refreshOne', url }); } catch {}
+            }, scheduledTime - now);
+        });
+        const hintParts = [`已保存 ${added.length} 支到「${portfolio}」`];
+        if (skipped.length > 0) hintParts.push(`${skipped.length} 支已在组合中`);
+        hintParts.push(`页面将逐个打开抓取`);
+        return { ok: true, names: added.map(a => a.name), portfolio, hint: hintParts.join('，') };
     },
     async move_stock_to_combo(args) {
         const name = String(args.name || '').trim();
@@ -782,24 +804,50 @@ export const toolExecutors = {
         };
     },
     async get_stock_quote(args) {
-        const resolved = await resolveStockCode(args);
-        if (resolved.error) return resolved;
-        const { code, name } = resolved;
-        const code6 = String(code).split('.')[0];
-        // 免费优先（新浪+腾讯合并），不可用时 fetchLiveQuotes 内部依次回退小石批量/小石单只
-        const { map, diag } = await fetchLiveQuotes([code6]);
-        const q = map.get(code6);
-        if (!q) return { code, name, error: '实时行情拉取失败：免费渠道与小石均不可用，可稍后重试', 渠道诊断: diag.join('；') };
-        return {
-            code, name,
-            quote: {
-                code: code6, name: q.name || name, price: q.price, change: q.change, change_pct: q.change_pct,
+        // 兼容旧格式：name/code 单值自动转数组
+        const rawNames = Array.isArray(args.names) ? args.names : (args.name ? [args.name] : []);
+        let rawCodes = Array.isArray(args.codes) ? args.codes : (args.code ? [String(args.code).trim()] : []);
+        if (rawNames.length === 0 && rawCodes.length === 0) return { error: '请提供股票名称或代码（names / codes）' };
+
+        // 名称也需要解析为代码，逐个处理
+        const targets = [];
+        for (const n of rawNames) {
+            const t = String(n).trim();
+            if (t) targets.push({ name: t });
+        }
+        for (const c of rawCodes) {
+            const t = String(c).trim();
+            if (t) targets.push({ code: t });
+        }
+
+        const resolved = await Promise.all(targets.map(w => resolveStockCode(w)));
+        const validCodes = []; // { code6, name }
+        const errors = [];
+        for (let i = 0; i < resolved.length; i++) {
+            const r = resolved[i];
+            if (r.error) {
+                errors.push({ name: targets[i].name || targets[i].code, error: r.error });
+            } else {
+                validCodes.push({ code6: r.code.split('.')[0], name: r.name || targets[i].name });
+            }
+        }
+        if (validCodes.length === 0) return { error: errors.map(e => e.error).join('；') };
+
+        const { map, diag } = await fetchLiveQuotes(validCodes.map(c => c.code6));
+        const quotes = validCodes.map(c => {
+            const q = map.get(c.code6);
+            if (!q) return { name: c.name, code: c.code6, error: '未获取到行情' };
+            return {
+                code: c.code6, name: q.name || c.name,
+                price: q.price, change: q.change, change_pct: q.change_pct,
                 open: q.open, high: q.high, low: q.low, previous_close: q.last_close,
                 volume: q.volume, amount: q.amount, turnover_pct: q.turnover_pct,
                 time: q.time, source: q.source,
-            },
-            渠道: q.source,
-        };
+            };
+        });
+        const result = { total: quotes.length, quotes, 渠道: diag };
+        if (errors.length > 0) result.errors = errors;
+        return result;
     },
     async get_portfolio_quotes(args) {
         const portfolio = args && args.portfolio ? String(args.portfolio).trim() : '';

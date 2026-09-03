@@ -308,6 +308,10 @@
             <div class="close-btn" id="closeExportChoiceBtn" title="关闭">×</div>
             <h4>导出数据</h4>
             <div class="settings-item">
+                <button type="button" id="exportCopyBtn" class="settings-btn export-choice-btn">复制仅分组和股票数据</button>
+                <p class="settings-desc">选择一个或多个组合，将各组合内的股票名称、买入时间（创建时间）、初始价等信息复制到剪贴板，方便粘贴给其他渠道分析</p>
+            </div>
+            <div class="settings-item">
                 <button type="button" id="exportDefaultBtn" class="settings-btn export-choice-btn">导出默认数据</button>
                 <p class="settings-desc">含全部组合 / 要点 / 事件 / 设置及 AI 对话与记忆；不含任何 API Key，对话图片 /
                     文件以「[用户上传图片：xx.png]」「[用户上传文件：xx.pdf]」占位文本代替</p>
@@ -317,6 +321,16 @@
                     的敏感数据</button>
                 <p class="settings-desc">额外含小石 / AI 接口的 API Key；对话图片 / 文件同样以占位文本代替，不携带原始数据</p>
             </div>
+        </div>
+    </div>
+
+    <!-- 复制组合选择弹窗 -->
+    <div class="overlay" id="copyComboOverlay" style="display:none">
+        <div class="settings-model">
+            <div class="close-btn" id="closeCopyComboBtn" title="关闭">×</div>
+            <h4>选择要复制的组合</h4>
+            <div class="settings-item" id="copyComboList"></div>
+            <button type="button" id="confirmCopyComboBtn" class="settings-btn">复制到剪贴板</button>
         </div>
     </div>
 

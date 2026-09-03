@@ -1892,6 +1892,28 @@ button:disabled {
   cursor: not-allowed;
 }
 
+/* 复制组合弹窗-复选框列表 */
+.copy-combo-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  font-size: 14px;
+  font-weight: normal;
+  color: #333;
+  cursor: pointer;
+  user-select: none;
+}
+.copy-combo-item input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+}
+.copy-combo-item .combo-stock-count {
+  font-size: 12px;
+  color: #999;
+  margin-left: 4px;
+}
 /* 导出选择弹窗按钮：占满宽度、左对齐、可换行，便于阅读两项说明 */
 .export-choice-btn {
   width: 100%;

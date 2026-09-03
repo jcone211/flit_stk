@@ -46,6 +46,24 @@
             <button type="button" id="uploadBtn" class="ai-text-btn" title="上传文件到工作目录">📎</button>
             <input type="file" id="uploadInput" multiple hidden>
             <span class="composer-hint">Enter 发送，Shift+Enter 换行；可让我切换组合、查看持仓/要点/事件与工作目录文件</span>
+            <div id="ctxMeter" class="ctx-meter lv-green" role="img" aria-label="上下文占用">
+                <svg viewBox="0 0 16 16" aria-hidden="true">
+                    <circle class="ctx-meter-bg" cx="8" cy="8" r="6.5"></circle>
+                    <circle class="ctx-meter-arc" cx="8" cy="8" r="6.5"></circle>
+                </svg>
+                <!-- 上下文用量悬浮面板：悬停圆环显示，移出面板即隐藏 -->
+                <div id="ctxPanel" class="ctx-panel" hidden>
+                    <div class="ctx-panel-head">
+                        <span class="ctx-panel-title">上下文用量</span>
+                    </div>
+                    <div class="ctx-panel-bar"><i class="ctx-panel-fill"></i></div>
+                    <div class="ctx-panel-body">
+                        <span class="ctx-panel-text">0 / 1,000,000 (0%)</span>
+                        <button type="button" id="compactBtn" class="ctx-panel-compact"
+                            title="把当前对话压缩为摘要，腾出上下文（相当于其他 Agent 的 /compact）">压缩</button>
+                    </div>
+                </div>
+            </div>
             <button type="button" id="sendBtn" class="ai-btn primary">发送</button>
             <button type="button" id="stopBtn" class="ai-btn" hidden>停止</button>
         </div>
@@ -78,7 +96,12 @@
             </div>
             <div class="ai-settings-item">
                 <label for="aiModel">模型</label>
-                <input type="text" id="aiModel" class="ai-settings-input" placeholder="deepseek-chat">
+                <div class="ai-model-row">
+                    <input type="text" id="aiModel" class="ai-settings-input" placeholder="deepseek-chat">
+                    <label class="ai-ctx-flag" title="勾选后该模型按 1M token 上下文计；不勾选按 256k token 计（影响上下文预算与环形指示器）">
+                        <input type="checkbox" id="aiModelContext1M" checked> 1M
+                    </label>
+                </div>
             </div>
             <div class="ai-settings-item">
                 <label for="aiSupportsVision">
@@ -97,9 +120,9 @@
                 <span class="ai-divider-label">全局设置</span>
             </div>
             <div class="ai-settings-item">
-                <label for="aiMaxToolIterations">工具调用轮数上限（1-50）</label>
-                <input type="number" id="aiMaxToolIterations" class="ai-settings-input" min="1" max="50"
-                    placeholder="18">
+                <label for="aiMaxToolIterations">工具调用轮数上限（≥1，无最大值，默认 50）</label>
+                <input type="number" id="aiMaxToolIterations" class="ai-settings-input" min="1"
+                    placeholder="50">
             </div>
             <div class="ai-settings-item">
                 <label for="aiDefaultVisionProvider">默认使用的视觉模型</label>

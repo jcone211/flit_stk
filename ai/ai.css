@@ -705,6 +705,112 @@ body.ai-body {
     margin-top: 6px;
 }
 
+/* 上下文 token 环形指示器：细空心圆环 + 悬浮面板（发送按钮左侧） */
+.ctx-meter {
+    position: relative;
+    width: 19.2px;   /* 原 16px × 1.2 倍（半径随之放大 1.2 倍） */
+    height: 19.2px;
+    flex-shrink: 0;
+    cursor: default;
+    color: #3caa6c;
+    margin-right: 6px; /* 与右侧发送按钮间距在原 gap 基础上再 +6px */
+}
+.ctx-meter svg {
+    width: 100%;
+    height: 100%;
+    display: block;
+    transform: rotate(-90deg);
+}
+.ctx-meter .ctx-meter-bg {
+    fill: none;
+    stroke: #e0e0e0;
+    stroke-width: 1.6;
+}
+.ctx-meter .ctx-meter-arc {
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.6;
+    stroke-linecap: round;
+    transition: stroke-dasharray 0.2s, stroke 0.2s;
+}
+.ctx-meter.lv-green { color: #3caa6c; }
+.ctx-meter.lv-orange { color: #f39c12; }
+.ctx-meter.lv-red { color: #e05252; }
+
+/* 上下文用量悬浮面板：悬停圆环时显示，移出面板即隐藏 */
+.ctx-panel {
+    position: absolute;
+    bottom: calc(100% + 8px);
+    right: 0;
+    width: 264px;
+    background: #fff;
+    border: 1px solid #e0e4e8;
+    border-radius: 6px;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.16);
+    padding: 8px 10px;
+    z-index: 30;
+    text-align: left;
+}
+.ctx-panel[hidden] {
+    display: none;
+}
+.ctx-panel-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+.ctx-panel-title {
+    font-size: 11px;
+    color: #666;
+    white-space: nowrap;
+}
+.ctx-panel-bar {
+    height: 4px;
+    border-radius: 2px;
+    background: #e5e7eb;
+    overflow: hidden;
+    margin: 6px 0;
+}
+.ctx-panel-fill {
+    display: block;
+    height: 100%;
+    width: 0;
+    /* 颜色继承 ctx-meter 的 lv-* 色（与外部圆环一致） */
+    background: currentColor;
+    transition: width 0.2s;
+}
+.ctx-panel-body {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+.ctx-panel-text {
+    font-size: 11px;
+    color: #444;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.ctx-panel-compact {
+    flex-shrink: 0;
+    height: 20px;
+    padding: 0 8px;
+    font-size: 11px;
+    line-height: 18px;
+    color: #2196f3;
+    background: #fff;
+    border: 1px solid #2196f3;
+    border-radius: 3px;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+.ctx-panel-compact:hover {
+    background: #e8f3fd;
+}
+
 .composer-hint {
     flex: 1;
     font-size: 11px;
@@ -827,6 +933,40 @@ body.ai-body {
 .ai-provider-row .ai-text-btn {
     flex-shrink: 0;
     height: 30px;
+}
+
+/* 模型行：输入框 + 「□ 1M」上下文标识 */
+.ai-model-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.ai-model-row .ai-settings-input {
+    flex: 1;
+    min-width: 0;
+}
+
+.ai-ctx-flag {
+    display: inline-flex !important;
+    align-items: center;
+    gap: 3px;
+    margin-bottom: 0 !important;
+    font-size: 12px !important;
+    font-weight: normal !important;
+    color: #555 !important;
+    white-space: nowrap;
+    cursor: pointer;
+    flex-shrink: 0;
+    height: 30px;
+    padding: 0 8px;
+    border: 1px solid #d5d8dc;
+    border-radius: 4px;
+    background: #fff;
+}
+
+.ai-ctx-flag input {
+    margin: 0;
 }
 
 .ai-settings-desc {

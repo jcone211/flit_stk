@@ -581,7 +581,7 @@ async function handleImport(file) {
         if (typeof data.sync.keepRefreshOnClose === 'boolean') syncSet.keepRefreshOnClose = data.sync.keepRefreshOnClose;
         if (['refresh', 'xiaoshi', 'adata'].includes(data.sync.dataSource)) syncSet.dataSource = data.sync.dataSource;
         if (Array.isArray(data.sync.cronJobs)) syncSet.cronJobs = data.sync.cronJobs;
-        if (typeof data.sync.aiMaxToolIterations === 'number') syncSet.aiMaxToolIterations = Math.min(50, Math.max(1, data.sync.aiMaxToolIterations));
+        if (typeof data.sync.aiMaxToolIterations === 'number') syncSet.aiMaxToolIterations = Math.max(1, data.sync.aiMaxToolIterations);
         // 敏感数据（仅敏感备份含）：小石 Key / AI 接口配置
         if (typeof data.sync.apiKey === 'string') syncSet.apiKey = data.sync.apiKey;
         if (Array.isArray(data.sync.aiProviders)) syncSet.aiProviders = data.sync.aiProviders;

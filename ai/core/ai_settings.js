@@ -5,6 +5,7 @@ import {
     dbg, DEFAULT_AI_BASE_URL, DEFAULT_AI_MODEL, DEFAULT_MAX_TOOL_ITERATIONS,
     aiProviderSelect, aiProviderAddBtn, aiProviderDelBtn,
     aiProviderNameInput, aiBaseUrlInput, aiApiKeyInput, aiModelInput,
+    aiModelContext1MInput,
     aiSupportsVisionInput, aiMaxToolIterationsInput,
     aiDisableThinkingInput,
     aiDefaultVisionProviderSelect, aiSettingsOverlay, closeAiSettingsBtn,
@@ -27,16 +28,24 @@ function defaultProvider(name) {
         name: name || '默认', baseUrl: DEFAULT_AI_BASE_URL, apiKey: '', model: DEFAULT_AI_MODEL,
         supportsVision: false,
         disableThinking: false,
+        context1M: true,
     };
 }
 
 function normalizeProvider(provider) {
-    return { ...provider, supportsVision: provider.supportsVision === true, disableThinking: provider.disableThinking === true };
+    return {
+        ...provider,
+        supportsVision: provider.supportsVision === true,
+        disableThinking: provider.disableThinking === true,
+        // 旧数据没有该字段视为支持 1M 上下文（默认）
+        context1M: provider.context1M !== false,
+    };
 }
 
 function clampToolIterations(v) {
     const n = parseInt(v, 10);
-    if (!Number.isFinite(n) || n < 1 || n > 50) return DEFAULT_MAX_TOOL_ITERATIONS;
+    // 无上限：默认 50，只保底正整数（非法或 <1 回退默认）
+    if (!Number.isFinite(n) || n < 1) return DEFAULT_MAX_TOOL_ITERATIONS;
     return n;
 }
 
@@ -111,6 +120,7 @@ export function fillProviderInputs() {
     aiApiKeyInput.value = p.apiKey || '';
     aiModelInput.value = p.model || '';
     aiSupportsVisionInput.checked = p.supportsVision === true;
+    if (aiModelContext1MInput) aiModelContext1MInput.checked = p.context1M !== false;
     if (aiDisableThinkingInput) aiDisableThinkingInput.checked = p.disableThinking === true;
 }
 
@@ -164,6 +174,12 @@ export function bindProviderEvents() {
     bindInput(aiBaseUrlInput, 'baseUrl');
     bindInput(aiApiKeyInput, 'apiKey');
     bindInput(aiModelInput, 'model');
+    aiModelContext1MInput?.addEventListener('change', async () => {
+        const p = activeProvider();
+        if (!p) return;
+        p.context1M = aiModelContext1MInput.checked;
+        await persistProviders();
+    });
     aiSupportsVisionInput.addEventListener('change', async () => {
         const p = activeProvider();
         if (!p) return;

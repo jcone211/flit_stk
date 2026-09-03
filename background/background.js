@@ -545,12 +545,14 @@ function createAiChatWindow() {
         // 靠在插件主窗口左侧（预留 8px 间距），顶部与主窗口对齐
         const baseLeft = currentWindow ? currentWindow.left : 0;
         const baseTop = currentWindow ? currentWindow.top : 0;
+        const width = 580; // 与插件主页 popup 窗口宽度一致（popup 创建 width:580）
+        // 初始宽度调整到与插件主页一致：580
         chrome.windows.create({
             url: chrome.runtime.getURL('ai/ai.html'),
             type: 'popup',
-            width: 480,
+            width: width,
             height: 700,
-            left: Math.max(baseLeft - 480 - 8, 0),
+            left: Math.max(baseLeft - width - 8, 0),
             top: Math.max(baseTop, 0)
         }, (newWindow) => {
             if (newWindow && newWindow.id) {

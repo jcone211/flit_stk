@@ -335,22 +335,36 @@ const xiaoshiIn = (text) => /小石/.test(String(text || ''));
 const fmtDelta = (delta) => Object.entries(delta).map(([k, v]) => `${k}×${v}`).join('、') || '0 次接口';
 
 // ---------------------------------------------------------------- 3. D 系列：本地数据库取数（假桥接，可复现）
-await run('D1 未启用 Agent 桥接 → 启用指引（0 次接口）', async () => {
+await run('D1 未启用 Agent 桥接：>7 天给启用指引、≤7 天照样降级免费（M1/M2）', async () => {
     await useWorkspace('d1', { config: [dailySource()] });
     dbHas({});
     state.bridgeEnabled = false;
-    let r;
-    try { r = await toolExecutors.read_stock_kline({ code: '600206', days: 7 }); }
-    finally { state.bridgeEnabled = true; }
-    console.log('  ' + brief(r));
-    check('D1', '返回 error 而非抛异常/空 rows', !!r.error && r.rows === undefined, r.error);
-    check('D1', '话术为「未启用 Agent 桥接」而非「请联系项目作者」', /未启用「Agent 桥接」/.test(String(r.error || '')) && !/请联系项目作者/.test(String(r.error || '')));
+    let r, r7;
+    const m = markNet();
+    try {
+        r = await toolExecutors.read_stock_kline({ code: '600206', days: 30 });
+        r7 = await toolExecutors.read_stock_kline({ code: '600206', days: 7 });
+    } finally { state.bridgeEnabled = true; }
+    console.log('  >7 天 ' + brief(r));
+    console.log('  ≤7 天 ' + brief(r7));
+    check('D1', '>7 天：返回 error 而非抛异常/空 rows', !!r.error && r.rows === undefined, r.error);
+    check('D1', '>7 天：话术是「未启用 Agent 桥接」，不冒充「保护免费渠道」也不甩「联系项目作者」',
+        /未启用「Agent 桥接」/.test(String(r.error || '')) && !/请联系项目作者/.test(String(r.error || '')) && !/保护免费渠道/.test(String(r.error || '')), r.error);
+    check('D1', '>7 天：点明「你查的是 30 个交易日…缺的是前置条件」',
+        /你查的是 30 个交易日/.test(String(r.error || '')) && /前置条件/.test(String(r.error || '')) && /不是接口故障/.test(String(r.error || '')), r.error);
     check('D1', '话术带启用步骤（node flit_bridge/server.js）', /flit_bridge\/server\.js/.test(String(r.error || '')));
-    check('D1', '提示实时行情仍可用（不需要数据库）', /get_stock_quote/.test(String(r.hint || '')));
+    check('D1', '提示≤7 天日 K 与实时行情都不需要数据库', /get_stock_quote/.test(String(r.hint || '')) && /7 个交易日以内的日 K 都不需要数据库/.test(String(r.hint || '')), r.hint);
     check('D1', '全程 0 次桥接请求（context/schema/query 都没打）',
         bridge.contextCalls === 0 && bridge.schemaCalls === 0 && bridge.log.length === 0,
         `context=${bridge.contextCalls} schema=${bridge.schemaCalls} query=${bridge.log.length}`);
-    check('D1', 'K 线取数不再读 parquet（结果里无 parquet 字样）', !/parquet/.test(JSON.stringify(r)), JSON.stringify(r).slice(0, 120));
+    check('D1', '≤7 天：桥接关闭也拿到真实行（走免费渠道，source 不含 db）',
+        Array.isArray(r7.rows) && r7.rows.length > 0 && !/^db/.test(String(r7.source || '')) && /adata|xiaoshi/.test(String(r7.source || '')),
+        `${r7.source || r7.error}|${(r7.rows || []).length} 行`);
+    check('D1', '≤7 天：不带 数据表、本地库诊断说明「没库所以全走免费」',
+        r7.数据表 === null && /本地日线库不可用（bridge_disabled）/.test(String(r7.本地库诊断 || '')) && /全部来自免费渠道/.test(String(r7.本地库诊断 || '')), r7.本地库诊断);
+    const d = netDelta(m);
+    check('D1', '>7 天不打免费、≤7 天只打免费，全程 0 次小石', d.免费日线 >= 1 && !d.小石 && !d.其他, fmtNet(d));
+    check('D1', 'K 线取数不再读 parquet（结果里无 parquet 字样）', !/parquet/.test(JSON.stringify(r)) && !/parquet/.test(JSON.stringify(r7)), JSON.stringify(r).slice(0, 120));
 });
 
 await run('D2 未设置主工作目录 → 让用户选目录（0 次接口）', async () => {
@@ -358,12 +372,20 @@ await run('D2 未设置主工作目录 → 让用户选目录（0 次接口）',
     dbHas({});
     const dir = state.workspaceRootPath;
     state.workspaceRootPath = '';
-    let r;
-    try { r = await toolExecutors.read_stock_kline({ code: '600206', days: 7 }); }
-    finally { state.workspaceRootPath = dir; }
-    console.log('  ' + brief(r));
-    check('D2', '话术为「尚未设置主工作目录」', /尚未设置主工作目录/.test(String(r.error || '')), r.error);
+    let r, r7;
+    const m = markNet();
+    try {
+        r = await toolExecutors.read_stock_kline({ code: '600206', days: 30 });
+        r7 = await toolExecutors.read_stock_kline({ code: '600206', days: 7 });
+    } finally { state.workspaceRootPath = dir; }
+    console.log('  >7 天 ' + brief(r));
+    console.log('  ≤7 天 ' + brief(r7));
+    check('D2', '话术为「尚未设置主工作目录」（带 N 天前置条件句）',
+        /尚未设置主工作目录/.test(String(r.error || '')) && /你查的是 30 个交易日/.test(String(r.error || '')), r.error);
     check('D2', '0 次桥接请求', bridge.log.length === 0 && bridge.schemaCalls === 0);
+    check('D2', '≤7 天：未设主目录不阻断取数，照样从免费渠道拿到行', Array.isArray(r7.rows) && r7.rows.length > 0, String(r7.error || `${(r7.rows || []).length} 行/${r7.source}`));
+    const d = netDelta(m);
+    check('D2', '>7 天不打免费、≤7 天只打免费、0 次小石', d.免费日线 >= 1 && !d.小石 && !d.其他, fmtNet(d));
 });
 
 await run(`D3 库里有数据（末行=${EXPECTED}）→ source=db${LIVE ? '+live' : ''}，不打外部接口`, async () => {
@@ -472,11 +494,12 @@ await run('D8 无 config、无工作目录记忆 → 「请联系项目作者」
     await useWorkspace('d8', {});   // 不写 flit/config.json
     dbHas({ contextDatabase: null });
     const m = markNet();
-    const r = await toolExecutors.read_stock_kline({ code: '600206', days: 7 });
+    const r = await toolExecutors.read_stock_kline({ code: '600206', days: 30 });
     console.log('  ' + brief(r));
-    check('D8', '话术为需求 3 的原文', /由于工作目录不存在可用数据库，当前无法查询 K 线，若有需求请联系项目作者/.test(String(r.error || '')), r.error);
+    check('D8', '话术为需求 3 的原文（该分支只在 >7 天时命中）', /由于工作目录不存在可用数据库，当前无法查询该长度的 K 线，若有需求请联系项目作者/.test(String(r.error || '')), r.error);
+    check('D8', '话术不冒充「保护免费渠道」', !/保护免费渠道/.test(String(r.error || '')), r.error);
     check('D8', '带 排查 三条（config / 桥接 / 仅支持 docker pg）', Array.isArray(r.排查) && r.排查.length === 3, JSON.stringify(r.排查));
-    check('D8', '带 hint 说明实时行情仍可用', /get_stock_quote/.test(String(r.hint || '')));
+    check('D8', '带 hint 说明实时行情与≤7 天仍可用', /get_stock_quote/.test(String(r.hint || '')) && /7 个交易日以内的日 K 都不需要数据库/.test(String(r.hint || '')), r.hint);
     check('D8', '未打任何 database/query（没库就不查）', bridge.log.length === 0, 'query×' + bridge.log.length);
     const d = netDelta(m);
     check('D8', '0 次小石、0 次免费（不会因为没库去抽额度/重试）', !d.小石 && !d.免费日线, fmtNet(d));
@@ -486,12 +509,18 @@ await run('D9 登记了库但查询报错 → 「日线表读取失败或桥接�
     await useWorkspace('d9', { config: [dailySource()] });
     dbHas({ queryError: { code: 'sql_error', message: 'relation "a_share_daily" does not exist' } });
     const m = markNet();
-    const r = await toolExecutors.read_stock_kline({ code: '600206', days: 7 });
-    console.log('  ' + brief(r));
-    check('D9', '话术为库登记了但读表失败', /日线表读取失败或桥接不可用/.test(String(r.error || '')), r.error);
+    const r = await toolExecutors.read_stock_kline({ code: '600206', days: 30 });
+    const r7 = await toolExecutors.read_stock_kline({ code: '600206', days: 7 });
+    console.log('  >7 天 ' + brief(r));
+    console.log('  ≤7 天 ' + brief(r7));
+    // 7e33b64 重写后的口径：「登记了但桥接不认」必须带原报错 + 给出 7 天内降级与修桥接两条路
+    check('D9', '话术为库登记了但读表失败', /工作目录登记了数据库，但桥接不可用或配置未被识别/.test(String(r.error || '')), r.error);
+    check('D9', '带上桥接启动与 7 天内降级口径（不卡住用户）', /start-server\.ps1/.test(String(r.error || '')) && /改查 7 天以内/.test(String(r.error || '')), r.error);
     check('D9', '取数诊断带上真实报错原文', /does not exist/.test(String(r.取数诊断 || '')), r.取数诊断);
+    check('D9', 'hint 说清「超 7 天无降级路径」', /超过 7 天无降级路径/.test(String(r.hint || '')), r.hint);
+    check('D9', '≤7 天：库坏了不阻断，照样从免费渠道拿行', Array.isArray(r7.rows) && r7.rows.length > 0 && /adata|xiaoshi/.test(String(r7.source || '')), String(r7.error || `${r7.source}|${(r7.rows || []).length} 行`));
     const d = netDelta(m);
-    check('D9', '0 次小石、0 次免费日线（失败即止，不去抽额度）', !d.小石 && !d.免费日线, fmtNet(d));
+    check('D9', '>7 天失败即止不抽额度、≤7 天只打免费', d.免费日线 >= 1 && !d.小石 && !d.其他, fmtNet(d));
 });
 
 await run('D10 config 未登记表名 → 按列签名探测（并排除 *_today 干扰表）', async () => {
@@ -570,20 +599,48 @@ await run('D13 股票 + ETF 混批：ETF 不在库内，走免费（不打小石
     console.log('  （单只 ETF 那次调用的外呼：' + fmtNet(netDelta(m13b)) + '）');
 });
 
-await run('D14 库不可用 + 混 ETF：股票逐项报错、ETF 照取', async () => {
+await run('D14 库不可用 + 混 ETF：≤7 天股票照取、>7 天只对股票报错', async () => {
     await useWorkspace('d14', {});
     dbHas({ contextDatabase: null });
     const m = markNet();
     const r = await toolExecutors.read_stocks_kline({ codes: ['600206', '512880'], days: 7 });
-    console.log('  ' + brief(r));
+    console.log('  ≤7 天 ' + brief(r));
     const s6 = (r.stocks || []).find(s => String(s.code || '').startsWith('600206'));
     const sE = (r.stocks || []).find(s => String(s.code || '').startsWith('512880'));
     check('D14', '整批不因“没库”直接失败（返回 stocks）', Array.isArray(r.stocks) && !r.error, JSON.stringify(r).slice(0, 160));
-    check('D14', '股票项为「工作目录不存在可用数据库」话术', /工作目录不存在可用数据库/.test(String((s6 || {}).error || '')), s6 && s6.error);
+    check('D14', '≤7 天：股票项也从免费渠道拿到数据（不再报「没库」）', !!s6 && !s6.error && !!s6.date && /adata|xiaoshi/.test(String(s6.source || '')), s6 && (s6.error || `${s6.date}/${s6.source}`));
     check('D14', 'ETF 项仍有数据（不被库问题牵连）', !!sE && !sE.error && !!sE.date, sE && (sE.date || sE.error));
+    check('D14', '本地库诊断说明本批全部来自免费渠道', /本地日线库不可用/.test(String(r.本地库诊断 || '')) && /全部来自免费渠道/.test(String(r.本地库诊断 || '')), r.本地库诊断);
     const d = netDelta(m);
     check('D14', '0 次小石日线（没库不抽额度）', !d.小石, fmtNet(d));
     check('D14', '没库时一条日线 SQL 也不发', bridge.klineSql.length === 0, 'klineSql×' + bridge.klineSql.length);
+    // >7 天：没库就是硬断头——股票项给根因话术（不是「保护免费渠道」），ETF 照取
+    const r30 = await toolExecutors.read_stocks_kline({ codes: ['600206', '512880'], days: 30 });
+    console.log('  >7 天 ' + brief(r30));
+    const e6 = (r30.stocks || []).find(s => String(s.code || '').startsWith('600206'));
+    const eE = (r30.stocks || []).find(s => String(s.code || '').startsWith('512880'));
+    check('D14', '>7 天：股票项为「不存在可用数据库」根因话术', /不存在可用数据库/.test(String((e6 || {}).error || '')) && !/保护免费渠道/.test(String((e6 || {}).error || '')), e6 && e6.error);
+    // 【已知口径，非本轮改动】ETF 不入库 → 空缓存必命中 fillKlineFromApi 的 >7 天闸门，所以 ETF 长周期现在就是取不到
+    // 若以后放开 ETF 例外（或库里加 ETF 表），该断言会 FAIL——改成「ETF 拿到数据」即可
+    check('D14', '>7 天：ETF 项目前也无路可走（只能吃保护话术，见 plan §5 Q4）',
+        /保护免费渠道/.test(String((eE || {}).error || '')), eE && (eE.date || eE.error));
+});
+
+await run('D19 桥接关闭：批量≤7 天全部降级免费（M2）', async () => {
+    await useWorkspace('d19', { config: [dailySource()] });
+    dbHas({});
+    state.bridgeEnabled = false;
+    const m = markNet();
+    let r;
+    try { r = await toolExecutors.read_stocks_kline({ codes: ['600206', '001309'], days: 7 }); }
+    finally { state.bridgeEnabled = true; }
+    console.log('  ' + brief(r));
+    const list = r.stocks || [];
+    check('D19', '两只均拿到数据（桥接关闭不影响≤7 天）', list.length === 2 && list.every(s => !s.error && s.date), brief(list.map(s => s.error || `${s.date}/${s.source}`)));
+    check('D19', '各项 source 均为免费渠道、无 db', list.every(s => /adata|xiaoshi/.test(String(s.source || ''))), list.map(s => s.source).join(','));
+    check('D19', '整批不带 数据表、本地库诊断带「未启用 Agent 桥接」', r.数据表 === null && /未启用 Agent 桥接/.test(String(r.本地库诊断 || '')), r.本地库诊断);
+    const d = netDelta(m);
+    check('D19', '只打免费日线、0 次小石、0 条 SQL', d.免费日线 >= 1 && !d.小石 && bridge.klineSql.length === 0, fmtNet(d));
 });
 
 await run('D16 改了 flit/config.json 的表名 → 不必重开 AI 窗口（计划缓存带指纹，P1-4）', async () => {
@@ -682,7 +739,7 @@ await run('C4b 免费实时全挂 + 同批混脏代码（验证小石单只兜�
 });
 
 await run('C9 系统提示注入（buildSystemPrompt）', async () => {
-    const { buildSystemPrompt } = await import('../ai/core/ai_tools.js');
+    const { buildSystemPrompt, TOOL_GROUP_RULES } = await import('../ai/core/ai_tools.js');
     const p = buildSystemPrompt();
     const content = String((p && p.content) || p);
     const line = content.split('\n').find(l => l.includes('[当前时间]')) || '';
@@ -695,6 +752,9 @@ await run('C9 系统提示注入（buildSystemPrompt）', async () => {
     check('C9', '跨轮口径：教模型用 retain_tool_data 保存关键原始数据', /retain_tool_data/.test(content), content.match(/.{0,30}retain_tool_data.{0,20}/)?.[0]);
     check('C9', '不再要求把工具数据拄进回复正文（避免复述式烧 token）', !/必须在本次回复正文里以表格或列表完整写出/.test(content));
     check('C9', '仍保留「禁止编造 + 失败的查询不得补写数值」口径', /禁止编造/.test(content) && /不得把它的结果编成数值/.test(content));
+    check('C9', '强约束：输出行情数值前必须先成功调用行情工具（[强制取数]）', /\[强制取数\]/.test(content) && /禁止不调工具直接给出行情结论/.test(content));
+    check('C9', '强约束：改查范围（30 日改 7 日）必须重新调用工具取数', /改查范围/.test(content) && /必须重新调用取数工具/.test(content));
+    check('C9', 'market 工具组规则同样带「不改工具不出行情数值」强约束', /\[强制取数\]/.test(TOOL_GROUP_RULES.market) && /绝不等于可以不调工具直接回答/.test(TOOL_GROUP_RULES.market));
 });
 
 // ---------------------------------------------------------------- 4.9 R 系列：跨轮上下文（账本 / 数据便签）
@@ -741,6 +801,99 @@ await run('R1 retain_tool_data 登记与拒收口径（0 次接口）', async ()
         state.turnToolResults = savedResults;
         state.pendingRetains = savedPending;
     }
+});
+
+// ---------------------------------------------------------------- 4.10 C10 工具表完整性（getLoadedToolDefs 曾经因 TOOL_BY_NAME 被删而每轮抛 ReferenceError）
+await run('C10 工具表完整性：定义/分组/执行器三者对齐（0 次接口）', async () => {
+    const mod = await import('../ai/core/ai_tools.js');
+    const { TOOL_DEFS, TOOL_GROUPS, TOOL_BY_NAME, getLoadedToolDefs, CONTEXT_TOOL_DEFS } = mod;
+    const groupNames = Object.keys(TOOL_GROUPS);
+    // 逐组激活后走 ai.js 每轮真实取值路径（这里不拦异常，抛了就 FAIL）
+    const savedGroups = state.activeToolGroups;
+    try {
+        state.activeToolGroups = new Set(groupNames);
+        const defs = getLoadedToolDefs();
+        check('C10', 'getLoadedToolDefs() 全组激活时不抛异常且数量对得上',
+            defs.length === new Set(groupNames.flatMap(g => TOOL_GROUPS[g])).size, `${defs.length} 个定义`);
+        check('C10', '每个分组工具名都有 TOOL_DEFS 定义',
+            groupNames.every(g => TOOL_GROUPS[g].every(n => TOOL_BY_NAME.has(n))),
+            groupNames.flatMap(g => TOOL_GROUPS[g].filter(n => !TOOL_BY_NAME.has(n))).join(',') || '齐全');
+        check('C10', '每个分组工具名都有执行器（含常驻 retain_tool_data）',
+            groupNames.every(g => TOOL_GROUPS[g].every(n => typeof toolExecutors[n] === 'function'))
+            && CONTEXT_TOOL_DEFS.every(d => typeof toolExecutors[d.function.name] === 'function'),
+            groupNames.flatMap(g => TOOL_GROUPS[g].filter(n => typeof toolExecutors[n] !== 'function')).join(',') || '齐全');
+        state.activeToolGroups = new Set(['market']);
+        const one = getLoadedToolDefs();
+        const sentChars = one.reduce((n, d) => n + String(d.function.description || '').length
+            + Object.values(d.function.parameters?.properties || {}).reduce((k, p) => k + String(p.description || '').length, 0), 0);
+        console.log('  market 组送出的描述字符合计：' + sentChars);
+        check('C10', '单组只回该组工具', one.length === TOOL_GROUPS.market.length, one.map(d => d.function.name).join(','));
+        // 旧版把 description 压成下划线替空格的名字，模型看不到参数语义→凭记忆猜代码（docs/debug.txt [030]）
+        check('C10', 'description 保留原文（不再是名字替换下划线）且不超长',
+            one.every(d => d.function.description.length > 8 && !/^[a-z ]+$/.test(d.function.description) && d.function.description.length <= 321),
+            one.map(d => d.function.name + ':' + d.function.description.length).join(' '));
+        check('C10', '参数描述未被删（kline 工具能看到 name/code 与 7 天口径）',
+            (one.find(d => d.function.name === 'read_stock_kline').function.parameters.properties.name.description || '').includes('猜')
+            && (one.find(d => d.function.name === 'read_stock_kline').function.parameters.properties.days.description || '').includes('7'),
+            JSON.stringify(one.find(d => d.function.name === 'read_stock_kline').function.parameters.properties.days));
+    } finally {
+        state.activeToolGroups = savedGroups;
+    }
+});
+
+// ---------------------------------------------------------------- 4.11 G 系列：反编造 guard 三态判定（`ai/core/ai_guard.js`，0 接口 0 网络）
+await run('G1 guard 判定：解释型放行 / 终局拒绝后编数字直接丢 / 无证据才纠正', async () => {
+    const { decideQuoteGuard, quoteFabricationSignal, isTerminalRefusal, correctionPromptText } = await import('../ai/core/ai_guard.js');
+    // 下面两段文案取自 docs/debug.txt 实际被拦截的回复（[042] 解释型 / 虚构的编造型）
+    const explain = '无法获取昂利康（300534）的 30 日日 K 数据。工具返回原因：保护免费渠道，仅支持查询近7日日K数据。'
+        + '可选方案：1. 缩短到 7 天以内；2. 在 AI 设置启用 Agent 桥接；3. 改查实时行情（现价/涨跌幅）。';
+    const fabricated = '昂利康近 30 个交易日走势如下：最新收盘价 34.16 元，跌 3.21%，成交量 1.2 万手，换手率 0.85%。';
+    check('G1', '旧版误杀点：只提行情名词、无价格数值 → 不算编造', quoteFabricationSignal(explain).hit === false, quoteFabricationSignal(explain).why);
+    check('G1', '日期与股票代码不会被当价格数值', quoteFabricationSignal('2026-09-02 昂利康 002940.SZ 的收盘参考 SH600000，未取到数据').hit === false);
+    check('G1', '真编造型正文（名词 + 价格数字）仍被识别', quoteFabricationSignal(fabricated).hit === true && quoteFabricationSignal(fabricated).strong === true);
+    check('G1', '工具终局拒绝 + 解释正文 → note（放行加一行说明，不再强制重查）',
+        decideQuoteGuard({ text: explain, refusal: true, topicIsQuote: true }).action === 'note');
+    check('G1', '工具终局拒绝 + 编造数值 → drop（重查必然同样结果，不白烧一轮）',
+        decideQuoteGuard({ text: fabricated, refusal: true, topicIsQuote: true }).action === 'drop');
+    check('G1', '什都没查到 + 编造数值 → 先 correct、二次命中 drop（旧口径保留）',
+        decideQuoteGuard({ text: fabricated, retried: false }).action === 'correct'
+        && decideQuoteGuard({ text: fabricated, retried: true }).action === 'drop');
+    check('G1', '弱信号（带数字表格 + 行情话题）二次命中 → pass_warn 不误杀文件清单',
+        decideQuoteGuard({ text: '| 名称 | 行数 |\n| a.csv | 12 |', topicIsQuote: true, retried: true }).action === 'pass_warn'
+        && decideQuoteGuard({ text: '| 名称 | 行数 |\n| a.csv | 12 |', topicIsQuote: false, retried: true }).action === 'pass');
+    const refusalPayload = { root: 'x', code: '002940.SZ', name: '昂利康', error: '本地数据库不可用', 取数诊断: 'AI 设置未启用 Agent 桥接', hint: 'y' };
+    check('G1', 'isTerminalRefusal：回了 error + 诊断 → true；成功载荷 → false',
+        isTerminalRefusal(refusalPayload) === true && isTerminalRefusal({ code: '002940.SZ', rows: [] }) === false);
+    check('G1', 'isTerminalRefusal：工具抛异常（无结构化 error 字段）不算终局拒绝',
+        isTerminalRefusal(null) === false && isTerminalRefusal({ error: '工具执行失败：boom' }) === false);
+    check('G1', '强制纠正正文不再命令式“立即重调”，并约束代码来源',
+        !/请立即调用/.test(correctionPromptText()) && /照原样转述该原因/.test(correctionPromptText()) && /出现过的股票代码/.test(correctionPromptText()));
+    check('G1', '强制纠正正文强调「行情输出必须先成功调用工具取数」', /必须以本轮成功取数的工具调用为前提/.test(correctionPromptText()));
+});
+
+// 端到端：拿真工具返回（桥接关闭、>7 天）跑一遍 guard 判定，复现 debug.txt 当时被误杀的那一轮
+await run('G2 debug.txt 场景回放：桥接关闭问 30 日 K → 解释型回复不再被丢弃（0 次外呼）', async () => {
+    const { decideQuoteGuard, isTerminalRefusal } = await import('../ai/core/ai_guard.js');
+    await useWorkspace('g2', { config: [dailySource()] });
+    dbHas({});
+    state.bridgeEnabled = false;
+    const m = markNet();
+    let payload;
+    try {
+        const r = await toolExecutors.read_stock_kline({ code: '002940', days: 30 });
+        payload = typeof r === 'string' ? JSON.parse(r) : r;
+    } finally { state.bridgeEnabled = true; }
+    console.log('  ' + brief(payload));
+    const refusal = isTerminalRefusal(payload);
+    check('G2', '工具载荷构成「终局拒绝」（guard 能区分它与模型未取数）', refusal === true, JSON.stringify(payload).slice(0, 120));
+    const explain = '无法获取昂利康（002940）的 30 日日 K 数据。原因：' + payload.error
+        + '。可选：改查 7 日以内的 K 线，或查实时行情（现价/涨跌幅）。';
+    check('G2', '解释型回复→note（debug.txt 里正是这类正文被连丢两次）',
+        decideQuoteGuard({ text: explain, refusal, topicIsQuote: true }).action === 'note', explain.slice(0, 60));
+    check('G2', '同一载荷下编造数值仍→drop',
+        decideQuoteGuard({ text: '最新收盘价 34.16 元，跌 3.21%。', refusal, topicIsQuote: true }).action === 'drop');
+    const d = netDelta(m);
+    check('G2', '全程 0 次外呼（>7 天无库不补数据、不抽额度）', Object.keys(d).length === 0, fmtNet(d));
 });
 
 // ---------------------------------------------------------------- 5. E 系列：真实桥接 + 真实库（--bridge=real 才跑）

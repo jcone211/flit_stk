@@ -8,7 +8,7 @@ export const DEBUG = true;
 export const dbg = (...args) => { if (DEBUG) console.log('[thswc:ai]', ...args); };
 
 // 常量
-export const DEFAULT_MAX_TOOL_ITERATIONS = 18;
+export const DEFAULT_MAX_TOOL_ITERATIONS = 50;
 export const MAX_MESSAGES = 100;
 export const MAX_MESSAGE_CHARS = 10000;
 export const MAX_MEMORY_ITEMS = 50;
@@ -29,7 +29,28 @@ export const TOOL_RESULT_CHARS = {
 export const MAX_ROUND_TOOL_CHARS = 16000;
 // 送入模型的上下文字符预算（超限逐轮驱逐旧 tool 结果，见 ai.js evictToolResults：
 // 仅驱逐「最近一轮以外」的旧结果，驱逐到预算内即停）
-export const MAX_CONTEXT_CHARS = 24000;
+// 由固定字符数改为动态：按当前所用模型的最大上下文 token 数估算（见 maxContextTokens / estimateTokens），
+// 驱逐判定也改为 token 口径，保证与发送按钮旁的环形指示器占比一致。
+export const CONTEXT_TOKENS_1M = 1000000;      // 勾选「1M」时按 1M token 上下文计
+export const CONTEXT_TOKENS_DEFAULT = 256000;  // 未勾选时按 256k token 上下文计
+// 单条消息/文本的 token 估算：东亚字符约 1.43 字/token，其余约 4 字/token（按字符宽度分权，粗略近似）
+const CJK_RE = /[\u2e80-\u9fff\u3400-\u4dbf\u3000-\u303f\uff00-\uffef\u3040-\u30ff\uac00-\ud7af]/g;
+export function estimateTokens(text) {
+    const s = String(text == null ? '' : text);
+    if (!s) return 0;
+    const cjk = (s.match(CJK_RE) || []).length;
+    const other = s.length - cjk;
+    return Math.ceil(cjk * 0.7 + other * 0.25);
+}
+/** 当前所用模型的最大上下文 token 数：勾选「1M」→ 1M，否则 256k */
+export function maxContextTokens(provider) {
+    return (provider && provider.context1M === false) ? CONTEXT_TOKENS_DEFAULT : CONTEXT_TOKENS_1M;
+}
+/** 把 model 的 token 上限换算成字符预算（供驱逐/日志按字符口径参考） */
+export function contextBudgetChars(provider) {
+    // 中英混合平均约 3 字/token，与 estimateTokens 的估算量级一致
+    return Math.round(maxContextTokens(provider) * 3);
+}
 // 跨轮「工具调用记录」：tool 的原始返回只在当轮 function-calling 循环内有效，用户发下一条消息时
 // 会被 chatMessages 的 {role,content} 重建抹掉（docs/debug.txt 里模型就是靠这个空档凭空补了 7 根 K 线）。
 // 每轮结束只留一行账本（调了哪些工具、成功还是失败、失败原因）；原始数据想跨轮存活只能靠 retain_tool_data 登记便签。
@@ -41,8 +62,10 @@ export const MAX_KEEP_TRACES = 2;             // 上下文里保留最近几轮�
 // 不占用可见正文、不进 UI 气泡，只在下一轮起作为隐藏上下文回灌（不再要求「把数据抄进回复正文」）
 export const MAX_RETAIN_CHARS = 3000;         // 单条便签正文上限（超出截断）
 export const MAX_RETAINED_ENTRIES = 3;        // 同时保留几条便签（满了丢最旧）
-export const MAX_RETAINED_TOTAL = 6000;       // 便签总字数量上限（相对 MAX_CONTEXT_CHARS=24000，给对话本身留位）
+export const MAX_RETAINED_TOTAL = 6000;       // 便签总字数量上限（相对模型上下文（默认 256k/1M token），给对话本身留位）
 export const MAX_TURN_TOOL_RESULTS = 8;       // 本轮可被登记的工具原始返回缓存条数
+// 手动压缩后页面展示摘要的 token 上限（仅流式展示前这多 token，剩余提示不展示；完整摘要仍回灌模型）
+export const COMPACT_PREVIEW_TOKENS = 1000;
 // 单轮 LLM 请求超时：滑动空闲 + 硬上限双档。
 // 思考型模型可能长时间只输出 reasoning_content（无正文 delta），固定总超时会误杀，
 // 故每收到一个 delta（正文或思考）就重置空闲计时；空闲满 45s 判无响应，300s 为硬上限兜底。
@@ -85,6 +108,8 @@ export const state = {
     turnToolResults: [],
     pendingRetains: [],
     followStream: true,
+    // 本会话是否发生过上下文驱逐（tool 结果归档）：环形指示器 tooltip 追加「[压缩]」
+    contextEvicted: false,
     currentAssistantEl: null,
     currentAssistantRaw: '',
     currentAssistantEntry: null,
@@ -102,6 +127,9 @@ export const messagesEl = document.getElementById('messagesEl');
 export const scrollDownBtn = document.getElementById('scrollDownBtn');
 export const chatInput = document.getElementById('chatInput');
 export const sendBtn = document.getElementById('sendBtn');
+export const ctxMeter = document.getElementById('ctxMeter');
+export const ctxPanel = document.getElementById('ctxPanel');
+export const compactBtn = document.getElementById('compactBtn');
 export const stopBtn = document.getElementById('stopBtn');
 export const uploadBtn = document.getElementById('uploadBtn');
 export const uploadInput = document.getElementById('uploadInput');
@@ -124,6 +152,7 @@ export const aiProviderNameInput = document.getElementById('aiProviderName');
 export const aiBaseUrlInput = document.getElementById('aiBaseUrl');
 export const aiApiKeyInput = document.getElementById('aiApiKey');
 export const aiModelInput = document.getElementById('aiModel');
+export const aiModelContext1MInput = document.getElementById('aiModelContext1M');
 export const aiSupportsVisionInput = document.getElementById('aiSupportsVision');
 export const aiMaxToolIterationsInput = document.getElementById('aiMaxToolIterations');
 export const aiDefaultVisionProviderSelect = document.getElementById('aiDefaultVisionProvider');

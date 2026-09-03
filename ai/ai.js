@@ -17,6 +17,9 @@
  *                  记录点：appendMessage(user/assistant/system/error)、commitAssistant、executeToolCalls、
  *                  sendRound/logResponse、会话生命周期；renderHistory 等回放靠 withDebugMuted 抑制
  *   fsa.js         文件系统访问：readyRoot / writeUpload / getBridgeHandle / workspacePermission
+ *   ai_guard.js    反编造 guard 的**纯判定**（不碰 DOM/chrome，可被 docs/verify-free-first.mjs 直接 import）：
+ *                  QUOTE_TOOLS / quoteFabricationSignal / isTerminalRefusal / decideQuoteGuard / correctionPromptText
+ *                  三态：成功取数→放行；工具终局拒绝→解释型放行(note)、给数值直接丢(drop)；什么都没查→先 correct 再丢
  *
  * 【与 background 的消息协议】long-lived port，name = 'ai-chat-connection'
  *   发送 {action:'aiChatStream'|'aiChatStop'|'aiChatPing', requestId, messages, tools, stream, baseUrl, apiKey, model, disableThinking}
@@ -97,13 +100,15 @@ import {
     state, dbg, getDateTime,
     storageGet, storageSet, genUid,
     MAX_TOOL_RESULT_CHARS, MAX_MESSAGES, MAX_MESSAGE_CHARS,
-    toolResultLimitChars, MAX_ROUND_TOOL_CHARS, MAX_CONTEXT_CHARS,
+    toolResultLimitChars, MAX_ROUND_TOOL_CHARS,
+    estimateTokens, maxContextTokens, contextBudgetChars,
     TRACE_MESSAGE_ROLE, MAX_TRACE_CHARS, MAX_TRACE_CALLS, MAX_KEEP_TRACES,
     MAX_RETAINED_ENTRIES, MAX_RETAINED_TOTAL, MAX_TURN_TOOL_RESULTS,
+    COMPACT_PREVIEW_TOKENS,
     fmtDateTimeStr,
     REQUEST_IDLE_TIMEOUT_MS, REQUEST_MAX_TIMEOUT_MS, KEEPALIVE_INTERVAL_MS, THINKING_TAIL_CHARS,
     CHAT_KEY,
-    messagesEl, scrollDownBtn, chatInput, sendBtn, stopBtn,
+    messagesEl, scrollDownBtn, chatInput, sendBtn, ctxMeter, ctxPanel, compactBtn, stopBtn,
     uploadBtn, uploadInput, pastePreviews, intentBubblesEl, intentBubbleEls,
     sessionSelect, newSessionBtn, renameSessionBtn, deleteSessionBtn, clearChatBtn,
     openAiSettingsBtn, closeAiSettingsBtn, dirStatusBar, aiDebugModeInput,
@@ -128,6 +133,9 @@ import {
     record, recordRepeat, recordMessage, withDebugMuted, bindDebugButton, bindDebugGlobals,
     flattenContent,
 } from './core/ai_debug.js';
+import {
+    QUOTE_TOOLS, decideQuoteGuard, isTerminalRefusal, correctionPromptText,
+} from './core/ai_guard.js';
 
 // ============== port 连接 ==============
 
@@ -215,7 +223,7 @@ function handlePortMessage(message) {
     }
 }
 
-async function sendRound(apiMessages, tools, { stream = true, provider = activeProvider() } = {}) {
+async function sendRound(apiMessages, tools, { stream = true, provider = activeProvider(), suppressRender = false } = {}) {
     if (!(await ensurePortReady())) {
         return { ok: false, error: '与后台连接已断开，请稍后重试', retriable: true, content: '' };
     }
@@ -243,9 +251,9 @@ async function sendRound(apiMessages, tools, { stream = true, provider = activeP
                 clearTimeout(idleTimer);
                 idleTimer = setTimeout(() => expire('模型 ' + Math.round(REQUEST_IDLE_TIMEOUT_MS / 1000) + 's 无响应'), REQUEST_IDLE_TIMEOUT_MS);
             },
-            onReady: () => showWaitingAssistant(),
-            onChunk: (delta) => { content += delta; appendToCurrentAssistant(delta); },
-            onReasoning: (delta) => { reasoningChars += String(delta || '').length; appendToCurrentThinking(delta); },
+            onReady: () => { if (!suppressRender) showWaitingAssistant(); },
+            onChunk: (delta) => { content += delta; if (!suppressRender) appendToCurrentAssistant(delta); },
+            onReasoning: (delta) => { reasoningChars += String(delta || '').length; if (!suppressRender) appendToCurrentThinking(delta); },
             resolve: finish,
         };
         const maxTimer = setTimeout(() => expire('请求超时（' + Math.round(REQUEST_MAX_TIMEOUT_MS / 1000) + 's）'), REQUEST_MAX_TIMEOUT_MS);
@@ -341,8 +349,9 @@ async function runAgentLoop(initialMessages, initialToolGroups = []) {
 async function runAgentLoopBody(initialMessages, initialToolGroups, turnCalls) {
     const apiMessages = initialMessages || state.chatMessages.map(toApiMessage);
     state.activeToolGroups = new Set(initialToolGroups);
-    // 本轮是否真拿到过行情数据（guard 的唯一硬证据）与「强制纠正只做一次」的闭锁
+    // 本轮是否真拿到过行情数据（guard 的硬证据）、「工具本轮是否终局拒绝」（回了 error + 诊断）、与「强制纠正只做一次」的闭锁
     let quoteEvidence = false;
+    let quoteRefused = false;
     let guardRetried = false;
     const requestProvider = selectRequestProvider(apiMessages);
     if (!String(requestProvider.apiKey || '').trim()) {
@@ -355,9 +364,10 @@ async function runAgentLoopBody(initialMessages, initialToolGroups, turnCalls) {
         state.currentAssistantEl = null;
         removeWaitingAssistant();
         finishThinking();
-        evictToolResults(apiMessages);
+        evictToolResults(apiMessages, requestProvider);
         const requestMessages = [buildSystemPrompt(), ...apiMessages];
         const tools = [TOOL_GROUP_DEF, ...CONTEXT_TOOL_DEFS, ...getLoadedToolDefs()];
+        updateContextMeter(requestMessages, tools, requestProvider);
         let result = await sendRound(requestMessages, tools, { stream: true, provider: requestProvider });
         removeWaitingAssistant();
         finishThinking();
@@ -413,39 +423,44 @@ async function runAgentLoopBody(initialMessages, initialToolGroups, turnCalls) {
             });
             apiMessages.push(...await executeToolCalls(sanitizedCalls, turnCalls));
             quoteEvidence = turnCalls.some(c => QUOTE_TOOLS.has(c.name) && c.ok);
+            quoteRefused = turnCalls.some(c => QUOTE_TOOLS.has(c.name) && c.refusal === true);
             continue;
         }
-        // 反编造 guard：本轮没拿到过行情数据，上一轮账本里也没有成功的取数，却输出了价格/表格 → 判定为编造。
-        // 口径：tool 原始返回不跨轮，所以“上一轮的数据”只能以当时写进回复正文的形式存在（系统提示 [上下文口径] 已要求）。
+        // 反编造 guard（判定在 ai/core/ai_guard.js，回归脚本可直接测）：
+        // ① 本轮有成功的行情取数、或账本/便签里有历史证据 → 有真实来源，正常提交；
+        // ② 工具本轮「终局拒绝」（回了 error + 取数诊断）→ 取数义务已尽，解释型正文放行只补一行灰字；
+        //    此时出现的任何价格数值必然没来源，且重查还是同样结果 → 直接丢弃，不再白烧一轮；
+        // ③ 完全没查到 → 先强制纠正一次，二次命中按强/弱信号丢弃或放行加免责。
+        // 旧版只看「有没有行情名词」就把「解释为什么拿不到」当编造杀掉，现要求同时出现价格形态数值。
         if (state.activeToolGroups.size > 0 && !quoteEvidence && !hasPriorQuoteEvidence()) {
             const replyText = result.content || '';
-            const hasPriceData = /(现价|收盘|开盘|最高价|最低价|涨跌幅|涨跌额|成交量|成交额|换手率|跌停|涨停|股价)/.test(replyText);
-            const hasTable = /^\|/.test(replyText.trim()) && /\|\s*\d/.test(replyText);
-            if (hasPriceData || (hasTable && quoteTopicNearby(apiMessages))) {
-                if (!guardRetried) {
-                    guardRetried = true;
-                    record('guard', { 处理: '注入强制纠正', 文本字符: replyText.length, 表格: hasTable, 价格字样: hasPriceData });
-                    appendMessage('system', '本轮未检测到取数成功的工具调用，已要求重新取数');
-                    apiMessages.push({
-                        role: 'system',
-                        content: '【强制纠正】本轮没有任何取数成功的工具调用（上一轮工具记录也未显示行情数据），刚才那段数字是编造的，不可使用。'
-                            + '请立即调用 get_stock_quote / get_portfolio_quotes（实时）或 read_stock_kline / read_stocks_kline（日线）拿真实数据后再回答；'
-                            + '取不到就只说「没有取到数据」并原样转述工具给的原因，不得输出任何价格、涨跌幅、成交量或 K 线表格。'
-                            + '后面还要用的数据，取到后本轮调 retain_tool_data 登记成隐藏便签（tool 原始返回下一轮就不在你的上下文里了）。',
-                    });
-                    continue;
-                }
-                // 纠正一次仍在编：强价格信号（写了收盘/成交量等）直接丢正文；
-                // 只有「表格 + 话题像行情」的弱信号则放行加免责，避免误伤「列文件/列表名」这类正常回答
-                if (!hasPriceData) {
-                    record('guard', { 处理: '二次命中，弱信号放行并提示', 文本字符: replyText.length });
-                    appendMessage('system', '本轮没有取数成功的工具调用，下面内容里的数值没有工具来源，请自行核对');
-                } else {
-                    record('guard', { 处理: '二次命中，丢弃正文', 文本字符: replyText.length });
-                    dropAssistantBubble();
-                    appendMessage('error', '模型在未取到真实数据的情况下再次直接给出行情数值，该回复已被拦截。请先让取数链路可用（启用 Agent 桥接查本地库，或改问 7 日内走免费渠道）再问一次。');
-                    return;
-                }
+            const decision = decideQuoteGuard({
+                text: replyText,
+                topicIsQuote: quoteTopicNearby(apiMessages),
+                refusal: quoteRefused,
+                retried: guardRetried,
+            });
+            if (decision.action === 'correct') {
+                guardRetried = true;
+                record('guard', { 处理: '注入强制纠正', 原因: decision.why, 文本字符: replyText.length, 正文摘录: clipText(replyText, 300) });
+                appendMessage('system', '本轮未检测到取数成功的工具调用，已要求重新取数');
+                apiMessages.push({ role: 'system', content: correctionPromptText() });
+                continue;
+            }
+            if (decision.action === 'drop') {
+                record('guard', { 处理: '丢弃正文', 原因: decision.why, 文本字符: replyText.length, 正文摘录: clipText(replyText, 300) });
+                dropAssistantBubble();
+                appendMessage('error', quoteRefused
+                    ? '工具已说明拿不到该数据（原因见上方工具返回），模型却又给出了具体行情数值，该回复已拦截。7 个交易日以内的日 K 与实时行情不需要本地库，可直接问；更长周期需先在 AI 设置启用 Agent 桥接并启动 flit_bridge。'
+                    : '模型在未取到真实数据的情况下再次直接给出行情数值，该回复已被拦截。请先让取数链路可用（启用 Agent 桥接查本地库，或改问 7 日内走免费渠道）再问一次。');
+                return;
+            }
+            if (decision.action === 'note') {
+                record('guard', { 处理: '工具终局拒绝，放行解释型回复', 文本字符: replyText.length });
+                appendMessage('system', '以上为工具返回的不可用原因，本次没有取到行情数值');
+            } else if (decision.action === 'pass_warn') {
+                record('guard', { 处理: '弱信号放行并提示', 文本字符: replyText.length });
+                appendMessage('system', '本轮没有取数成功的工具调用，下面内容里的数值没有工具来源，请自行核对');
             }
         }
         commitAssistant(result.content);
@@ -459,12 +474,7 @@ async function runAgentLoopBody(initialMessages, initialToolGroups, turnCalls) {
 
 // ============== 跨轮工具记录（账本）==============
 
-// guard 与账本共用的「有真实数据来源」口径：行情接口 + 会带回库存价格/SQL 行的工具
-// （get_stock_list 回的是本地库已落地数据并带 数据时间，query_local_database 回原始行，都算真实来源）
-const QUOTE_TOOLS = new Set([
-    'get_stock_quote', 'get_portfolio_quotes', 'read_stock_kline', 'read_stocks_kline',
-    'get_stock_list', 'query_local_database',
-]);
+// guard 与账本共用的「有真实数据来源」口径与三态判定 —— 已挑到 ai/core/ai_guard.js（纯函数，能被回归脚本直接测）
 
 // 账本开头那段话就是给模型看的核心提示：原始返回不存上下文，有价值的数据自己写进正文
 const TOOL_TRACE_HEAD = '[工具调用记录·系统自动登记，非用户发言] 上一轮工具调用的原始返回已不在你的上下文里，只剩下面这份账本。'
@@ -501,6 +511,8 @@ function summarizeToolCall(name, argsText, resultText, ms, truncated, failed) {
     // 业务失败看返回里的 error 键；抛异常/未知工具是纯文本结果，看 failed 标记
     const errText = typeof payload.error === 'string' ? payload.error : (failed ? String(resultText || '执行失败') : '');
     const ok = !errText;   // 截断不算失败（数据仍部分有效），只在行里标一句
+    // 「终局拒绝」：工具确实查过、回了 error + 诊断（区别于抛异常/没调）——guard 靠它区分「解释」与「编造」
+    const refusal = isTerminalRefusal(payload);
     const bits = [];
     if (ok) {
         for (const key of ['rows', 'stocks', 'quotes', 'list', 'items']) {
@@ -513,10 +525,14 @@ function summarizeToolCall(name, argsText, resultText, ms, truncated, failed) {
         if (payload.table || payload['数据表']) bits.push('数据表 ' + clipText(payload.table || payload['数据表'], 30));
         bits.push((resultText || '').length + ' 字' + (truncated ? '（已截断）' : ''));
     } else {
+        // 失败行也带工具已经解析出的目标（代码/名称）：跨轮只剩账本时，模型不至于凭记忆编一个代码
+        const target = payload.code ? String(payload.code) : (payload.name ? String(payload.name) : '');
+        const first = Array.isArray(payload.stocks) ? payload.stocks.find(s => s && (s.code || s.name)) : null;
+        const t = target || (first && (first.code || first.name)) || '';
         const diag = payload['取数诊断'] || payload['本地库诊断'] || payload['渠道诊断'] || payload['排查'] || payload.hint || '';
-        bits.push('失败：' + clipText(errText || resultText, 120) + (diag ? '（' + clipText(diag, 80) + '）' : ''));
+        bits.push((t ? '目标 ' + clipText(t, 24) + '，' : '') + '失败：' + clipText(errText || resultText, 120) + (diag ? '（' + clipText(diag, 80) + '）' : ''));
     }
-    return { name, ok, ms, text: `- ${name}(${clipText(argsText, 120)}) ${ms}ms → ${bits.join('，')}` };
+    return { name, ok, refusal, ms, text: `- ${name}(${clipText(argsText, 120)}) ${ms}ms → ${bits.join('，')}` };
 }
 
 /**
@@ -572,7 +588,7 @@ function pushRetainedNotes() {
     saveChat();
 }
 
-/** 账本与便签的容量口径：条数/总量超限先丢最旧的，避免隐藏上下文反过来吃掉 MAX_CONTEXT_CHARS */
+/** 账本与便签的容量口径：条数/总量超限先丢最旧的，避免隐藏上下文反过来吃掉模型上下文预算 */
 function trimHiddenEntries() {
     const kept = [];
     let totalRetained = 0;
@@ -606,7 +622,7 @@ function quoteTopicNearby(apiMessages) {
     let users = 0;
     for (let i = apiMessages.length - 1; i >= 0; i--) {
         const m = apiMessages[i];
-        if (m.kind === 'tool_trace' || m.kind === 'retained_data') continue;   // 隐藏条目里本身就带「K 线/行情」字样，不能当话题证据
+        if (m.kind === 'tool_trace' || m.kind === 'retained_data' || m.kind === 'compact_note') continue;   // 隐藏条目里本身就带「K 线/行情」字样，不能当话题证据
         if (m.role !== 'user' && m.role !== 'assistant') continue;
         if (typeof m.content === 'string' && re.test(m.content)) return true;
         if (Array.isArray(m.content) && re.test(flattenContent(m.content))) return true;
@@ -695,12 +711,68 @@ function msgChars(m) {
     return 0;
 }
 
-// 逐轮工具结果驱逐（T1-2）：上下文超预算时，把最旧几轮的 tool 结果换成存根。
+/** 估算一条消息的 token 量（content 可能为图片 parts 数组） */
+function estimateMsgTokens(m) {
+    if (typeof m.content === 'string') return estimateTokens(m.content) + estimateTokens(m.reasoning_content || '');
+    if (Array.isArray(m.content)) {
+        let n = 0;
+        for (const p of m.content) if (p && p.text) n += estimateTokens(p.text);
+        return n;
+    }
+    return 0;
+}
+
+/** 更新发送按钮左侧的上下文 token 环形指示器与悬浮面板（占比 / 颜色分级 / 明细文本） */
+function updateContextMeter(messages, tools, provider) {
+    const el = ctxMeter;
+    if (!el) return;
+    let used = 0;
+    for (const m of messages || []) used += estimateMsgTokens(m);
+    if (tools && tools.length) used += estimateTokens(JSON.stringify(tools));
+    const limit = maxContextTokens(provider);
+    const pct = limit > 0 ? used / limit : 0;
+    el.classList.toggle('lv-green', pct < 0.4);
+    el.classList.toggle('lv-orange', pct >= 0.4 && pct < 0.6);
+    el.classList.toggle('lv-red', pct >= 0.6);
+    const arc = el.querySelector('.ctx-meter-arc');
+    if (arc) {
+        const c = 2 * Math.PI * 6.5;
+        arc.style.strokeDasharray = (Math.min(pct, 1) * c).toFixed(2) + ' ' + c.toFixed(2);
+    }
+    const model = (provider && provider.model) || '';
+    const txt = used.toLocaleString('en-US') + ' / ' + limit.toLocaleString('en-US')
+        + ' (' + Math.round(pct * 100) + '%) ' + model
+        + (state.contextEvicted ? ' [压缩]' : '');
+    // 悬浮面板：细长进度条宽度 + 明细文本（fill 颜色继承 ctx-meter 的 lv-* 色，与圆环一致）
+    const panel = ctxPanel;
+    if (panel) {
+        const fill = panel.querySelector('.ctx-panel-fill');
+        if (fill) fill.style.width = (Math.min(pct, 1) * 100).toFixed(2) + '%';
+        const textEl = panel.querySelector('.ctx-panel-text');
+        if (textEl) textEl.textContent = txt;
+    }
+}
+
+// 悬浮面板显隐：进入圆环显示；中间经过 8px 间隙用 150ms 宽限衔接；移出面板即隐藏
+let ctxPanelTimer = 0;
+function showCtxPanel() {
+    clearTimeout(ctxPanelTimer);
+    if (ctxPanel) ctxPanel.hidden = false;
+}
+function hideCtxPanelSoon() {
+    clearTimeout(ctxPanelTimer);
+    ctxPanelTimer = setTimeout(() => { if (ctxPanel) ctxPanel.hidden = true; }, 150);
+}
+
+// 逐轮工具结果驱逐（T1-2）：上下文估算 token 超预算时，把最旧几轮的 tool 结果换成存根。
+// 预算 = 当前所用模型的最大上下文 token 数（见 ai_state.js maxContextTokens，受设置里「□ 1M」开关影响，
+// 勾选按 1M、否则按 256k）——由旧版固定 24000 字符改为动态读取模型支持长度。
 // 只改 content，保留 role/tool_call_id 配对合法性（assistant.tool_calls 必须能找到对应 tool 消息）；
 // 末尾连续的 tool 消息 = 最近一轮结果，不得驱逐，模型丢了旧数据可按存根里的工具名重新取数。
-function evictToolResults(apiMessages) {
-    let total = apiMessages.reduce((n, m) => n + msgChars(m), 0);
-    if (total <= MAX_CONTEXT_CHARS) return 0;
+function evictToolResults(apiMessages, provider) {
+    const budget = maxContextTokens(provider);
+    let totalTokens = apiMessages.reduce((n, m) => n + estimateMsgTokens(m), 0);
+    if (totalTokens <= budget) return 0;
     // tool_call_id -> 工具名（存根里告诉模型是谁被归档了）
     const nameByCallId = new Map();
     for (const m of apiMessages) {
@@ -713,25 +785,175 @@ function evictToolResults(apiMessages) {
     while (lastRoundFrom > 0 && apiMessages[lastRoundFrom - 1].role === 'tool') lastRoundFrom--;
     let evicted = 0;
     for (let i = 0; i < lastRoundFrom; i++) {
-        if (total <= MAX_CONTEXT_CHARS) break;
+        if (totalTokens <= budget) break;
         const m = apiMessages[i];
         if (m.role !== 'tool' || m.evicted) continue;
         const raw = typeof m.content === 'string' ? m.content : '';
         const toolName = nameByCallId.get(m.tool_call_id) || '工具';
         const stub = '«' + toolName + ': 早先的 ' + raw.length + ' 字结果已驱逐归档（需重新查看请再次调用该工具）»';
-        total -= raw.length - stub.length;
+        totalTokens -= estimateMsgTokens(m) - estimateTokens(stub);
         m.content = stub;
         m.evicted = true;
         evicted++;
     }
     if (evicted) {
-        record('evict', { 驱逐条数: evicted, 驱逐后字符: total, 预算: MAX_CONTEXT_CHARS });
+        state.contextEvicted = true;
+        record('evict', { 驱逐条数: evicted, 驱逐后估算token: totalTokens, 预算token: budget, 预算字符参考: contextBudgetChars(provider) });
         appendMessage('system', '上下文超过预算，已将最早 ' + evicted + ' 条工具结果归档（需要时可重新取数）');
-    } else if (total > MAX_CONTEXT_CHARS) {
+    } else if (totalTokens > budget) {
         // 只剩最近一轮仍超预算：不再驱逐（会弄坏当前分析），只记日志供调上限
-        record('evict', { 未驱逐: true, 当前字符: total, 预算: MAX_CONTEXT_CHARS });
+        record('evict', { 未驱逐: true, 当前估算token: totalTokens, 预算token: budget, 预算字符参考: contextBudgetChars(provider) });
     }
     return evicted;
+}
+
+// ============== 手动上下文压缩（/compact，类似其他 Agent 的 /compact 能力） ==============
+
+const COMPACT_SYSTEM_PROMPT = '你是对话历史压缩器。下面是一段 AI 股票助手的完整对话记录。\n'
+    + '请把它压缩成一段结构化中文摘要（供后续续聊时回灌给模型），要求：\n'
+    + '1. 保留用户的目标与已确认事实（股票名称/代码、持仓与组合变动、创建的要点/事件、关心的时间段等）；\n'
+    + '2. 保留已有结论与关键数值，注明数值来自哪次工具调用或哪份数据便签；纯推测性内容一律舍弃；\n'
+    + '3. 开头用一句话说明「当前进行到哪、下一步该做什么」；\n'
+    + '4. 不得新增对话中不存在的事实；行情数值只能原样转抄，并明示它们都是历史快照、需要最新数据必须重新取数；\n'
+    + '直接输出摘要正文，不要开场白、解释或引号包裹。\n'
+    + '注意：如果你的回答很短（比如只有"好的""收到"之类），那说明你不理解自己的任务——重新仔细阅读以上规则，输出一个包含具体内容的完整摘要。';
+
+/** 手动压缩当前会话：把整段对话交给模型压成摘要并替换历史，腾出上下文（/compact） */
+async function handleCompact() {
+    if (state.generating) {
+        appendMessage('system', 'AI 正在回复中，请稍后再压缩上下文');
+        return;
+    }
+    // 只取真实 user/assistant 消息（跳过隐藏条目），拼成一块纯文本让模型压缩
+    const visible = state.chatMessages.filter(m =>
+        m.kind !== 'tool_trace' && m.kind !== 'retained_data' && m.kind !== 'compact_note'
+    );
+    if (visible.length < 2) {
+        appendMessage('system', '对话内容太少，暂时不需要压缩');
+        return;
+    }
+    // 拼装对话文本
+    const parts = [];
+    for (const m of visible) {
+        const role = m.role === 'user' ? '用户' : 'AI';
+        let text = '';
+        if (typeof m.content === 'string') text = m.content;
+        else if (Array.isArray(m.content)) text = m.content.map(p => p && p.text || '').join(' ');
+        parts.push('### ' + role + '\n' + text);
+    }
+    const conversationText = parts.join('\n\n');
+    // 工具账本摘要（简明格式）
+    const toolSummary = state.chatMessages
+        .filter(m => m.kind === 'tool_trace')
+        .flatMap(m => (m.calls || []))
+        .filter(c => c && c.name && c.name !== 'retain_tool_data' && c.name !== 'load_tool_group')
+        .map(c => (c.ok !== false ? '+ ' : '- ') + c.name)
+        .join('\n');
+    const provider = selectRequestProvider(visible.map(m => ({ role: m.role, content: m.content })));
+    if (!String(provider.apiKey || '').trim()) {
+        appendMessage('error', '请先在 AI 设置中配置 API Key，再执行压缩');
+        return;
+    }
+    // 只发一条 system 消息：把对话文本 + 工具清单嵌入其中，不让模型搞混角色
+    const systemPrompt = COMPACT_SYSTEM_PROMPT
+        + '\n\n=== 以下是要压缩的对话 ===\n\n' + conversationText
+        + (toolSummary ? '\n\n=== 本轮工具调用 ===\n' + toolSummary : '')
+        + '\n\n=== 结束 ===\n请直接输出压缩后的结构化中文摘要，不要开场白、解释或引号包裹。';
+    appendMessage('system', '正在压缩上下文…（将用一次非流式模型调用生成摘要）');
+    setGenerating(true);
+    try {
+        const result = await sendRound(
+            [{ role: 'system', content: systemPrompt }],
+            [],
+            { stream: false, provider, suppressRender: true },
+        );
+        if (!result.ok) {
+            appendMessage('error', '压缩失败：' + (result.error || '未知错误'));
+            return;
+        }
+        const summary = String(result.content || '').trim();
+        if (!summary) {
+            appendMessage('error', '压缩失败：模型返回为空');
+            return;
+        }
+        await applyCompact(summary, provider);
+    } catch (err) {
+        console.error('[thswc:ai] 压缩失败:', err);
+        appendMessage('error', '压缩失败：' + err.message);
+    } finally {
+        setGenerating(false);
+    }
+}
+
+/** 按 token 估算截断文本：返回 { display, truncated, tokens }，保证 display 的估算 token ≤ maxTokens */
+function cutToTokens(text, maxTokens) {
+    const s = String(text == null ? '' : text);
+    if (!s) return { display: s, truncated: false, tokens: 0 };
+    const total = estimateTokens(s);
+    if (total <= maxTokens) return { display: s, truncated: false, tokens: total };
+    let lo = 0, hi = s.length;
+    while (lo < hi) {
+        const mid = (lo + hi + 1) >> 1;
+        if (estimateTokens(s.slice(0, mid)) <= maxTokens) lo = mid;
+        else hi = mid - 1;
+    }
+    return { display: s.slice(0, lo), truncated: true, tokens: estimateTokens(s.slice(0, lo)) };
+}
+
+/** 压缩成功后把摘要流式输出到对话框页面（只展示前 COMPACT_PREVIEW_TOKENS token，剩余不展示） */
+function streamCompactOutput(text) {
+    const preview = cutToTokens(text, COMPACT_PREVIEW_TOKENS);
+    const el = document.createElement('div');
+    el.className = 'msg msg-assistant';
+    messagesEl.appendChild(el);
+    const STEP = 24;
+    let shown = '';
+    let i = 0;
+    return new Promise((resolve) => {
+        const timer = setInterval(() => {
+            if (i < preview.display.length) {
+                const chunk = preview.display.slice(i, i + STEP);
+                i += STEP;
+                shown += chunk;
+                el.innerHTML = mdToHtml(shown);
+                maybeScroll();
+                return;
+            }
+            clearInterval(timer);
+            if (preview.truncated) {
+                shown += '\n\n> 由于上下文过长，以上仅展示前 ' + COMPACT_PREVIEW_TOKENS.toLocaleString('en-US')
+                    + ' token（约 ' + preview.display.length + ' 字），其余内容不在页面展示；完整摘要已回灌给模型，仍可继续对话。';
+                el.innerHTML = mdToHtml(shown);
+                maybeScroll();
+            }
+            resolve();
+        }, 12);
+    });
+}
+
+/** 用模型生成的摘要替换整段会话历史（kind:'compact_note'，仅回灌给模型），并把摘要流式输出到页面供查看 */
+async function applyCompact(summary, provider) {
+    const replaced = state.chatMessages.length;
+    const entry = {
+        role: 'user',
+        kind: 'compact_note',
+        content: '【会话压缩摘要】\n' + summary
+            + '\n\n（以上是先前对话由模型生成的压缩摘要，非用户本次发言；摘要中的行情数值均为历史快照，回答时需要最新数据必须重新调用工具取数）',
+        sourceChars: state.chatMessages.reduce((n, m) => n + msgChars(m), 0),
+        ts: Date.now(),
+        uid: genUid('m'),
+    };
+    state.chatMessages = [entry];
+    state.contextEvicted = true;  // 已压缩：tooltip 显示 [压缩]
+    state.followStream = true;
+    trimChat();
+    saveChat();
+    // 清除旧对话气泡与「正在压缩」提示，让页面内容只呈现压缩摘要
+    for (const el of [...messagesEl.querySelectorAll('.msg, .msg-actions')]) el.remove();
+    await streamCompactOutput(entry.content);
+    appendMessage('system', '上下文已压缩：原 ' + replaced + ' 条消息 → 摘要 ' + entry.content.length + ' 字（页面仅展示前 ' + COMPACT_PREVIEW_TOKENS.toLocaleString('en-US') + ' token）');
+    updateContextMeter(state.chatMessages.map(toApiMessage), [], provider);
+    record('compact', { 原消息数: replaced, 原字符: entry.sourceChars, 摘要字符: entry.content.length });
 }
 
 // ============== 渲染 ==============
@@ -1121,6 +1343,15 @@ function renderHistory() {
                 appendMessage('system', '已登记的跨轮数据便签（仅回灌给模型，界面不展开）：' + m.source + '·' + (m.chars || 0) + ' 字');
                 continue;
             }
+            if (m.kind === 'compact_note') {
+                // 从历史恢复时把压缩摘要展示为可见消息（同样只截取前 COMPACT_PREVIEW_TOKENS token）
+                const preview = cutToTokens(m.content || '', COMPACT_PREVIEW_TOKENS);
+                const txt = (preview.display || '(空)')
+                    + (preview.truncated ? '\n\n> 由于上下文过长，以上仅展示前 ' + COMPACT_PREVIEW_TOKENS.toLocaleString('en-US')
+                        + ' token（约 ' + preview.display.length + ' 字），其余内容不在页面展示。' : '');
+                appendMessage('user', txt);
+                continue;
+            }
             appendMessage(m.role === 'user' ? 'user' : 'assistant', m.content || '', m);
         }
         state.followStream = true;
@@ -1222,6 +1453,8 @@ async function switchSession(id, debugReason = 'switch') {
     await saveChat();
     state.currentChatId = id;
     state.chatMessages = state.sessions[id].messages || [];
+    state.contextEvicted = state.chatMessages.some(m => m.kind === 'compact_note');
+    updateContextMeter(state.chatMessages.map(toApiMessage), [], activeProvider());
     state.pendingImages = [];
     renderPastePreviews();
     renderHistory();
@@ -1271,6 +1504,8 @@ async function deleteSession() {
 async function clearSession() {
     if (!confirm('清空当前会话的全部消息？长期记忆不受影响')) return;
     state.chatMessages = [];
+    state.contextEvicted = false;
+    updateContextMeter([], [], activeProvider());
     messagesEl.innerHTML = '';
     state.pendingImages = [];
     renderPastePreviews();
@@ -1553,6 +1788,8 @@ async function parseAndRecordStockTrade(raw) {
 async function handleSend() {
     const text = chatInput.value.trim();
     if (!text && state.pendingImages.length === 0) return;
+    // 手动压缩指令（发送框旁「压缩」按钮等价）
+    if (text === '/compact' || text === '/压缩') { handleCompact(); return; }
     if (state.generating) return;
     await reauthorizePendingInGesture();
     await ensureChat();
@@ -1663,6 +1900,12 @@ async function continueGeneration() {
 
 function bindEvents() {
     sendBtn.addEventListener('click', handleSend);
+    compactBtn.addEventListener('click', handleCompact);
+    // 悬浮面板显隐：悬停圆环显示，移出面板（或圆环与面板之间的间隙）即隐藏
+    ctxMeter.addEventListener('mouseenter', showCtxPanel);
+    ctxMeter.addEventListener('mouseleave', hideCtxPanelSoon);
+    ctxPanel?.addEventListener('mouseenter', showCtxPanel);
+    ctxPanel?.addEventListener('mouseleave', hideCtxPanelSoon);
     chatInput.addEventListener('keydown', (event) => {
         if (event.key === 'Enter' && !event.shiftKey) {
             event.preventDefault();
@@ -1722,6 +1965,7 @@ async function init() {
                 renderProviderSelect();
                 fillProviderInputs();
                 renderDefaultVisionProviderSelect();
+                updateContextMeter(state.chatMessages.map(toApiMessage), [], activeProvider());
             });
         }
         if (changes.bridgeEnabled) {
@@ -1744,6 +1988,9 @@ async function init() {
     renderSessionSelect();
     await refreshDirStatus();
     bindEvents();
+    // 初始渲染环形指示器（基于已有历史消息；工具定义与后续多轮在 runAgentLoop 内更新）
+    state.contextEvicted = state.chatMessages.some(m => m.kind === 'compact_note');
+    updateContextMeter(state.chatMessages.map(toApiMessage), [], activeProvider());
     window.addEventListener('click', function autoReauthOnce(e) {
         if (!dirStatusBar.contains(e.target)) reauthorizePendingInGesture();
         window.removeEventListener('click', autoReauthOnce);

@@ -51,9 +51,15 @@
 | **全局可控**       | 按需启用/关闭各功能模块，不用的不占空间                                                                     |
 | **一键迁移**       | 导出/导入完整数据，快速无缝迁移到其他设备                                                                   |
 
-![AI分析演示](images/README/ai分析.gif) _AI 对话自然语言操作_
+## 常规用法
 
-![一键导入演示](images/README/一键导入.gif) _一键批量导入股票到组合_
+![快速打开演示](images/README/1-快速打开.gif) _快速打开K线图_
+
+![一键导入演示](images/README/2-一键导入.gif) _一键批量导入股票到组合_
+
+![AI分析演示](images/README/3-AI分析.gif) _Agent 快速分析股票k线_
+
+![AI联动演示](images/README/4-AI联动.gif) _Agent 与插件联动_
 
 ## 快速开始
 

@@ -64,7 +64,7 @@
 | **ai/core/ai_guard.js**（纯函数三态判定：放行/注解/丢弃）                       | 输出拦截（Guard）           | 只针对行情反编造，不覆盖通用内容                                               |
 | **ai/core/ai_debug.js**（会话全程记录+容量上限+回放）                           | 轨迹日志                    | 完全一致                                                                       |
 | **chrome.storage.sync** + `.gitignore` + 日志脱敏 + 提示词硬规则                | 密钥/凭证保护               | 多一层 Git 级别防护（自动忽略 `config.json`）                                  |
-| **`flit/` 写约束**（文件只能写 `flit/` 下）+ 工作流自动发现（`flit/workflow/`） | 工作目录隔离 + 可复用工作流 | AI 只能写 `flit/`，读及全目录但受 Chrome 授权管辖                              |
+| **`flit/` 写约束**（文件只能写 `flit/` 下）+ 工作流自动发现（`flit/workflow/`） | 工作目录隔离 + 可复用工作流 | AI 只能写 `flit/`，读全目录但受 Chrome 授权管辖                                |
 
 ## 常规用法演示gif
 

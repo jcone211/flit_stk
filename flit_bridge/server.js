@@ -1,5 +1,6 @@
 const http = require('node:http');
 const fs = require('node:fs');
+const fsp = fs.promises;
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
@@ -10,6 +11,7 @@ const PROTOCOL_VERSION = 1;
 const MAX_BODY = 1024 * 1024;
 const MAX_OUTPUT = 50000;
 const contextCache = new Map();
+const validatedRoots = new Set();
 const running = new Map();
 
 const json = (res, status, value) => {
@@ -28,19 +30,21 @@ function error(code, message, requestId, extra = {}) {
     return { ok: false, request_id: requestId, error: { code, message, ...extra } };
 }
 
-function readJson(file) {
-    try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; }
+async function readJson(file) {
+    try { return JSON.parse(await fsp.readFile(file, 'utf8')); } catch { return null; }
 }
 
-function readText(file) {
-    const buffer = fs.readFileSync(file);
-    const utf8 = buffer.toString('utf8');
-    if (!utf8.includes('\ufffd')) return utf8;
-    try { return new TextDecoder('gb18030').decode(buffer); } catch { return utf8; }
+async function readText(file) {
+    try {
+        const buffer = await fsp.readFile(file);
+        const utf8 = buffer.toString('utf8');
+        if (!utf8.includes('\ufffd')) return utf8;
+        try { return new TextDecoder('gb18030').decode(buffer); } catch { return utf8; }
+    } catch { return ''; }
 }
 
-function fileStamp(file) {
-    try { return fs.statSync(file).mtimeMs; } catch { return 0; }
+async function fileStamp(file) {
+    try { return (await fsp.stat(file)).mtimeMs; } catch { return 0; }
 }
 
 function extractMemory(memory) {
@@ -57,10 +61,11 @@ function extractMemoryStatus(memory) {
     return match[1].split(/\r?\n/).map(line => line.trim()).filter(Boolean).slice(0, 12);
 }
 
-function listWorkflows(root) {
+async function listWorkflows(root) {
     const dir = path.join(root, 'flit', 'workflow');
     try {
-        return fs.readdirSync(dir, { withFileTypes: true })
+        const entries = await fsp.readdir(dir, { withFileTypes: true });
+        return entries
             .filter(entry => entry.isFile() && /\.(md|json|ya?ml|mjs|cjs|js|py)$/i.test(entry.name))
             .map(entry => path.posix.join('flit/workflow', entry.name));
     } catch { return []; }
@@ -96,9 +101,13 @@ function inferLegacyConfig(text) {
     return { database: [database], market };
 }
 
-function workspaceContext(root, refresh = false) {
-    if (!root || !path.isAbsolute(root) || !fs.existsSync(root)) {
-        return { error: 'workspace_not_found', message: 'workspace_root 必须是存在的绝对路径' };
+async function workspaceContext(root, refresh = false) {
+    if (!root || !path.isAbsolute(root)) {
+        return { error: 'workspace_not_found', message: 'workspace_root 必须是绝对路径' };
+    }
+    if (!validatedRoots.has(root)) {
+        try { await fsp.access(root); validatedRoots.add(root); }
+        catch { return { error: 'workspace_not_found', message: 'workspace_root 必须是存在的绝对路径' }; }
     }
     const files = [
         path.join(root, 'flit', 'config.json'),
@@ -109,20 +118,23 @@ function workspaceContext(root, refresh = false) {
         path.join(root, 'AGENTS.md'),
         path.join(root, 'README.md'),
     ];
-    const stamps = [...files, ...fallbackFiles, path.join(root, 'flit', 'workflow')].map(file => fileStamp(file)).join(':');
+    const allPaths = [...files, ...fallbackFiles, path.join(root, 'flit', 'workflow')];
+    const stamps = (await Promise.all(allPaths.map(file => fileStamp(file)))).join(':');
     const cached = contextCache.get(root);
     if (!refresh && cached && cached.stamps === stamps) return { ...cached.value, cached: true, changed: false };
 
     const configFile = files[0];
-    const memoryFiles = files.slice(1).filter(file => fileStamp(file) > 0);
-    const config = readJson(configFile);
-    if (fileStamp(configFile) && !config) return { error: 'config_invalid', message: 'flit/config.json 不是有效 JSON' };
-    const memoryText = memoryFiles.map(readText).join('\n');
+    const fileStamps = await Promise.all(files.slice(1).map(file => fileStamp(file)));
+    const memoryFiles = files.slice(1).filter((_, i) => fileStamps[i] > 0);
+    const config = await readJson(configFile);
+    if (await fileStamp(configFile) && !config) return { error: 'config_invalid', message: 'flit/config.json 不是有效 JSON' };
+    const memoryText = (await Promise.all(memoryFiles.map(file => readText(file)))).join('\n');
     const hasPrimarySource = !!config || memoryFiles.length > 0;
-    const legacyFiles = hasPrimarySource ? [] : fallbackFiles.filter(file => fileStamp(file) > 0);
-    const text = [...memoryFiles, ...legacyFiles].map(readText).join('\n');
+    const legacyStampResults = await Promise.all(fallbackFiles.map(file => fileStamp(file)));
+    const legacyFiles = hasPrimarySource ? [] : fallbackFiles.filter((_, i) => legacyStampResults[i] > 0);
+    const text = (await Promise.all([...memoryFiles, ...legacyFiles].map(file => readText(file)))).join('\n');
     const inferred = inferLegacyConfig(text);
-    const workflows = listWorkflows(root);
+    const workflows = await listWorkflows(root);
     const value = {
         workspace_root: root,
         protocol_version: PROTOCOL_VERSION,
@@ -156,13 +168,18 @@ function allowedProgram(program) {
     return ['docker', 'docker.exe', 'git', 'git.exe', 'node', 'node.exe', 'npm', 'npm.cmd', 'psql', 'psql.exe', 'python', 'python.exe', 'python3', 'python3.exe'].includes(name);
 }
 
-function writeWorkspaceMemory(root, content, databaseStatus = '') {
-    if (!root || !path.isAbsolute(root) || !fs.existsSync(root)) return error('workspace_not_found', 'workspace_root 必须是存在的绝对路径');
+async function writeWorkspaceMemory(root, content, databaseStatus = '') {
+    if (!root || !path.isAbsolute(root)) return error('workspace_not_found', 'workspace_root 必须是绝对路径');
+    if (!validatedRoots.has(root)) {
+        try { await fsp.access(root); validatedRoots.add(root); }
+        catch { return error('workspace_not_found', 'workspace_root 必须是存在的绝对路径'); }
+    }
     const entry = String(content || '').trim();
     if (!entry) return error('argument_invalid', 'memory 内容不能为空');
     const memoryFile = path.join(root, 'flit', 'memory.md');
-    fs.mkdirSync(path.dirname(memoryFile), { recursive: true });
-    const existing = fs.existsSync(memoryFile) ? readText(memoryFile).trimEnd() : '';
+    await fsp.mkdir(path.dirname(memoryFile), { recursive: true });
+    let existing = '';
+    try { existing = (await readText(memoryFile)).trimEnd(); } catch {}
     const statusHeader = '## 数据库连接状态';
     const workflowHeader = '## 可复用流程与查询约定';
     let normalized = existing;
@@ -174,7 +191,7 @@ function writeWorkspaceMemory(root, content, databaseStatus = '') {
         normalized = normalized.replace(/(## 数据库连接状态\s*\r?\n)([\s\S]*?)(?=\r?\n##\s|$)/i, `$1- status: ${databaseStatus.toLowerCase()}\n`);
     }
     if (!new RegExp(`(^|\\n)${workflowHeader}\\s*\\n`, 'm').test(normalized)) normalized += `\n\n${workflowHeader}\n`;
-    fs.writeFileSync(memoryFile, `${normalized.trimEnd()}\n\n- ${entry}\n`, 'utf8');
+    await fsp.writeFile(memoryFile, `${normalized.trimEnd()}\n\n- ${entry}\n`, 'utf8');
     contextCache.delete(root);
     return { ok: true, path: path.relative(root, memoryFile), written: entry.length };
 }
@@ -236,7 +253,7 @@ function runProcess({ requestId, program, argv = [], cwd, stdin = '', timeoutMs 
 
 async function databaseQuery(body, requestId) {
     const root = body.workspace_root;
-    const ctx = workspaceContext(root, false);
+    const ctx = await workspaceContext(root, false);
     if (ctx.error) return error(ctx.error, ctx.message, requestId);
     const sources = Array.isArray(ctx.context.database) ? ctx.context.database : [ctx.context.database];
     const source = sources.find(item => item && item.name === body.source) || sources.find(Boolean);
@@ -265,7 +282,7 @@ async function databaseQuery(body, requestId) {
 }
 
 async function databaseSchema(body, requestId) {
-    const ctx = workspaceContext(body.workspace_root, false);
+    const ctx = await workspaceContext(body.workspace_root, false);
     if (ctx.error) return error(ctx.error, ctx.message, requestId);
     const sources = Array.isArray(ctx.context.database) ? ctx.context.database : [ctx.context.database];
     const source = sources.find(item => item && item.name === body.source) || sources.find(Boolean);
@@ -288,8 +305,8 @@ async function handle(req, res, body) {
     const requestId = body?.request_id || `req_${crypto.randomBytes(6).toString('hex')}`;
     const url = new URL(req.url, `http://${HOST}:${PORT}`);
     if (req.method === 'GET' && url.pathname === '/health') return json(res, 200, { ok: true, protocol_version: PROTOCOL_VERSION, service: 'flit_bridge' });
-    if (req.method === 'POST' && url.pathname === '/v1/workspace/context') return json(res, 200, workspaceContext(body.workspace_root, !!body.refresh));
-    if (req.method === 'POST' && url.pathname === '/v1/workspace/memory') return json(res, 200, writeWorkspaceMemory(body.workspace_root, body.content, body.database_status));
+    if (req.method === 'POST' && url.pathname === '/v1/workspace/context') return json(res, 200, await workspaceContext(body.workspace_root, !!body.refresh));
+    if (req.method === 'POST' && url.pathname === '/v1/workspace/memory') return json(res, 200, await writeWorkspaceMemory(body.workspace_root, body.content, body.database_status));
     if (req.method === 'POST' && url.pathname === '/v1/database/query') return json(res, 200, await databaseQuery(body, requestId));
     if (req.method === 'POST' && url.pathname === '/v1/database/schema') return json(res, 200, await databaseSchema(body, requestId));
     if (req.method === 'POST' && url.pathname === '/v1/process') {

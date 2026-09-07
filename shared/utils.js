@@ -12,7 +12,8 @@ export function safeDecodeUrl(url) {
 export function normalizeUrl(raw) {
     if (!raw) return null;
     try {
-        return new URL(raw).href;
+        const compact = String(raw).replace(/%20/gi, '').replace(/\s+/g, '');
+        return new URL(compact).href;
     } catch {
         return null;
     }

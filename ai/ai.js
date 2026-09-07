@@ -1771,18 +1771,35 @@ async function parseAndRecordStockTrade(raw) {
     } else if (buyM) {
         name = text.slice(buyM[0].length);
     }
-    name = name.replace(/[。！!？?.,，、；;]+$/g, '').trim();
+    name = name
+        .replace(/(?:买入价|买入价格|成交价|价格|成交金额)\s*[:：]?\s*[0-9]+(?:\.[0-9]+)?/g, '')
+        .replace(/[。！!？?.,，、；;]+$/g, '')
+        .trim();
     if (!name) return { ok: false, text: '未识别到股票名称，请填写如「我买入了贵州茅台」' };
+    const priceMatch = text.match(/(?:买入价|买入价格|成交价|价格)\s*[:：]?\s*([0-9]+(?:\.[0-9]+)?)/);
+    const amountMatch = text.match(/成交金额\s*[:：]?\s*([0-9]+(?:\.[0-9]+)?)/);
+    const recordFields = [
+        `操作日期：${todayStr()}`,
+        `操作：${action === 'buy' ? '买入' : '卖出'}`,
+        `股票名称：${name}`,
+    ];
+    if (priceMatch) recordFields.push(`买入价格：${priceMatch[1]}`);
+    if (amountMatch) recordFields.push(`成交金额：${amountMatch[1]}`);
+    const recordRes = await toolExecutors.append_file({
+        path: 'flit/买入卖出.md',
+        content: '- ' + recordFields.join('；') + '\n',
+    });
+    const recordNote = recordRes && recordRes.error ? `；交易记录写入失败：${recordRes.error}` : '';
     if (action === 'buy') {
         const res = await toolExecutors.add_stock_to_portfolio({ names: [name], portfolio: '持仓' });
-        if (res && res.error) return { ok: false, text: res.error };
-        return { ok: true, text: `已将「${name}」加入【持仓】组合${res && res.hint ? '（' + res.hint + '）' : ''}` };
+        if (res && res.error) return { ok: false, text: res.error + recordNote };
+        return { ok: true, text: `已将「${name}」加入【持仓】组合${res && res.hint ? '（' + res.hint + '）' : ''}${recordNote}` };
     }
     const res = await toolExecutors.move_stock_to_combo({ name, target_portfolio: '观察', source_portfolio: '持仓' });
-    if (res && res.error) return { ok: false, text: res.error };
-    if (res && res.removed) return { ok: true, text: `观察组合已有「${name}」，已从【持仓】删除，不再重复添加` };
-    if (res && res.already) return { ok: true, text: `「${name}」已在【观察】组合中` };
-    return { ok: true, text: `已将「${name}」从【持仓】移动到【观察】组合` };
+    if (res && res.error) return { ok: false, text: res.error + recordNote };
+    if (res && res.removed) return { ok: true, text: `观察组合已有「${name}」，已从【持仓】删除，不再重复添加${recordNote}` };
+    if (res && res.already) return { ok: true, text: `「${name}」已在【观察】组合中${recordNote}` };
+    return { ok: true, text: `已将「${name}」从【持仓】移动到【观察】组合${recordNote}` };
 }
 
 async function handleSend() {

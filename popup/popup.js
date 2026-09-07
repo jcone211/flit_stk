@@ -412,9 +412,10 @@ function moveStockToCombo(stock, targetComboName) {
         portfolios[targetComboName].stockList = [];
     }
     portfolios[targetComboName].stockList.push(stock);
-    // 同步更新当前组合的存储
+    // 同步更新当前组合镜像；后台落地会同时读取 stockList 和 portfolios，
+    // 只写 portfolios 会让全量刷新把旧股票从镜像写回当前组合。
     portfolios[activePortfolio].stockList = stockList;
-    chrome.storage.local.set({ portfolios }, () => {
+    chrome.storage.local.set({ portfolios, stockList }, () => {
         renderStockList();
         refreshCombos();
     });

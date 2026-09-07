@@ -40,6 +40,8 @@ const CRON_ALARM_PREFIX = 'cronJob:';
 // 超过窗口仍未关闭的旧抓取继续按丢弃处理
 const ALLOW_CAPTURE_WINDOW_MS = 300000;
 let allowCapturedUntil = 0;
+// 用于取消已启动但尚未完成的全量刷新队列/API 请求。
+let fullRefreshToken = 0;
 
 init();
 
@@ -90,9 +92,8 @@ function isMonitoredUrl(url) {
 chrome.action.onClicked.addListener(() => {
     chrome.storage.local.get('popupWindowId', ({ popupWindowId }) => {
         if (popupWindowId !== null && popupWindowId !== undefined) {
-            chrome.windows.remove(popupWindowId, () => {
-                chrome.storage.local.set({ popupWindowId: null });
-            });
+            // popupWindowId 由 windows.onRemoved 统一清理，避免关闭回调抢先置空。
+            chrome.windows.remove(popupWindowId);
         } else {
             // 分页后窗口高度按每页条数算，避免按全量股票列表撑高
             chrome.storage.local.get(['stockList', 'currentView'], (localData) => {
@@ -129,7 +130,9 @@ chrome.windows.onRemoved.addListener((closedWindowId) => {
                     clearMonitorAlarms();
                 }
                 if (!keepRefreshOnClose) {
-                    // 不继续全量刷新时，清掉 cron 定时器
+                    // 不继续全量刷新时，清掉 cron 定时器，并取消当前正在进行的全量刷新。
+                    fullRefreshToken++;
+                    allowCapturedUntil = 0;
                     chrome.alarms.getAll((alarms) => {
                         alarms.filter(a => a.name.startsWith(CRON_ALARM_PREFIX))
                             .forEach(a => chrome.alarms.clear(a.name));
@@ -695,14 +698,15 @@ function handleCronAlarm(id) {
 //   xiaoshi：小石大数据批量行情接口（需 apiKey）
 //   adata：新浪/腾讯公开行情（无需 Key）
 function refreshAllStocks(done) {
+    const token = ++fullRefreshToken;
     chrome.storage.sync.get('dataSource', ({ dataSource: ds }) => {
         const mode = ds || 'adata';
         if (mode === 'xiaoshi') {
-            refreshAllByApi(batchQuotes, 'apiKey', done, false);
+            refreshAllByApi(batchQuotes, 'apiKey', done, false, token);
         } else if (mode === 'adata') {
-            refreshAllByApi(adataBatchQuotes, null, done, false);
+            refreshAllByApi(adataBatchQuotes, null, done, false, token);
         } else {
-            refreshAllByTabs(done);
+            refreshAllByTabs(done, token);
         }
     });
 }
@@ -711,7 +715,7 @@ function refreshAllStocks(done) {
 // 按生效地址跨组合去重，每次只打开/刷新 1 支，间隔 1.2-2.8s 随机
 // （避免一次性打开全部页面造成压力），窗口不存在则新建（含首支股票），已存在则复用；
 // 完成后经回调返回实际刷新数量。刷新期间放开「未运行即丢弃」的抓取窗口
-function refreshAllByTabs(done) {
+function refreshAllByTabs(done, token) {
     allowCapturedUntil = Date.now() + ALLOW_CAPTURE_WINDOW_MS;
     chrome.storage.local.get(['portfolios'], ({ portfolios }) => {
         const seen = new Set();
@@ -731,6 +735,11 @@ function refreshAllByTabs(done) {
         let count = 0;
         const queue = urls.slice();
         const step = () => {
+            if (token !== fullRefreshToken) {
+                allowCapturedUntil = 0;
+                done && done(count);
+                return;
+            }
             if (queue.length === 0) { done && done(count); return; }
             const url = queue.shift();
             openOrRefreshStockTab(url).then(() => {
@@ -751,7 +760,7 @@ function refreshAllByTabs(done) {
 // keyName 为所需存储键（adata 等公开接口传 null 跳过 Key 检查）；
 // filter=true 时为定时监控语义：仅当前视图 + 非停止的股票（与页面刷新调度同款过滤）；
 // 请求发起后经回调返回请求股票数（数据落地由 popup 完成，与页面刷新模式一致）
-function refreshAllByApi(quoteFn, keyName, done, filter) {
+function refreshAllByApi(quoteFn, keyName, done, filter, token = null) {
     const getKey = keyName
         ? new Promise((resolve) => chrome.storage.sync.get(keyName, (res) => resolve(res[keyName] || '')))
         : Promise.resolve('');
@@ -783,6 +792,11 @@ function refreshAllByApi(quoteFn, keyName, done, filter) {
             if (codes.length === 0) { done && done(0); return; }
             quoteFn(codes, { apiKey })
                 .then(async (r) => {
+                    // 主窗口关闭后未勾选继续全量刷新：丢弃已返回但尚未落地的结果。
+                    if (!filter && token !== fullRefreshToken) {
+                        done && done(0);
+                        return;
+                    }
                     dbg('API 行情返回:', r.count, '只，缺失:', (r.missing_codes || []).join(',') || '无');
                     // 行情在 SW 落地（匹配 + 写库 + 阈值通知），不依赖 popup 存活
                     try {

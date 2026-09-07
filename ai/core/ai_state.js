@@ -1,6 +1,6 @@
 // ai_state.js —— 共享状态与基础工具（由其他 ai_*.js 模块引用）
 
-import { getDateTime } from '../../shared/utils.js';
+import { getDateTime, normalizeUrl } from '../../shared/utils.js';
 export { getDateTime };
 
 // 诊断日志
@@ -220,5 +220,5 @@ export function stockSearchUrl(item) {
         const p = item.startsWith('159') ? 'SZ' : 'SH';
         return `https://xueqiu.com/S/${p}${item}`;
     }
-    return `https://www.iwencai.com/screener/result?w=${encodeURIComponent(item)}&querytype=stock`;
+    return normalizeUrl(`https://www.iwencai.com/screener/result?w=${encodeURIComponent(item)}&querytype=stock`);
 }

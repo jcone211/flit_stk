@@ -6,7 +6,7 @@ export function createChromeNotification(stock, type, percentValue) {
     const direction = percentValue > 0 ? '涨幅' : '跌幅';
     chrome.notifications.create({
         type: 'basic',
-        iconUrl: chrome.runtime.getURL('icons/icon.png'),
+        iconUrl: chrome.runtime.getURL('icons/icon128.png'),
         title: '股价已达预定值',
         message: `【${stock.name}】${label}${direction}已达到${percentValue}%`,
         priority: 2

@@ -29,6 +29,10 @@ import { bridgeRequest, bridgeHealth } from './bridge_client.js';
 // add_stock_to_portfolio 跨调用共享的页面打开时序计数器
 let nextRefreshOneAt = 0;
 
+function isEtfName(name) {
+    return /ETF|交易型开放式|指数基金/i.test(String(name || ''));
+}
+
 export const TOOL_DEFS = [
     { type: 'function', function: { name: 'get_stock_list', description: '读取股票列表：不传 portfolio 读当前活动组合；传组合名读指定组合（组合名可用 get_portfolios 查询）', parameters: { type: 'object', properties: { portfolio: { type: 'string', description: '组合名，如「持仓」「观察」；缺省为当前活动组合' } }, required: [] } } },
     { type: 'function', function: { name: 'get_portfolios', description: '读取全部持仓组合结构（各组合名称与股票数量）及当前活动组合', parameters: { type: 'object', properties: {}, required: [] } } },
@@ -41,12 +45,12 @@ export const TOOL_DEFS = [
     { type: 'function', function: { name: 'create_event', description: '创建一条预测事件。事件内容(content)只填股票名称（如「百通能源」），禁止把分析/预测/操作文字写入 content；判断逻辑、时间与操作应体现为关联要点。关联要点(key_point_text)须优先从 get_key_points 已有的要点中选择（拿不准先用 get_key_points 查看现有要点再对应关联，不要臆造不存在的要点内容），现有要点与意图不完全匹配时才新建要点或留空。time 为 YYYY-MM-DD，缺省今天。若存在超过一周仍未归档的事件会一并提醒用户补充', parameters: { type: 'object', properties: { key_point_text: { type: 'string', description: '关联现有业已存在或本次新建的要点内容，可为空' }, content: { type: 'string', description: '事件内容，仅填股票名称' }, time: { type: 'string', description: '事件日期 YYYY-MM-DD' } }, required: ['content'] } } },
     { type: 'function', function: { name: 'update_event', description: '修改事件（按 id；已归档事件不可修改），可改关联要点/内容/日期/status（pending 待预测 / accurate 准确 / wrong 误判）。不能设置归档——归档只发生在手动点击或事件超 7 天且状态为准确/误判时自动进行，若刚改状态的事件因此被自动归档，结果会说明。当存在多条内容相同的事件时，默认修改其中 time 最早（最久远）的那条 id，并在回复中简略提醒用户还有其它日期存在相同内容事件', parameters: { type: 'object', properties: { id: { type: 'string', description: '事件 id（用 get_events 查询）' }, key_point_text: { type: 'string', description: '新的关联要点' }, content: { type: 'string', description: '新的事件内容' }, time: { type: 'string', description: '新的事件日期 YYYY-MM-DD' }, status: { type: 'string', description: '新状态：pending 待预测 / accurate 准确 / wrong 误判' } }, required: ['id'] } } },
     { type: 'function', function: { name: 'delete_event', description: '删除一条事件（按 id）', parameters: { type: 'object', properties: { id: { type: 'string', description: '事件 id（用 get_events 查询）' } }, required: ['id'] } } },
-    { type: 'function', function: { name: 'add_stock_to_portfolio', description: '按名称向指定组合批量添加一只或多只股票（组合缺省「持仓」）。自动生成问财搜索页作为监控地址，ETF（159/51/58 开头）走雪球个股页。一次调用可添加多只，调本工具即可，不需要再反复调多次', parameters: { type: 'object', properties: { names: { type: 'array', items: { type: 'string' }, description: '股票名称数组，如 ["贵州茅台", "五粮液"]；至少一项' }, portfolio: { type: 'string', description: '目标组合名，缺省「持仓」' } }, required: ['names'] } } },
+    { type: 'function', function: { name: 'add_stock_to_portfolio', description: '按名称向指定组合批量添加一只或多只普通股票（组合缺省「持仓」）。普通股票自动生成问财搜索页。ETF 禁止使用本工具自动导入：问财不支持 ETF，必须先在雪球 https://xueqiu.com 搜索并复制该 ETF 的个股地址，再手动新增该网址。一次调用可添加多只普通股票', parameters: { type: 'object', properties: { names: { type: 'array', items: { type: 'string' }, description: '普通股票名称数组，如 ["贵州茅台", "五粮液"]；ETF 请勿传入' }, portfolio: { type: 'string', description: '目标组合名，缺省「持仓」' } }, required: ['names'] } } },
     { type: 'function', function: { name: 'move_stock_to_combo', description: '把股票从来源组合移动到目标组合（按名称匹配、忽略首尾空格；来源缺省当前活动组合，目标缺省「观察」）。用于记录「卖出」等调仓：卖出时应传 source_portfolio 为实际持有该股的组合（通常「持仓」）；若目标组合已存在同名股票，则仅从来源组合删除、不重复添加', parameters: { type: 'object', properties: { name: { type: 'string', description: '股票名称' }, target_portfolio: { type: 'string', description: '目标组合名，缺省「观察」' }, source_portfolio: { type: 'string', description: '来源组合名（卖出的实际持仓组合），缺省当前活动组合' } }, required: ['name'] } } },
     { type: 'function', function: { name: 'get_current_view', description: '读取当前列表视图（股票列表或垃圾池）', parameters: { type: 'object', properties: {}, required: [] } } },
     { type: 'function', function: { name: 'get_settings', description: '读取扩展全局设置（刷新间隔/选择器/分页/cron 定时任务，不含任何密钥）', parameters: { type: 'object', properties: {}, required: [] } } },
     { type: 'function', function: { name: 'update_cron', description: '直接修改 Cron 并返回新配置和后续执行时间', parameters: { type: 'object', properties: { operation: { type: 'string', enum: ['add', 'update', 'delete', 'enable', 'disable'] }, target: { type: 'string', description: '任务序号、任务 ID 或当前表达式；新增时可省略' }, expr: { type: 'string', description: '目标 Cron 表达式；删除时省略' } }, required: ['operation'] } } },
-    { type: 'function', function: { name: 'save_memory', description: '保存一条长期记忆（用户偏好/习惯等），之后每轮对话都会注入；同时更新当前工作目录 flit/memory.md', parameters: { type: 'object', properties: { content: { type: 'string', description: '要记住的内容' } }, required: ['content'] } } },
+    { type: 'function', function: { name: 'save_memory', description: '保存一条长期记忆（仅限用户偏好/习惯等）。当前持仓、买入卖出记录不得使用本工具，必须直接追加到 flit/买入卖出.md；普通记忆之后每轮对话都会注入，同时更新 flit/memory.md', parameters: { type: 'object', properties: { content: { type: 'string', description: '要记住的用户偏好或习惯；不要传当前持仓或买卖记录' } }, required: ['content'] } } },
     { type: 'function', function: { name: 'refresh_all', description: '触发扩展全量刷新全部组合股票（按全局设置的数据获取方式执行）', parameters: { type: 'object', properties: {}, required: [] } } },
     { type: 'function', function: { name: 'list_workspaces', description: '列出已授权的全部工作目录（主目录与附加目录）及其权限状态', parameters: { type: 'object', properties: {}, required: [] } } },
     { type: 'function', function: { name: 'list_dir', description: '列出工作目录（或子目录）内容。root 缺省为主目录，可传附加目录名；软链接条目无法访问（浏览器安全限制）', parameters: { type: 'object', properties: { path: { type: 'string', description: '相对所选目录的路径，空为根目录' }, root: { type: 'string', description: '工作目录名，可用 list_workspaces 查询；缺省为主目录' } }, required: [] } } },
@@ -63,7 +67,7 @@ export const TOOL_DEFS = [
     { type: 'function', function: { name: 'discover_database_schema', description: '读取当前本地数据库真实表和字段结构，避免猜测字段名；结果仅返回结构化 schema 摘要', parameters: { type: 'object', properties: { source: { type: 'string' }, timeout_ms: { type: 'integer' } }, required: [] } } },
     { type: 'function', function: { name: 'query_local_database', description: '使用当前工作区配置查询本地数据库，返回结构化 JSON 行，无需读取记忆文件或拼接 Docker/PowerShell 命令', parameters: { type: 'object', properties: { sql: { type: 'string' }, source: { type: 'string' }, columns: { type: 'array', items: { type: 'string' } }, timeout_ms: { type: 'integer' }, debug: { type: 'boolean' } }, required: ['sql'] } } },
     { type: 'function', function: { name: 'save_workspace_database_config', description: '保存已验证可用的完整数据库连接配置到 flit/config.json，并自动创建 flit/.gitignore 忽略 config.json；仅在数据库连接实际验证成功后调用，凭据不会写入记忆文件', parameters: { type: 'object', properties: { config: { type: 'object', description: '完整工作区配置对象，必须包含 data_sources；可包含 version、market 等字段' }, source: { type: 'object', description: '已验证的数据源对象，包含 name、type、access、host、port、database、user、password 或 url 等实际连接字段' } }, required: ['source'] } } },
-    { type: 'function', function: { name: 'record_workspace_memory', description: '按固定格式将不含凭据的已确认经验追加到 flit/memory.md；文件最上方必须保留“## 数据库连接状态”并优先记录连接是否已验证，后续记录 workflow 入口和查询约定；若经验对应可复用流程，先创建 flit/workflow/ 下描述清晰的通用流程，再登记入口；不能修改 flit/ 之外的文件', parameters: { type: 'object', properties: { content: { type: 'string' }, database_status: { type: 'string', enum: ['verified', 'unverified', 'unknown'], description: '当前数据库连接状态；已实际连接成功时传 verified' } }, required: ['content'] } } },
+    { type: 'function', function: { name: 'record_workspace_memory', description: '仅将不含凭据的工作区/数据库经验按固定格式追加到 flit/memory.md；当前持仓、买入卖出记录不得使用本工具，必须直接追加到 flit/买入卖出.md。文件最上方必须保留“## 数据库连接状态”并优先记录连接是否已验证，后续记录 workflow 入口和查询约定；若经验对应可复用流程，先创建 flit/workflow/ 下描述清晰的通用流程，再登记入口；不能修改 flit/ 之外的文件', parameters: { type: 'object', properties: { content: { type: 'string' }, database_status: { type: 'string', enum: ['verified', 'unverified', 'unknown'], description: '当前数据库连接状态；已实际连接成功时传 verified' } }, required: ['content'] } } },
     { type: 'function', function: { name: 'run_workspace_process', description: '在当前工作目录内执行程序或脚本；cwd 使用相对路径，可执行 flit/ 外已有脚本和 flit/ 内新建脚本，支持 Python、Node、Git、Docker 等。禁止用此工具启动 flit_bridge；桥接未启动时必须把 bridge_health 返回的 pwsh 启动命令（含 start_note 安装说明）原样输出给用户，让用户自行执行后再继续', parameters: { type: 'object', properties: { program: { type: 'string' }, argv: { type: 'array', items: { type: 'string' } }, cwd: { type: 'string' }, stdin: { type: 'string' }, timeout_ms: { type: 'integer' } }, required: ['program'] } } },
     { type: 'function', function: { name: 'bridge_health', description: '检查本地 flit_bridge HTTP 服务是否在线。若未启动，只返回供用户手动执行的 pwsh 启动命令（含 start_note 说明是否首次启用需跑 install）；Agent 不得调用任何工具自行启动桥接服务', parameters: { type: 'object', properties: {}, required: [] } } },
 ];
@@ -78,7 +82,7 @@ export const TOOL_GROUPS = {
     bridge: ['get_workspace_context', 'discover_database_schema', 'query_local_database', 'save_workspace_database_config', 'record_workspace_memory', 'run_workspace_process', 'bridge_health'],
 };
 export const TOOL_GROUP_RULES = {
-    portfolio: '组合和股票工具：需要组合名时先读取组合结构，按用户指定组合操作。',
+    portfolio: '组合和股票工具：需要组合名时先读取组合结构，按用户指定组合操作。用户说买入或卖出股票时，必须先向 flit/买入卖出.md 追加交易记录，再尝试导入或从组合移除；无论单只/多只股票中有一只或多只导入失败、ETF 被排除、股票已被手动移除、或组合操作失败，都不能跳过记录。每条至少记录操作日期和股票名称；买入价格、成交金额只有用户提供时才记录，未提供的字段不要猜测或写占位值。追加写入，不得覆盖历史记录。买入/导入 ETF 时禁止调用 add_stock_to_portfolio，也禁止把 ETF 名称生成问财地址；ETF 必须从自动导入中排除。应自行打开 https://xueqiu.com 搜索相关 ETF，复制其个股网址后再手动新增股票。比如科创50ETF华夏应使用雪球地址 https://xueqiu.com/S/SH588000，而不是问财搜索页。',
     market: '行情工具：实时行情批量用 get_portfolio_quotes（一次返回组合全部股票）；多只股票日线用 read_stocks_kline（一次返回多只派生指标摘要），仅单只需要看原始 OHLCV 时才用 read_stock_kline。取数侧已做免费优先（本地数据库→新浪/腾讯实时、东财/同花顺日线→小石兜底）；日 K 按跨度分两档：≤7 个交易日不依赖桥接（没库就直接走免费，照样出数据），>7 个交易日为保护免费渠道只读本地库。工具返回 error 时照原样转述原因并给可行替代（改查 7 天内 / 改查实时现价 / 启用 Agent 桥接），不要重复调用同一工具。按名称查询就传 name/names，代码由工具解析，禁止自己猜代码。你不需要特意指定渠道；ETF 不在本地库内，由免费接口负责。若工具报「工作目录不存在可用数据库」，照原样转述给用户，不要改用其他工具硬凑 K 线（实时现价仍可查）。结论里要标数据日期：末行带 intraday 的是当日实时未收盘价（可称现价），不带的是已收盘日线（只能称"某日收盘"）；量能能不能当整日用看 实时拼接.量能说明。\n[上下文口径] tool 原始返回不跨轮保留（下一轮只剩一行「哪个工具成功/失败」的记录）；后面还要用这份数据就在本轮调 retain_tool_data 登记成隐藏便签，不必抄进正文。没登记又没写进正文的数据就是没了，只能重新调用（再花一次免费额度）。\n[强制取数] 输出任何行情数值（价格、涨跌幅、成交量、成交额、OHLCV、K 线表格、现价、收盘）前，本轮必须已经成功调用过行情工具（get_stock_quote / get_portfolio_quotes / read_stock_kline / read_stocks_kline）拿到真实数据；数据只能来自本轮工具返回或已登记且仍有效的跨轮便签。「≤7 个交易日不依赖本地库/桥接」只是说免费渠道能出数，绝不等于可以不调工具直接回答。用户改天数或换股票（例如 30 日改 7 日），必须重新调用取数工具，凭上一轮失败信息或记忆补写即视为编造。\n[禁止编造] 绝对禁止凭空编造行情数据。没有通过工具实际获取到真实数据前，不得输出价格数字、涨跌幅、跌停/涨停判定。宁可说「我没有查到」也不准编造。',
     events: '要点/事件工具：先读取已有要点；事件 content 只写股票名称。',
     settings: '设置工具：仅 Cron 可修改；修改前校验表达式，成功后立即生效。',
@@ -100,7 +104,7 @@ export const TOOL_GROUP_SUMMARY = {
     events: '交易要点与预测事件维护',
     settings: '全局设置（仅 Cron 可改）',
     workspace: '工作目录文件读写与 parquet 查询',
-    memory: '长期记忆保存',
+    memory: '长期记忆保存（仅用户偏好/习惯；当前持仓与买入卖出记录禁止调用 save_memory，直接追加到 flit/买入卖出.md）',
     bridge: '本地脚本执行与本地数据库查询',
 };
 
@@ -120,14 +124,18 @@ export const TOOL_CATALOG = Object.keys(TOOL_GROUPS).map(group => `${group}: ${T
 
 // 常驻工具：不经 load_tool_group冷加载，和 load_tool_group 一起每轮都发（所以描述要短）
 export const CONTEXT_TOOL_DEFS = [
-    { type: 'function', function: {
-        name: 'retain_tool_data',
-        description: '把本轮某个工具刚返回的原始数据登记为「跨轮上下文便签」：不进对话界面、不必抄进回复正文，下一轮起作为隐藏上下文回灌给你。tool 传本轮已调用且成功的工具名（如 read_stocks_kline），note 可选一句话说明用途。工具原始返回默认只在本轮有效，回复结束就没了；后续还要基于它分析就调本工具。',
-        parameters: { type: 'object', properties: {
-            tool: { type: 'string', description: '要保留的工具名（本轮调用过且成功）；不传则返回本轮可登记清单' },
-            note: { type: 'string', description: '可选：一句话说明这份数据的用途/口径，便于后续判断是否过期' },
-        }, required: [] },
-    } },
+    {
+        type: 'function', function: {
+            name: 'retain_tool_data',
+            description: '把本轮某个工具刚返回的原始数据登记为「跨轮上下文便签」：不进对话界面、不必抄进回复正文，下一轮起作为隐藏上下文回灌给你。tool 传本轮已调用且成功的工具名（如 read_stocks_kline），note 可选一句话说明用途。工具原始返回默认只在本轮有效，回复结束就没了；后续还要基于它分析就调本工具。',
+            parameters: {
+                type: 'object', properties: {
+                    tool: { type: 'string', description: '要保留的工具名（本轮调用过且成功）；不传则返回本轮可登记清单' },
+                    note: { type: 'string', description: '可选：一句话说明这份数据的用途/口径，便于后续判断是否过期' },
+                }, required: []
+            },
+        }
+    },
 ];
 
 // 工具描述送出字数上限（T1 控字符）。旧版把 description 压成「read stock kline」并删光参数描述，
@@ -351,6 +359,14 @@ export const toolExecutors = {
         const rawNames = Array.isArray(args.names) ? args.names : (args.name ? [args.name] : []);
         const names = rawNames.map(n => String(n).trim()).filter(Boolean);
         if (names.length === 0) return { error: '股票名称不能为空，请提供 names 数组' };
+        const etfNames = names.filter(isEtfName);
+        if (etfNames.length > 0) {
+            return {
+                error: `检测到 ETF「${etfNames.join('、')}」，已阻止自动导入。问财不支持 ETF，请打开 https://xueqiu.com 搜索相关 ETF，复制个股网址后手动新增股票。`,
+                manual_required: true,
+                excluded: etfNames,
+            };
+        }
         const portfolio = String(args.portfolio || '持仓').trim();
         const { portfolios, activePortfolio, stockList } = await storageGet(chrome.storage.local, ['portfolios', 'activePortfolio', 'stockList']);
         const combos = portfolios || {};
@@ -383,7 +399,7 @@ export const toolExecutors = {
             nextRefreshOneAt += 1500 + Math.random() * 700;
             const scheduledTime = nextRefreshOneAt;
             setTimeout(() => {
-                try { chrome.runtime.sendMessage({ action: 'refreshOne', url }); } catch {}
+                try { chrome.runtime.sendMessage({ action: 'refreshOne', url }); } catch { }
             }, scheduledTime - now);
         });
         const hintParts = [`已保存 ${added.length} 支到「${portfolio}」`];
@@ -919,7 +935,7 @@ export const toolExecutors = {
         if (!args || !args.path) return { ok: false, error: 'path 必填' };
         const cleanPath = args.path.replace(/\\/g, '/').replace(/^\/+/, '');
         if (!cleanPath.startsWith('flit/')) {
-            return { ok: false, error: '脚本/文件需放入工作目录下的 flit/ 子目录（如 flit/' + cleanPath + '）' };
+            return { ok: false, error: '文件需放入 flit/ 子目录（交易记录使用 flit/买入卖出.md）' };
         }
         const dir = await readyRoot(state.workspaceHandles, args && args.root);
         return appendFile(dir.handle, args.path, args.content);
@@ -1829,7 +1845,7 @@ export async function addMemory(content) {
 
 export function buildSystemPrompt() {
     const wsGuide = state.workspaceHandles.length > 0
-        ? ` 工作目录已设置。你可以直接使用 write_file / append_file 自动创建和修改工作目录下 flit/ 子目录中的文件，修改会持久保存到磁盘，无需额外请求确认；path 必须以 flit/ 开头，有多个工作目录时自行选择 root。`
+        ? ` 工作目录已设置。你可以直接使用 write_file / append_file 自动创建和修改工作目录中的文件，修改会持久保存到磁盘；path 必须以 flit/ 开头，交易记录使用 flit/买入卖出.md，有多个工作目录时自行选择 root。`
         : ` 工作目录未设置时 write_file / append_file 不可用（会报错）。若需要创建文件，请先告知用户设置工作目录。`;
     const bridgeEnabled = state.bridgeEnabled;
     // T1-4：系统提示只留「一行目录 + 硬约束」，bridge 详细规则由 load_tool_group('bridge') 返回的 rule 字段给（本来就会返回），
@@ -1845,6 +1861,8 @@ export function buildSystemPrompt() {
     const eodRules = '[数据时效] 日线取数按跨度分两档：≤7 个交易日——本地库（工作目录 flit/config.json 登记，经 Agent 桥接只读查询）→ 免费渠道（东方财富/同花顺）→ 小石，桥接关闭或未选工作目录时直接走免费，不影响这一档取数；>7 个交易日——只能读本地库（保护免费渠道），库不可用时工具会给「缺前置条件（本地库）」的原因，照原样转述并给替代方案，不得改用免费/小石补齐。不再读 parquet——年文件只是某时刻全市场快照，供回测/入库用。链路：本地库 → 免费渠道（新浪/腾讯实时、东方财富/同花顺日线）→ 小石 API（只缺 1~2 个交易日且免费不可用时才兜底）。本地库通常滞后一个交易日（由用户侧定时任务发布），工具会自动用免费接口补齐，不算错误；库里缺口更大时不补，如实告知用户本地日线库待更新，不要反复重试，也不要替用户执行任何同步脚本。ETF/指数不在该库，走免费同花顺 ETF 日线（失败再小石，且只有未复权价）。工具报「工作目录不存在可用数据库」时照原样转述，不要改用别的工具硬凑 K 线。盘中（含午休）时，日线末行是工具用一次免费批量行情拼上的当日未收盘 bar（行上标 intraday/as_of）：此时末行 close 可以当「现价」，但当日成交量不满全天，量能结论要看工具返回的 实时拼接.量能说明（已接近收盘时才可当整日量比）。没拼上实时（盘前/收盘后/渠道失败）时，末行只是已收盘日线，只能称「某日收盘价」，不得写成现价/最新价，当日价格请另调 get_stock_quote（单只）或 get_portfolio_quotes（批量）。结论中必须写明数据日期与行情时间；工具返回的 接口调用 / 渠道诊断 / 本地库诊断 是真实渠道状况，报告有异就如实告知用户，不要猜测或重复重试。';
     const lines = [
         '你是「flit stk - 量化盯盘」Chrome 扩展 AI 助手，使用中文。工具按组冷加载：需要能力时先调用 load_tool_group。全局设置只能修改 Cron，直接执行并说明修改结果。flit_stk 是 Chrome 扩展安装目录，不是 Agent 项目目录；不要把文件写入 flit_stk。写入/读取 flit/... 时使用 Agent 工作目录，多个工作目录时自行选择 root。' + wsGuide,
+        '[交易记录硬规则] 当用户要求对当前持仓做操作，或要求记忆当前持仓、买入、卖出记录时，直接使用 append_file 自行创建或修改 flit/买入卖出.md，不要调用 save_memory，也不要把这类内容写入 flit/memory.md。用户说买入或卖出股票时，必须先向 flit/买入卖出.md 追加记录，再尝试导入或从组合移除；无论一只或多只股票无法导入、ETF 被排除、股票已手动移除、或组合操作失败，都必须记录，不能因操作失败而跳过。每条至少写操作日期和股票名称；买入价格、成交金额只有用户提供时才写，未提供不要猜测、不要写占位值；必须追加，不得覆盖历史记录。',
+        '[ETF 买入硬规则] 用户表示买入、持有或导入 ETF 时，必须把该 ETF 从自动导入中排除，绝对不能调用 add_stock_to_portfolio，也不能生成问财搜索地址。你必须自行打开 https://xueqiu.com 搜索对应 ETF，复制雪球个股网址，再用该网址手动新增股票。科创50ETF华夏示例网址是 https://xueqiu.com/S/SH588000。若尚未取得准确雪球网址，不得猜代码或先用问财地址代替，应先完成雪球搜索或明确告知用户需要手动完成。普通股票仍按原流程自动导入。',
         '[工具组]\n' + bridgeCatalog,
         bridgeHardRules,
         dataRules,

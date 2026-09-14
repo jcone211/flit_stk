@@ -92,33 +92,49 @@ function isMonitoredUrl(url) {
 chrome.action.onClicked.addListener(() => {
     chrome.storage.local.get('popupWindowId', ({ popupWindowId }) => {
         if (popupWindowId !== null && popupWindowId !== undefined) {
-            // popupWindowId 由 windows.onRemoved 统一清理，避免关闭回调抢先置空。
-            chrome.windows.remove(popupWindowId);
-        } else {
-            // 分页后窗口高度按每页条数算，避免按全量股票列表撑高
-            chrome.storage.local.get(['stockList', 'currentView'], (localData) => {
-                chrome.storage.sync.get(['pageSize'], (syncData) => {
-                    const view = localData.currentView || 'list';
-                    const stockCount = (localData.stockList || []).filter(s => view === 'trash' ? s.inTrash : !s.inTrash).length;
-                    const pageSize = syncData.pageSize || 10;
-                    const rows = Math.min(stockCount, pageSize);
-                    chrome.windows.getCurrent((currentWindow) => {
-                        chrome.windows.create({
-                            url: chrome.runtime.getURL('popup.html'),
-                            type: 'popup',
-                            width: 580,
-                            height: 520 + Math.max(rows - 2, 0) * 56,
-                            left: currentWindow.width - 400,
-                            top: 50
-                        }, (newWindow) => {
-                            chrome.storage.local.set({ popupWindowId: newWindow.id, popupWindowWidth: 580 });
-                        });
-                    });
+            // 先确认登记的窗口仍存在；浏览器重启/异常关闭可能让 onRemoved 未能清理旧 ID。
+            chrome.windows.get(popupWindowId, (popupWindow) => {
+                if (chrome.runtime.lastError || !popupWindow) {
+                    chrome.storage.local.set({ popupWindowId: null });
+                    openPopupWindow();
+                    return;
+                }
+                // popupWindowId 由 windows.onRemoved 统一清理，避免关闭回调抢先置空。
+                chrome.windows.remove(popupWindowId, () => {
+                    // 关闭窗口与 onRemoved 存在竞态时，读取 lastError 以消费 Promise/回调错误。
+                    void chrome.runtime.lastError;
                 });
             });
+        } else {
+            openPopupWindow();
         }
     })
 });
+
+function openPopupWindow() {
+    // 分页后窗口高度按每页条数算，避免按全量股票列表撑高
+    chrome.storage.local.get(['stockList', 'currentView'], (localData) => {
+        chrome.storage.sync.get(['pageSize'], (syncData) => {
+            const view = localData.currentView || 'list';
+            const stockCount = (localData.stockList || []).filter(s => view === 'trash' ? s.inTrash : !s.inTrash).length;
+            const pageSize = syncData.pageSize || 10;
+            const rows = Math.min(stockCount, pageSize);
+            chrome.windows.getCurrent((currentWindow) => {
+                chrome.windows.create({
+                    url: chrome.runtime.getURL('popup.html'),
+                    type: 'popup',
+                    width: 580,
+                    height: 520 + Math.max(rows - 2, 0) * 56,
+                    left: currentWindow.width - 400,
+                    top: 50
+                }, (newWindow) => {
+                    if (chrome.runtime.lastError || !newWindow) return;
+                    chrome.storage.local.set({ popupWindowId: newWindow.id, popupWindowWidth: 580 });
+                });
+            });
+        });
+    });
+}
 
 // 监听窗口关闭：按全局设置决定是否继续监控/全量刷新
 chrome.windows.onRemoved.addListener((closedWindowId) => {

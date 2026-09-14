@@ -1,6 +1,6 @@
 // ai_state.js —— 共享状态与基础工具（由其他 ai_*.js 模块引用）
 
-import { getDateTime, normalizeUrl } from '../../shared/utils.js';
+import { getDateTime, normalizeUrl, stripSign } from '../../shared/utils.js';
 export { getDateTime };
 
 // 诊断日志
@@ -214,11 +214,26 @@ export function findStockByName(list, name) {
     return (list || []).find(s => String(s.name || '').trim() === n) || null;
 }
 
-// 构造搜索地址
+// 已知受支持页面域名（问财搜索页 / 雪球个股页）：其余网址不允许作为股票导入
+function isSupportedStockHost(hostname) {
+    return hostname === 'xueqiu.com' || hostname.endsWith('.xueqiu.com')
+        || hostname === 'iwencai.com' || hostname.endsWith('.iwencai.com');
+}
+
+// 构造搜索地址：普通股票→问财搜索页；ETF 代码（159/51/58 开头 6 位）→雪球个股页（问财不支持 ETF）；
+// 传入完整网址时仅放行雪球/问财（截掉 sign 后原样保留，避免再被包进问财搜索），其余网址返回 null
 export function stockSearchUrl(item) {
-    if (/^(159|51|58)\d{3}$/.test(item)) {
-        const p = item.startsWith('159') ? 'SZ' : 'SH';
-        return `https://xueqiu.com/S/${p}${item}`;
+    const raw = String(item || '').trim();
+    if (!raw) return null;
+    if (/^https?:\/\//i.test(raw)) {
+        let hostname = '';
+        try { hostname = new URL(raw).hostname; } catch { return null; }
+        if (!isSupportedStockHost(hostname)) return null;
+        return normalizeUrl(stripSign(raw));
     }
-    return normalizeUrl(`https://www.iwencai.com/screener/result?w=${encodeURIComponent(item)}&querytype=stock`);
+    if (/^(159\d{3}|5[18]\d{4})$/.test(raw)) {
+        const p = raw.startsWith('159') ? 'SZ' : 'SH';
+        return `https://xueqiu.com/S/${p}${raw}`;
+    }
+    return normalizeUrl(`https://www.iwencai.com/screener/result?w=${encodeURIComponent(raw)}&querytype=stock`);
 }

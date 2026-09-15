@@ -104,9 +104,13 @@ export async function landCapturedDocument(documentData) {
     }
 
     const storage = await getLocal(['stockList', 'portfolios', 'activePortfolio']);
-    const stockList = storage.stockList || [];
     const portfolios = storage.portfolios || {};
     const activePortfolio = storage.activePortfolio || '持仓';
+    // 以组合为唯一事实源推导活动镜像：一键导入等流程若只写了 portfolios 未同步镜像，
+    // 用这份镜像做 findIndex 会失配，且下面读-改-写回时会把新导入项从组合里覆盖删除
+    const stockList = (portfolios[activePortfolio] && Array.isArray(portfolios[activePortfolio].stockList))
+        ? portfolios[activePortfolio].stockList
+        : (storage.stockList || []);
 
     const strippedMsg = stripSign(messageUrl);
     const msgWord = searchWordOf(messageUrl);
@@ -178,9 +182,12 @@ export async function landCapturedDocument(documentData) {
 export async function landApiQuotes(quotes) {
     if (!Array.isArray(quotes) || quotes.length === 0) return false;
     const storage = await getLocal(['stockList', 'portfolios', 'activePortfolio']);
-    const stockList = storage.stockList || [];
     const portfolios = storage.portfolios || {};
     const activePortfolio = storage.activePortfolio || '持仓';
+    // 与 landCapturedDocument 同款：镜像以组合列表为准，避免旧镜像覆盖新增的股票
+    const stockList = (portfolios[activePortfolio] && Array.isArray(portfolios[activePortfolio].stockList))
+        ? portfolios[activePortfolio].stockList
+        : (storage.stockList || []);
 
     const codeMap = new Map(); // code -> [stock...]
     const collect = (list) => {

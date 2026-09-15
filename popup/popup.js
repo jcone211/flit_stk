@@ -932,7 +932,15 @@ function executeQuickImport(items, name) {
         added++;
     });
     if (added === 0) { alert(`组合「${name}」中已存在全部输入项（按名称匹配），已跳过`); return; }
-    chrome.storage.local.set({ portfolios }, () => {
+    // 关键：导入目标即当前活动组合时，模块级 stockList（镜像）与
+    // portfolios[activePortfolio].stockList（组合列表）是两份独立数组（getStatus
+    // 反序列化各一份）。只写 portfolios 会让 storage 里的镜像缺失新增项，随后
+    // background/landing.js 落地其它股票页面时会把旧镜像写回组合，把新导入的行
+    // 覆盖删除（列表出现一行只有名称、过一会自动消失即此竞态）。
+    if (name === activePortfolio) {
+        stockList = target; // 镜像与组合列表指向同一数组，随下面 set 一并持久化
+    }
+    chrome.storage.local.set({ portfolios, stockList }, () => {
         switchPortfolio(name); // 切到导入的组合，便于查看
         // 页面打开方式：默认在最小化专属窗口（refreshOne 自带抓取放开窗口）；
         // 关闭「页面打开逻辑不同」后统一在普通 Chrome 页面打开（需放开抓取窗口）

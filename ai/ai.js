@@ -93,7 +93,9 @@
  *      assistant 消息，成对缺失直接 400。内部标记（kind / evicted / chars）在 sendRound 走线前由
  *      toWireMessage 剥掉，只发协议字段。
  *  12. 模型想跨轮拿住一份数据只能调 retain_tool_data（登记本轮缓存的原文）；模型只能登记工具真返回过的原文，自己写不了自定义内容进隐藏上下文，
- *      这是故意的——防止模型把编出来的数字登记成事实。guard 的跨轮证据也只看登记进便签的原文与账本里的成功记录。
+ *      这是故意的——防止模型把编出来的数字登记成事实。guard 的跨轮证据也只看登记进便签的原文与账本里的成功记录；
+ *      （2026-09-16 起）还按「数据维度」匹配：K 线/日线/技术分析话题只认 read_stock_kline / read_stocks_kline 的日线
+ *      取数记录，实时报价（get_stock_quote）不能充当 K 线证据，否则 guard 会被上一轮快照证据短路放行（debug.txt [043] 幻觉案例）。
  */
 
 import {
@@ -134,7 +136,8 @@ import {
     flattenContent,
 } from './core/ai_debug.js';
 import {
-    QUOTE_TOOLS, decideQuoteGuard, isTerminalRefusal, correctionPromptText,
+    QUOTE_TOOLS, KLINE_QUOTE_TOOLS, KLINE_TOPIC_RE, hasQuoteEvidence,
+    decideQuoteGuard, isTerminalRefusal, correctionPromptText,
 } from './core/ai_guard.js';
 
 // ============== port 连接 ==============
@@ -350,7 +353,9 @@ async function runAgentLoopBody(initialMessages, initialToolGroups, turnCalls) {
     const apiMessages = initialMessages || state.chatMessages.map(toApiMessage);
     state.activeToolGroups = new Set(initialToolGroups);
     // 本轮是否真拿到过行情数据（guard 的硬证据）、「工具本轮是否终局拒绝」（回了 error + 诊断）、与「强制纠正只做一次」的闭锁
+    // quoteEvidenceKline：K 线维度的证据单独记录——K 线话题只有日线取数成功才构成证据，实时报价不算（修复见 docs/risk/）
     let quoteEvidence = false;
+    let quoteEvidenceKline = false;
     let quoteRefused = false;
     let guardRetried = false;
     const requestProvider = selectRequestProvider(apiMessages);
@@ -423,6 +428,7 @@ async function runAgentLoopBody(initialMessages, initialToolGroups, turnCalls) {
             });
             apiMessages.push(...await executeToolCalls(sanitizedCalls, turnCalls));
             quoteEvidence = turnCalls.some(c => QUOTE_TOOLS.has(c.name) && c.ok);
+            quoteEvidenceKline = turnCalls.some(c => KLINE_QUOTE_TOOLS.has(c.name) && c.ok);
             quoteRefused = turnCalls.some(c => QUOTE_TOOLS.has(c.name) && c.refusal === true);
             continue;
         }
@@ -431,36 +437,58 @@ async function runAgentLoopBody(initialMessages, initialToolGroups, turnCalls) {
         // ② 工具本轮「终局拒绝」（回了 error + 取数诊断）→ 取数义务已尽，解释型正文放行只补一行灰字；
         //    此时出现的任何价格数值必然没来源，且重查还是同样结果 → 直接丢弃，不再白烧一轮；
         // ③ 完全没查到 → 先强制纠正一次，二次命中按强/弱信号丢弃或放行加免责。
-        // 旧版只看「有没有行情名词」就把「解释为什么拿不到」当编造杀掉，现要求同时出现价格形态数值。
-        if (state.activeToolGroups.size > 0 && !quoteEvidence && !hasPriorQuoteEvidence()) {
+        // ④（2026-09-16 修复，docs/risk/guard-历史证据维度误判导致幻觉漏拦截.md）证据按数据维度验证：
+        //    话题要 K 线/日线/技术分析时，只有 K 线类取数（read_stock_kline / read_stocks_kline）成功才算证据，
+        //    上一轮取到的实时报价（get_stock_quote）不能替日线历史买单——debug.txt [043] 编造案例根因；
+        //    历史确有「同维度」证据但本轮没重新取数时，correct 降级为 pass_warn（正文照发 + 一行时效提示），
+        //    不打断「模型复述早轮行情」这类本就正确的快速回答。
+        if (state.activeToolGroups.size > 0) {
             const replyText = result.content || '';
-            const decision = decideQuoteGuard({
-                text: replyText,
-                topicIsQuote: quoteTopicNearby(apiMessages),
-                refusal: quoteRefused,
-                retried: guardRetried,
-            });
-            if (decision.action === 'correct') {
-                guardRetried = true;
-                record('guard', { 处理: '注入强制纠正', 原因: decision.why, 文本字符: replyText.length, 正文摘录: clipText(replyText, 300) });
-                appendMessage('system', '本轮未检测到取数成功的工具调用，已要求重新取数');
-                apiMessages.push({ role: 'system', content: correctionPromptText() });
-                continue;
-            }
-            if (decision.action === 'drop') {
-                record('guard', { 处理: '丢弃正文', 原因: decision.why, 文本字符: replyText.length, 正文摘录: clipText(replyText, 300) });
-                dropAssistantBubble();
-                appendMessage('error', quoteRefused
-                    ? '工具已说明拿不到该数据（原因见上方工具返回），模型却又给出了具体行情数值，该回复已拦截。7 个交易日以内的日 K 与实时行情不需要本地库，可直接问；更长周期需先在 AI 设置启用 Agent 桥接并启动 flit_bridge。'
-                    : '模型在未取到真实数据的情况下再次直接给出行情数值，该回复已被拦截。请先让取数链路可用（启用 Agent 桥接查本地库，或改问 7 日内走免费渠道）再问一次。');
-                return;
-            }
-            if (decision.action === 'note') {
-                record('guard', { 处理: '工具终局拒绝，放行解释型回复', 文本字符: replyText.length });
-                appendMessage('system', '以上为工具返回的不可用原因，本次没有取到行情数值');
-            } else if (decision.action === 'pass_warn') {
-                record('guard', { 处理: '弱信号放行并提示', 文本字符: replyText.length });
-                appendMessage('system', '本轮没有取数成功的工具调用，下面内容里的数值没有工具来源，请自行核对');
+            const klineNeeded = topicNeedsKline(apiMessages);
+            // 本轮证据按话题维度对口径：K 线话题只有日线取数成功才算真拿到数
+            const curEvidence = klineNeeded ? quoteEvidenceKline : quoteEvidence;
+            // 历史证据同样按维度验证（hasQuoteEvidence 纯函数，G3 回归）
+            const prior = hasQuoteEvidence(state.chatMessages, klineNeeded);
+            if (!curEvidence) {
+                const decision = decideQuoteGuard({
+                    text: replyText,
+                    topicIsQuote: quoteTopicNearby(apiMessages),
+                    refusal: quoteRefused,
+                    retried: guardRetried,
+                });
+                // 修复2：历史确有同维度证据时，把「强制重来一轮」降级为「放行 + 提示」
+                if (prior && decision.action === 'correct') {
+                    decision.action = 'pass_warn';
+                    decision.why = '较早轮次已有' + (klineNeeded ? 'K线/日线' : '行情') + '取数记录，本轮未重新取数：放行并提示核对';
+                }
+                if (decision.action === 'correct') {
+                    guardRetried = true;
+                    record('guard', { 处理: '注入强制纠正', 原因: decision.why, 文本字符: replyText.length, 正文摘录: clipText(replyText, 300) });
+                    appendMessage('system', '本轮未检测到取数成功的工具调用，已要求重新取数');
+                    apiMessages.push({ role: 'system', content: correctionPromptText() });
+                    continue;
+                }
+                if (decision.action === 'drop') {
+                    record('guard', { 处理: '丢弃正文', 原因: decision.why, 文本字符: replyText.length, 正文摘录: clipText(replyText, 300) });
+                    dropAssistantBubble();
+                    appendMessage('error', quoteRefused
+                        ? '工具已说明拿不到该数据（原因见上方工具返回），模型却又给出了具体行情数值，该回复已拦截。7 个交易日以内的日 K 与实时行情不需要本地库，可直接问；更长周期需先在 AI 设置启用 Agent 桥接并启动 flit_bridge。'
+                        : '模型在未取到真实数据的情况下再次直接给出行情数值，该回复已被拦截。请先让取数链路可用（启用 Agent 桥接查本地库，或改问 7 日内走免费渠道）再问一次。');
+                    return;
+                }
+                if (decision.action === 'note') {
+                    record('guard', { 处理: '工具终局拒绝，放行解释型回复', 文本字符: replyText.length });
+                    appendMessage('system', '以上为工具返回的不可用原因，本次没有取到行情数值');
+                } else if (decision.action === 'pass_warn') {
+                    record('guard', {
+                        处理: prior ? '历史证据放行并提示' : '弱信号放行并提示',
+                        原因: decision.why,
+                        文本字符: replyText.length,
+                    });
+                    appendMessage('system', prior
+                        ? '本轮没有重新取数，以下行情数值来自较早轮次的取数记录，如需最新数据请再问一次'
+                        : '本轮没有取数成功的工具调用，下面内容里的数值没有工具来源，请自行核对');
+                }
             }
         }
         commitAssistant(result.content);
@@ -609,11 +637,12 @@ function trimHiddenEntries() {
     }
 }
 
-/** 跨轮证据：历史隐藏条目里有没有真实的行情数据（已登记的行情便签，或最近账本里成功的行情调用） */
-function hasPriorQuoteEvidence() {
+/** 跨轮证据：历史隐藏条目里有没有与「话题所需数据维度」匹配的真实行情数据（已登记的行情便签，或最近账本里成功的行情调用）。
+ *  klineNeeded=true 时只认 K 线类取数（read_stock_kline / read_stocks_kline）的证据——实时报价不能当 K 线历史，
+ *  否则上一轮 get_stock_quote 成功会让 guard 整体短路放行（debug.txt [043] 幻觉案例，见 docs/risk/guard-历史证据维度误判导致幻觉漏拦截.md）。 */
+function hasPriorQuoteEvidence(klineNeeded = false) {
     // 两类条目本身已被 trimHiddenEntries 限在最近几条，直接全扫即可，不必只盯最近一条
-    return state.chatMessages.some(m => (m.kind === 'retained_data' && QUOTE_TOOLS.has(m.source))
-        || (m.kind === 'tool_trace' && (m.calls || []).some(c => QUOTE_TOOLS.has(c.name) && c.ok === true)));
+    return hasQuoteEvidence(state.chatMessages, klineNeeded);
 }
 
 /** 话题是不是接着行情问的：往回看 4 条用户消息与途中助手回复（用户只回「好的」时，关键词在上一轮） */
@@ -626,6 +655,21 @@ function quoteTopicNearby(apiMessages) {
         if (m.role !== 'user' && m.role !== 'assistant') continue;
         if (typeof m.content === 'string' && re.test(m.content)) return true;
         if (Array.isArray(m.content) && re.test(flattenContent(m.content))) return true;
+        if (m.role === 'user' && ++users >= 4) break;
+    }
+    return false;
+}
+
+/** 话题是不是明确要求「K 线 / 日线 / 技术分析」维度（与 quoteTopicNearby 同口径扫描，词表见 ai_guard.js KLINE_TOPIC_RE）。
+ * 命中后只有 K 线类取数成功才算证据——这是 2026-09-16 修复的核心，避免快照证据误充 K 线证据。 */
+function topicNeedsKline(apiMessages) {
+    let users = 0;
+    for (let i = apiMessages.length - 1; i >= 0; i--) {
+        const m = apiMessages[i];
+        if (m.kind === 'tool_trace' || m.kind === 'retained_data' || m.kind === 'compact_note') continue;
+        if (m.role !== 'user' && m.role !== 'assistant') continue;
+        if (typeof m.content === 'string' && KLINE_TOPIC_RE.test(m.content)) return true;
+        if (Array.isArray(m.content) && KLINE_TOPIC_RE.test(flattenContent(m.content))) return true;
         if (m.role === 'user' && ++users >= 4) break;
     }
     return false;

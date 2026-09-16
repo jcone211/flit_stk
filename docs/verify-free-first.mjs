@@ -877,6 +877,47 @@ await run('G1 guard 判定：解释型放行 / 终局拒绝后编数字直接丢
         !/请立即调用/.test(correctionPromptText()) && /照原样转述该原因/.test(correctionPromptText()) && /出现过的股票代码/.test(correctionPromptText()));
     check('G1', '强制纠正正文强调「行情输出必须先成功调用工具取数」', /必须以本轮成功取数的工具调用为前提/.test(correctionPromptText()));
 });
+// 修复回归（2026-09-16，docs/risk/guard-历史证据维度误判导致幻觉漏拦截.md）：
+// 证据按「数据维度」验证——上一轮 get_stock_quote 的实时报价不能充当 K 线分析的历史证据
+await run('G3 guard 证据维度：快照不能当 K 线证据；话题词判维度（0 次接口）', async () => {
+    const {
+        QUOTE_TOOLS, SNAPSHOT_QUOTE_TOOLS, KLINE_QUOTE_TOOLS, KLINE_TOPIC_RE, hasQuoteEvidence,
+    } = await import('../ai/core/ai_guard.js');
+    check('G3', '工具三层集合关系正确',
+        SNAPSHOT_QUOTE_TOOLS.has('get_stock_quote') && SNAPSHOT_QUOTE_TOOLS.has('get_portfolio_quotes')
+        && KLINE_QUOTE_TOOLS.has('read_stock_kline') && KLINE_QUOTE_TOOLS.has('read_stocks_kline')
+        && !KLINE_QUOTE_TOOLS.has('get_stock_quote') && !SNAPSHOT_QUOTE_TOOLS.has('read_stocks_kline')
+        && QUOTE_TOOLS.has('get_stock_quote') && QUOTE_TOOLS.has('read_stocks_kline')
+        && QUOTE_TOOLS.has('get_stock_list') && QUOTE_TOOLS.has('query_local_database'));
+    // debug.txt [035] 的账本形状：本轮只有 get_stock_quote 成功（实时报价）
+    const onlySnapshot = [{ kind: 'tool_trace', calls: [{ name: 'get_stock_quote', ok: true }] }];
+    check('G3', '只有快照证据：普通行情话题认为有证据（不拦截，体验不变）',
+        hasQuoteEvidence(onlySnapshot, false) === true);
+    check('G3', '只有快照证据：K 线话题认为无证据 → guard 不再短路（本次漏洞修复点）',
+        hasQuoteEvidence(onlySnapshot, true) === false);
+    // K 线证据两个维度都满足
+    const withKline = [{ kind: 'tool_trace', calls: [{ name: 'read_stocks_kline', ok: true }] }];
+    check('G3', 'K 线证据同时满足普通与 K 线话题',
+        hasQuoteEvidence(withKline, false) === true && hasQuoteEvidence(withKline, true) === true);
+    // retained_data 便签同样按维度验证
+    check('G3', '便签按维度验证：K 线便签对 K 线话题有效、快照便签无效',
+        hasQuoteEvidence([{ kind: 'retained_data', source: 'read_stock_kline' }], true) === true
+        && hasQuoteEvidence([{ kind: 'retained_data', source: 'get_stock_quote' }], true) === false
+        && hasQuoteEvidence([{ kind: 'retained_data', source: 'get_stock_quote' }], false) === true);
+    // 话题词判定：明确的 K 线/技术分析请求命中
+    check('G3', 'K 线话题词：明确的技术分析请求命中',
+        KLINE_TOPIC_RE.test('用k线分析')
+        && KLINE_TOPIC_RE.test('请给 30 日 K 线')
+        && KLINE_TOPIC_RE.test('用日线做技术分析')
+        && KLINE_TOPIC_RE.test('MA5 和 MA10 金叉了吗'));
+    check('G3', 'K 线话题词：口语/非技术词不误触发（避免强制取数打扰）',
+        !KLINE_TOPIC_RE.test('分析这支股票')
+        && !KLINE_TOPIC_RE.test('现在多少钱')
+        && !KLINE_TOPIC_RE.test('帮我看下持仓')
+        && !KLINE_TOPIC_RE.test('这周走势如何'));
+});
+
+
 
 // 端到端：拿真工具返回（桥接关闭、>7 天）跑一遍 guard 判定，复现 debug.txt 当时被误杀的那一轮
 await run('G2 debug.txt 场景回放：桥接关闭问 30 日 K → 解释型回复不再被丢弃（0 次外呼）', async () => {

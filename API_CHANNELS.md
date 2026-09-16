@@ -201,7 +201,7 @@ node docs/verify-free-first.mjs --bridge=real --bridge-url http://127.0.0.1:1732
 | C2~C9（21 项） | 真实网络（新浪/腾讯/东财/小石） | 实时三级链（批量按标的隔离：脏代码只进 `errors[]`，另留单只兜底）、提示词注入与库口径 |
 | C10（6 项） | 无 | 工具表完整性：真跑 `getLoadedToolDefs()`、TOOL_DEFS/TOOL_GROUPS/toolExecutors 三者对齐、**description 与参数描述真的送给了模型**（旧版压成名字导致模型猜代码） |
 | R1（8 项） | 无 | 跳轮上下文：`retain_tool_data` 登记/拒收/上限口径 |
-| G1~G2（14 项） | 无（G2 复用假桥接，0 外呼） | 反编造 guard 三态：解释型正文放行 / 工具终局拒绝后给数值直接丢 / 无证据才 correct；日期与股票代码不被误判；debug.txt 场景回放 |
+| G1~G3（22 项） | 无（G2 复用假桥接，0 外呼） | 反编造 guard 三态：解释型正文放行 / 工具终局拒绝后给数值直接丢 / 无证据才 correct；日期与股票代码不被误判；debug.txt 场景回放；**跨轮证据按数据维度验证（G3：快照不能当 K 线证据、K 线话题词判维度）** |
 | E1~E3（`--bridge=real`） | 真桥接 + docker my-postgres | 真 SQL：单只 30 根、十二只一次 SQL、真库名称解析 |
 
 关键手法：

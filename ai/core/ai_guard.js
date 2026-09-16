@@ -2,10 +2,19 @@
 // 口径来源：docs/plan-桥接关闭时对话体验.md §1-R3/§2-M3。
 // 旧版只有「成功取数 / 没查」两态，且命中只看**名词**（收盘、涨跌幅…），
 // 于是「解释为什么拿不到数据」的天然措辞必被误杀 —— 本文件把三态与数值形态写在一处。
+// 2026-09-16 维度修复（docs/risk/guard-历史证据维度误判导致幻觉漏拦截.md）：
+//   行情工具按「数据维度」分快照 / K 线两类。历史证据验证必须与话题维度匹配，
+//   否则上一轮取到的「实时报价」会被当成「K 线历史」的证据，guard 整体短路放行——
+//   debug.txt [043] 无工具调用却输出 1111 字编造 K 线的根因。
 
 // guard 与跨轮账本共用的「有真实数据来源」口径：行情接口 + 会带回库存价格/SQL 行的工具
+// 快照类：一次现价/报价（get_stock_quote / get_portfolio_quotes）——不能支撑 K 线历史分析
+// K 线类：一段历史日线/OHLCV/派生指标（read_stock_kline / read_stocks_kline）
+export const SNAPSHOT_QUOTE_TOOLS = new Set(['get_stock_quote', 'get_portfolio_quotes']);
+export const KLINE_QUOTE_TOOLS = new Set(['read_stock_kline', 'read_stocks_kline']);
 export const QUOTE_TOOLS = new Set([
-    'get_stock_quote', 'get_portfolio_quotes', 'read_stock_kline', 'read_stocks_kline',
+    ...SNAPSHOT_QUOTE_TOOLS,
+    ...KLINE_QUOTE_TOOLS,
     'get_stock_list', 'query_local_database',
 ]);
 
@@ -13,6 +22,11 @@ export const QUOTE_TOOLS = new Set([
 const QUOTE_WORDS = /(现价|收盘|开盘|最高|最低|涨跌幅|涨跌额|成交量|成交额|换手率|跌停|涨停|股价|价格|市值)/;
 // 价格形态的数字：小数（34.16 / 1.2亿）、百分数（3.2%）、带符号涨跌（-5.01）
 const PRICE_NUMBER = /\d+\.\d+|\d+\s*%|[+\-]\d+(?:\.\d+)?(?=\s*%)/;
+
+// 话题明确要求「K 线 / 日线 / 技术分析」维度的词。命中后只有 K 线类取数（read_stock_kline /
+// read_stocks_kline）的成功记录才算证据，实时报价不算（docs/risk/guard-历史证据维度误判导致幻觉漏拦截.md）。
+// 有意收窄：不带「走势 / 形态 / 20日 / 30日」这类可能是口语宽泛表达的词，避免误触发强制取数。
+export const KLINE_TOPIC_RE = /(K\s*线|日k|日线|技术分析|均线|MACD|KDJ|MA5|MA10|MA20|复盘|K线图|蜡烛图)/i;
 // 带数字的 markdown 表格行（| 600206 | 12.3 | ...），文件清单这类要靠「行情话题」再加一道闸
 const NUMERIC_TABLE_ROW = /^\s*\|.*\|\s*[-+]?\d[\d.,]*\s*\|/m;
 
@@ -89,4 +103,19 @@ export function correctionPromptText() {
         + '如果工具已经明确返回了不可用原因，**照原样转述该原因并给出可行替代**就是正确答案，不要重复调用同一工具、不要凭记忆补数字。'
         + '拿不到时不得输出任何价格、涨跌幅、成交量或 K 线表格——说「没有取到数据」比编一个数好。'
         + '后面还要用的数据，取到后本轮调 retain_tool_data 登记成隐藏便签（tool 原始返回下一轮就不在你的上下文里了）。';
+}
+
+/**
+ * 历史证据验证（纯函数，可被回归脚本直接测）：检查隐藏条目（tool_trace 账本 / retained_data 便签）
+ * 里是否有「与话题所需数据维度匹配」的真实行情来源。ai.js 的 hasPriorQuoteEvidence 委托给它。
+ * klineNeeded=true 时只认 K 线类工具（read_stock_kline / read_stocks_kline）的证据——
+ * 上一轮取到的实时报价不能充当 K 线分析的证据（docs/risk/guard-历史证据维度误判导致幻觉漏拦截.md）。
+ * @param {Array} entries 隐藏条目数组（{ kind: 'tool_trace'|'retained_data', source?, calls? }）
+ * @param {boolean} klineNeeded 话题是否明确要求 K 线/日线/技术分析维度
+ */
+export function hasQuoteEvidence(entries, klineNeeded = false) {
+    const tools = klineNeeded ? KLINE_QUOTE_TOOLS : QUOTE_TOOLS;
+    return (entries || []).some(m =>
+        (m.kind === 'retained_data' && tools.has(m.source))
+        || (m.kind === 'tool_trace' && (m.calls || []).some(c => tools.has(c.name) && c.ok === true)));
 }

@@ -52,10 +52,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## plugins 目录（外部技能/工具引用，可选存在）
 
-- `plugins/` 用来存放外部下载的技能包与工具引用，与扩展运行时无关：不被 `manifest.json` 加载、不参与打包、目录或其中条目随时可能被删除。**当前仅有** `plugins/skills/xiaoshi-quant-expert/`（`SKILL.md` + `references/` 下 11 个文档：`api.md`、`data-contracts.md`、`backtest-protocol.md`、`local-quant-runner.md`、`strategy-contract.md`、`strategy-modes.md`、`event-scoring.md`、`risk-evolution.md`、`medium-low-frequency-data.md`、`history-sync-and-delivery.md`、`miniqmt-data-adapter.md`）。
+- `plugins/` 用来存放外部下载的技能包与工具引用，与扩展运行时无关：不被 `manifest.json` 加载、不参与打包、目录或其中条目随时可能被删除。**当前仅有** `plugins/skills/xiaoshi-quant-expert/`（`SKILL.md` + `references/` 下 12 个文档：`platform-contract.md`、`api.md`、`data-contracts.md`、`backtest-protocol.md`、`local-quant-runner.md`、`strategy-contract.md`、`strategy-modes.md`、`event-scoring.md`、`risk-evolution.md`、`medium-low-frequency-data.md`、`history-sync-and-delivery.md`、`miniqmt-data-adapter.md`，以及 `workflows/` 下平台随工具包发布的 5 个 workflow skill：`quant-expert`、`data`、`market-research`、`event-macro`、`quant-lab`）。
 - **禁止代码依赖**：任何扩展内文件（含 `manifest.json` 的 `web_accessible_resources`）不得 `import`/`require`/`fetch` `plugins/` 下的内容，也不得因该目录缺失而中断工作；它只作为开发期「查资料」的引用。缺文档时按本项目代码与 README 继续实现即可。
-- 与代码的对应关系（小石 / Xiaoshi，`https://api.shizixi.com/api/v3`）：`ai/stock/xiaoshi_stock_kline.js`（搜索 / 单只行情 / 日线，含 429 与重试）、`js/xiaoshi_realtime_quote.js` 与 `js/quote_batch.js`（批量行情，单次 100 只上限；`background/background.js` 的 API 直取模式由 `refreshAllByApi` 按全局设置 `dataSource`（`'xiaoshi'` / `'adata'`，缺省 `'adata'`）在 `js/adata_realtime_quote.js` 与小石之间**二选一**，两者互为可替代的行情源而非自动回退链）、`ai/core/ai_tools.js`（`read_stock_kline` / `read_stocks_kline` / `get_stock_quote` 等的 **本地数据库 → 免费渠道（adata/新浪/腾讯）→ 小石** 回退链，全部渠道口径见根目录 `API_CHANNELS.md`）。
-- **何时读**：改动小石接口调用、新增端点、历史数据 / R2 presigned 下载、限流（429 `rate_limit_exceeded` / `bulk_download_required`）、字段语义（`adjust`、`amount_quality`、`history_status`、`available_at` / `retrieved_at` 等）或回测相关功能时，按需读 `SKILL.md` 与 `references/api.md` 取权威口径，不要凭猜测加参数；不需要时不必加载，也不要整包全量读入上下文。
+- 与代码的对应关系（小石 / Xiaoshi，`https://api.shizixi.com/api/v3`，公开契约 `xiaoshi-agent-contract/v1`）：`ai/stock/xiaoshi_stock_kline.js`（单只行情 `/market/quote/{symbol}` 仍有效；`/data/search`、`/data/kline` 已退役，对应两个函数改为直接抛可操作错误）、`js/xiaoshi_realtime_quote.js` 与 `js/quote_batch.js`（批量行情 `POST /market/quotes`，单次 1-100 只，脏代码按标的隔离进 `errors[]`；`background/background.js` 的 API 直取模式由 `refreshAllByApi` 按全局设置 `dataSource`（`'xiaoshi'` / `'adata'`，缺省 `'adata'`）在 `js/adata_realtime_quote.js` 与小石之间**二选一**，两者互为可替代的行情源而非自动回退链）、`ai/core/ai_tools.js`（`read_stock_kline` / `read_stocks_kline` / `get_stock_quote` 等的 **本地数据库 → 免费渠道（adata/新浪/腾讯）→ 小石** 回退链，全部渠道口径见根目录 `API_CHANNELS.md`）。**不要在代码里回退调用已退役路径**：它们固定返回 `404 operation_not_in_public_contract`，属契约退役而非可用性抖动。
+- **何时读**：改动小石接口调用、新增端点、历史数据 / R2 presigned 下载、限流（429 `rate_limit_exceeded` / `bulk_download_required`）、字段语义（`adjust`、`amount_quality`、`history_status`、`available_at` / `retrieved_at` 等）或回测相关功能时，按需读 `SKILL.md`、`references/api.md`（在线口径）与 `references/platform-contract.md`（契约快照 + 已退役路径对照表）取权威口径，不要凭猜测加参数；不需要时不必加载，也不要整包全量读入上下文。
 - 该技能包自带的「manifest + sha256 版本巡检」是小石平台的 Agent 侧机制，开发本项目代码时无需照做；要升级文档直接替换文件即可。真实 API Key 不写入本文件、`plugins/` 或任何提交内容（扩展 Key 存 `chrome.storage.sync` 的 `apiKey`，日志与文档一律脱敏）。
 
 ## Skills 清单（仅本项目开发期使用）
@@ -74,7 +74,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **B. `plugins/skills/` — 外部数据源技能（可选存在，仅按需读取）**
 
-- `xiaoshi-quant-expert`：小石大数据 API 使用手册——行情 / 新闻 / 人物 / 宏观 / 机构研报 / 事件时间轴 / 因子库 / 历史 Parquet 批量下载（R2 presigned）/ 防未来函数（PIT）/ 本地回测协议 / 风控与策略进化门禁。**开发期参考文档**，用于校准本项目对 `api.shizixi.com` 的调用与数据口径；不做自动触发，涉及小石接口时再读。
+- `xiaoshi-quant-expert`：小石大数据 API 使用手册——行情（单只 + 批量）/ 财经证据语义检索 / PIT 事件时间轴（含人物、宏观、未来概率）/ 量化数据集 / 历史 Parquet 批量下载（R2 presigned，按 `dataset` 规格）/ 防未来函数（PIT）/ 本地回测与因子校验（`xiaoshi-data` CLI）/ 风控与策略进化门禁。**开发期参考文档**，用于校准本项目对 `api.shizixi.com` 的调用与数据口径；不做自动触发，涉及小石接口时再读。`references/platform-contract.md` 是 2026-09-16 的契约快照（含已退役路径对照表），`workflows/` 是平台随 `xiaoshi-agent-tools` 工具包发布的 5 个工作流 skill（原样拷贝，勿手改）。
 
 **维护约定**：新增/删除技能时，只在上面加/删一行，写清「路径 + 何时用 + 是否自动触发」，不复制 `SKILL.md` 正文；A 组的详细清单交给托管区块生成，B 组随 `plugins/` 的实际存在情况更新（目录被删时本节改为「暂无」）。
 

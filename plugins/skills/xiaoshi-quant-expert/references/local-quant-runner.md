@@ -1,67 +1,127 @@
-# 小石本地量化执行引擎 / Xiaoshi Local Quant Runner
+# Local Quant Runner (packaged client)
 
-## 1. 简介
-小石本地量化执行引擎（Local Quant Runner）是小石大数据 API 平台的客户端核心回测工具。它支持将小石 API 提供的数据批量缓存到本地 Parquet 文件中，并由本地 Python 执行快速、精确、防未来的历史回测。所有计算均在用户本地完成，服务器不代跑回测，以消除服务器计算压力并保障用户策略的私密性。
+## 1. What It Is
 
-## 2. CLI 命令行操作
-通过 `python -m tools.xiaoshi_quant_runner.cli` 可以调用命令行工具。
+The local quant runner is the client half of the Xiaoshi contract: it caches verified Parquet data
+locally and runs point-in-time-safe backtests on the user's machine. All computation happens locally;
+the platform never runs a user's backtest. The runner ships inside the `xiaoshi-agent-tools` package
+(`2026.9.13.3`) together with the `xiaoshi-data` CLI, the `xiaoshi-mcp` MCP server and the five
+workflow Skills.
 
-### 数据下载命令
+Division of labour:
+
+- `xiaoshi-mcp` handles bounded queries and planning only (it never downloads, writes files or
+  creates a download session).
+- `xiaoshi-data` handles local files: batch download, verification, coverage/freshness, factor
+  validation and backtests.
+- Save an MCP-returned `plan` object verbatim as JSON and run it once with `--plan`; do not re-plan or
+  pre-create sessions. If a plan is expired or version-mismatched, stop and explain instead of
+  silently re-planning.
+
+## 2. Version And Key Handling
+
 ```bash
-python -m tools.xiaoshi_quant_runner.cli download --api-key <YOUR_API_KEY> --codes 600519,000001 --since 2026-01-01 --to 2026-07-15
+xiaoshi-data update check
+xiaoshi-data update apply --version 2026.9.13.3 --approve 2026.9.13.3
+xiaoshi-data update rollback --version <previous> --approve <previous>
 ```
-- `--api-key`: 可选；也可通过 `XIAOSHI_API_KEY` 环境变量提供，避免密钥进入命令历史。
-- `--codes`: 必填。以逗号分隔的股票代码列表。
-- `--period`: 行情周期（默认 `daily`）。
-- `--adjust`: 复权口径（默认 `qfq`，支持 `none`, `qfq`, `hfq`）。
-- `--since` / `--to`: 数据的时间起始区间（`YYYY-MM-DD`）。
-- 该命令会自动同步下载指定股票的 K 线数据，以及对应的 PIT 财务披露、基本面快照和巨潮公告。
 
-### 本地回测命令
-策略文件必须导出继承 `StrategyBase` 的 `Strategy` 类，或导出 `strategy` 实例：
+Minimum compatible client is `2026.9.13.1`; the current release is `2026.9.13.3`. Install, upgrade
+and rollback require the user's explicit approval of the exact target version. A failed candidate keeps
+the last verified environment; the stable entry point is switched only after local protocol
+verification, and an existing MCP process must be reconnected afterwards. Windows installs at or below
+`2026.9.10.2` cannot self-apply and need one manual package install first.
+
+Never pass the API Key as a command argument or write it into a plan, log or report. Inject it through
+the protected `XIAOSHI_API_KEY` secret; `--api-key` exists only for interactive local use.
+
+## 3. Commands
+
+### Environment and catalog
+
 ```bash
-python -m tools.xiaoshi_quant_runner.cli backtest \
-  --strategy ./my_strategy.py --data-dir ./xiaoshi_data \
+xiaoshi-data status
+xiaoshi-data capabilities
+xiaoshi-data catalog --dataset cn-daily --limit 100
+xiaoshi-data schema --dataset cn-daily
+xiaoshi-data freshness
+xiaoshi-data coverage --dataset cn-daily
+```
+
+`catalog`, `schema`, `coverage`, `freshness`, `download` and `research-package` accept `--quality
+complete|available` and `--revision <manifest_version>`. `complete` is the default snapshot;
+`available` explicitly accepts newest-available data with gaps and must be stored in a separate
+`--data-dir`.
+
+### One bounded download spec
+
+```bash
+xiaoshi-data download --dataset cn-daily --year 2020 --adjust qfq --data-dir ./xiaoshi_data
+xiaoshi-data download --dataset daily-stock --market CN --code 600519 --year 2020 --adjust qfq --data-dir ./xiaoshi_data
+xiaoshi-data download --dataset event-timeline --date 2026-09-01 --event-type announcement --data-dir ./xiaoshi_data
+xiaoshi-data download --plan history-plan.json --data-dir ./xiaoshi_data
+```
+
+Every call uses exactly one dataset and only that dataset's declared dimensions; there is no
+per-symbol enumeration and no market-wide loop. Reproduce an earlier publication with
+`--revision <manifest_version>`.
+
+### Verification and local query
+
+```bash
+xiaoshi-data verify --data-dir ./xiaoshi_data --output verify.json
+xiaoshi-data query --data-dir ./xiaoshi_data --dataset cn-daily --code 600519 --since 2020-01-01 --to 2020-12-31 --limit 500
+```
+
+`verify` checks Parquet files, hashes, schema and semantics (duplicate keys, ranges, availability and
+adjustment). `query` runs a bounded local query and returns JSONL or writes Parquet. Data validation
+always uses `verify`; there is no `validate-data` alias any more.
+
+### Factor validation and backtest
+
+```bash
+xiaoshi-data validate-factor --input factor.csv --output factor_validation.json --quantiles 5
+xiaoshi-data backtest --strategy ./my_strategy.py --data-dir ./xiaoshi_data \
   --codes 600519,000001 --start 2020-01-01 --end 2025-12-31 \
-  --adjust qfq --benchmark 000300 --output-dir ./backtest_output
+  --adjust qfq --capital 1000000 --benchmark 000300 --seed 42 \
+  --output-dir ./backtest_output
 ```
-该命令会真实运行本地回测并生成报告，不会向小石服务器提交策略或计算任务。盘前信号按当日开盘模拟，收盘及盘后信号最早按下一可交易日开盘模拟；回测末尾尚未到下一根 K 线的信号保留为 `pending_signals`，不得伪造成交。
 
-### 环境状态检测命令
+A strategy file must export a `Strategy` class derived from `StrategyBase`, or a `strategy` instance.
+The factor validator expects `date,factor,forward_return` columns and reports out-of-sample quantile
+behaviour. The backtest engine applies T+1 execution, configurable fees/slippage and a separate risk
+layer, and it never uploads strategy code or results.
+
+### Strategy research package
+
 ```bash
-python -m tools.xiaoshi_quant_runner.cli status
+xiaoshi-data research-package --request ./research-request.json --data-dir ./xiaoshi_research
+xiaoshi-data research-package --plan research-plan.json --data-dir ./xiaoshi_research
 ```
-- 输出当前量化引擎的版本号、是否开启了 OSkhQuant 非商业开关以及本地 xtquant/MiniQMT 库的安装状态。
 
-### 历史增量同步命令
-```bash
-python -m tools.xiaoshi_quant_runner sync-history --data-dir ./xiaoshi_data
-```
-- 从 `XIAOSHI_API_KEY` 读取密钥，调用官方 manifest 与 2 小时 R2 下载地址。
-- 对比 `size` 和 `sha256` 后只下载变化文件，校验通过再原子替换。
-- 不再使用已经退役的公开镜像或固定节点地址。
+`research-request.json` carries `strategy_name`, `markets`, `since`, `to`, `frequency`, `adjust` and
+optional `codes`. The server only plans market/year (or market/month) R2 files; `codes` is a local
+filter and never a server-side loop.
 
-### 策略研究包命令
-先把研究目标保存为 `research-request.json`，字段包括 `strategy_name`、`markets`、`since`、`to`、`frequency`、`adjust` 和可选 `codes`，再运行：
-```bash
-python -m tools.xiaoshi_quant_runner research-package \
-  --request ./research-request.json --data-dir ./xiaoshi_research
-```
-- 服务端只生成市场/年份或市场/月级 R2 清单，不逐股票查询，也不代跑策略。
-- 客户端直接下载两小时 R2 地址，逐文件校验 `size` 与 `sha256` 后原子落盘。
-- `codes` 只作为本地筛选范围；行情、事件、未来概率和板块证据均按 PIT 时间在本地连接。
-- 下载后先运行 `validate-data`，再用 `backtest` 执行策略和生成可复现报告。
+## 4. Output Artifacts
 
-### 数据与因子质量检查
-本地验证器按“股票代码 + 时间”检查重复键，并检查缺失值、时间范围、复权口径、可用时间与文件校验和。截面因子研究使用按日期划分的训练/测试集，输出每日 IC/RankIC、月度 ICIR、分组收益、换手率和可用时间泄漏检查；不能把多只股票同一天的正常截面误判成重复记录。
+A local backtest writes a reproducible package into `--output-dir`:
 
-## 3. 回测产物说明
-每次本地回测执行完毕后，引擎将在指定的输出目录（默认 `./backtest_output`）中生成完整的标准化报告包：
-- `run_manifest.json`: 回测运行清单。包含随机种子、时间范围、复权口径、费用配置、执行参数、数据源说明以及所有本地输入数据的 SHA256 哈希，用以精确复现。
-- `summary.json`: 包含年化收益率、夏普比率、最大回撤、索提诺比率、回撤恢复期和交易笔数等。
-- `signals.csv`: 策略产生的所有原始信号记录。
-- `orders.csv`: 委托意向列表，包含报价和买卖方向。
-- `trades.csv`: 详细的成交历史，包含成交时间、价格、股数以及每笔扣减的手续费与滑点成本。
-- `positions.csv`: 每日收盘后的详细持仓列表。
-- `equity.csv`: 每日收盘后的账户总资产与现金曲线。
-- `report.html`: 交互式可视化报告网页，使用 Chart.js 展示策略/真实基准净值、回撤、仓位比例和现金曲线。
+- `run_manifest.json` - seed, window, adjustment, cost configuration, execution parameters, data
+  sources and the SHA-256 of every local input
+- `summary.json` - annualized return, Sharpe, Sortino, maximum drawdown, recovery time, trade count
+- `signals.csv`, `orders.csv`, `trades.csv`, `positions.csv`, `equity.csv`
+- `report.html` - Chart.js report of strategy/benchmark equity, drawdown, exposure and cash
+
+Pre-open signals are simulated at the same day's open; close and after-close signals execute no
+earlier than the next tradable session's open. Signals still pending at the end of the sample must be
+kept as `pending_signals`, never filled in as trades.
+
+## 5. Boundaries
+
+- The platform is a data and evidence provider; it never executes the user's backtest or stores
+  strategy artifacts.
+- Local factors and strategies remain research results until they pass the promotion gates in
+  [risk-evolution.md](risk-evolution.md); nothing here authorizes live trading.
+- A plan, verify report or backtest report that contains a signed URL, API Key or local secret must be
+  rejected and regenerated — plans are hash-bound and secret-free by contract.

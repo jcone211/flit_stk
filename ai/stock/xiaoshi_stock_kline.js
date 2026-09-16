@@ -2,6 +2,14 @@
 // 把「从小石拉取股票数据」的能力直接封装成 JS 供模型工具调用，
 // 不依赖任何外部 skill/CLI（浏览器扩展无法执行命令行工作流）。
 //
+// 【契约变更 2026-09-16】小石公开 Agent 契约（xiaoshi-agent-contract/v1）已下线
+// 边缘数据接口，仅认可 /api/v3/capabilities 中列出的 operation：
+//   - /data/search          已退役（404 operation_not_in_public_contract）→ 本地库/免费渠道解析
+//   - /data/kline/{code}    已退役 → 历史 K 线只能走 /api/v3/history/download-session（R2 + 本地校验）
+//   - /data/quotes          已退役 → 批量行情改 POST /api/v3/market/quotes
+//   - /market/quote/{code}  仍有效（单只行情唯一在线口径）
+// 退役路径是契约退役而非可用性抖动：不得重试、不得改走镜像或单只轮询兜底。
+//
 // 稳定性处理（小石服务器可能不稳定）：
 //   - 每次请求带超时（AbortController），默认 20s
 //   - 网络错误 / 5xx / 超时：指数退避重试（默认最多 2 次）
@@ -30,7 +38,9 @@ function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// 统一请求入口：path 以 /api/v3 之后的部分（如 '/data/search'），params 拼为查询串。
+// 统一请求入口：path 为 /api/v3 之后的部分（如 '/market/quote/600519'），params 拼为查询串。
+// 只应传入 /api/v3/capabilities 的 operations 中列出的路径；退役路径会返回
+// 404 operation_not_in_public_contract，这是契约退役而不是可用性抖动，不要重试。
 // 返回解析后的 JSON；失败抛出带中文说明的 Error。
 export async function xiaoshiFetch(path, { apiKey, params = {}, timeoutMs = DEFAULT_TIMEOUT_MS, maxRetries = DEFAULT_MAX_RETRIES } = {}) {
     const key = String(apiKey || '').trim() || (await getSettingApiKey()) || DEFAULT_XIAOSHI_API_KEY;
@@ -85,39 +95,31 @@ export async function xiaoshiFetch(path, { apiKey, params = {}, timeoutMs = DEFA
     }
 }
 
-// 按名称/代码搜索股票，返回 [{ code, symbol, name, market, exchange, ... }]
-export async function xiaoshiSearchStock(q, opts = {}) {
-    const data = await xiaoshiFetch('/data/search', { ...opts, params: { q, limit: 10 } });
-    return data.items || [];
+// 按名称/代码搜索股票（旧 /data/search 已退役）。
+// 契约变动后小石不再提供公开的名称→代码检索接口，这里不再发起请求，直接抛可操作错误：
+// 调用方应改用本地列表 / 工作目录数据库 / 免费渠道解析，或让用户直接传 6 位代码。
+export async function xiaoshiSearchStock() {
+    throw new Error('小石已下线名称搜索接口（/api/v3/data/search 返回 404 operation_not_in_public_contract），'
+        + '请改用本地列表 / 本地数据库 / 免费渠道解析代码，或直接传 6 位代码');
 }
 
-// 日线 K 线（period=daily），返回近 limit 天 [{ date, open, high, low, close, volume, amount, ... }]
-// code 传 6 位数字（如 001309）或带后缀（001309.SZ）；接口内部只用数字部分。
-// instrument='etf'：股票主表不认 ETF（实测 404「证券代码不在A股股票主表」），需显式切 ETF 口径，
-// 且小石 ETF 历史目前只放未复权价（实测 adjust 只能 'none'，传 qfq 会被拒）。
-export async function xiaoshiDailyKline(code, { limit = 250, since, to, apiKey, timeoutMs, maxRetries, instrument = 'stock', adjust = 'qfq' } = {}) {
+// 在线日线已退役：小石公开契约不再提供 /data/kline、/data/daily、/data/kline/batch。
+// 历史 K 线的唯一路径是 /api/v3/history/download-session 取得 2 小时 R2 直链，
+// 用普通 GET（不带 Authorization）下载并校验 size/sha256 后本地计算（参见
+// plugins/skills/xiaoshi-quant-expert/references/history-sync-and-delivery.md）。
+// 这里保留函数签名以避免调用方改动，但直接抛错，不再产生会被 404 的请求。
+export async function xiaoshiDailyKline(code, { instrument = 'stock', adjust = 'qfq' } = {}) {
     const symbol = String(code).split('.')[0];
-    const params = { period: 'daily', adjust: instrument === 'stock' ? adjust : 'none', limit };
-    if (instrument !== 'stock') params.instrument = instrument;
-    if (since) params.since = since;
-    if (to) params.to = to;
-    const data = await xiaoshiFetch('/data/kline/' + symbol, { apiKey, params, timeoutMs, maxRetries });
-    const bars = data.bars || data.data || [];
-    return bars.map(b => ({
-        date: String(b.date || '').slice(0, 10),
-        open: b.open ?? null,
-        high: b.high ?? null,
-        low: b.low ?? null,
-        close: b.close ?? null,
-        volume: b.volume ?? null,
-        amount: b.amount ?? null,
-        change_pct: b.change_pct ?? null,
-        turnover_pct: b.turnover_pct ?? null,
-    }));
+    throw new Error('小石已下线在线 K 线接口（/api/v3/data/kline/' + symbol + ' 返回 404 operation_not_in_public_contract）；'
+        + (instrument === 'stock' ? 'adjust=' + adjust + ' 的日线' : 'instrument=' + instrument + ' 日线')
+        + '请改走 R2 历史下载（history/download-session + 本地校验），或使用本地日线库 / 免费渠道');
 }
 
 // 实时行情（market-quote-v1）：返回 { symbol, name, price, change, change_pct, open, high, low,
-// volume, amount, turnover_pct, time(observed_at), source, cache_status, is_stale, age_seconds }
+// previous_close, volume, amount, turnover_pct, time(observed_at), source, quote_status,
+// price_basis, cache_status, is_stale, age_seconds }
+// 注意 quote_status/price_basis：非交易时段返回的是「已完成时段参考价」
+// （closed_session_reference / completed_close），不能当盘中价使用。
 export async function xiaoshiQuote(code, { market = 'CN', instrument = 'stock', apiKey, timeoutMs, maxRetries } = {}) {
     const symbol = String(code).split('.')[0];
     const data = await xiaoshiFetch('/market/quote/' + symbol, { apiKey, params: { market, instrument }, timeoutMs, maxRetries });
@@ -137,6 +139,9 @@ export async function xiaoshiQuote(code, { market = 'CN', instrument = 'stock', 
         amplitude_pct: data.amplitude_pct ?? null,
         time: data.observed_at || data.received_at || null,
         source: data.source || null,
+        quote_status: data.quote_status || null,
+        price_basis: data.price_basis || null,
+        regular_session_completed: data.regular_session_completed ?? null,
         cache_status: data.cache_status || null,
         is_stale: data.is_stale ?? null,
         age_seconds: data.age_seconds ?? null,

@@ -14,6 +14,7 @@
 // 说明：
 //   - D*（假桥接）用例不打任何外部接口，除标注「免费补齐/小石兜底」的四条（合计约 4 次外呼）；
 //   - C*（真实行情）用例覆盖新浪+腾讯→小石批量→小石单只，靠拦截 fetch 模拟渠道失效，不额外耗额度；
+//     （2026-09-16 起小石批量改 POST /market/quotes：单只失败进 errors[]，脏代码不再带崩整批）
 //   - 小石相关调用请合并进一次运行，别为了看日志反复跑（额度低、东财/腾讯会限流）；
 //   - 脚本只在 REPO/.verify-workspaces/ 下写临时工作目录（含假 flit/config.json），跑完删除。
 
@@ -708,9 +709,12 @@ await run('C3 get_stock_quote 600206（期望免费渠道、0 次小石）', asy
 await run('C4 get_stock_quote 999999（负例：脏代码不得带崩同批正常股票）', async () => {
     const bad = await toolExecutors.get_stock_quote({ code: '999999' });
     console.log('  999999 → ' + brief(bad));
-    check('C4', '无效代码返回可解释的失败而非抛异常', !!bad.error, bad.error);
-    check('C4', '失败时带 渠道诊断（逐渠道说明）', !!bad.渠道诊断, bad.渠道诊断);
-    check('C4', '小石批量与单只两级兜底都被试过', /小石批量/.test(String(bad.渠道诊断)) && /小石单只/.test(String(bad.渠道诊断)), bad.渠道诊断);
+    // 现行工具返回结构：{ total, quotes:[{code,name,error?}], 渠道:[逐渠道说明] }（顶层 error 仅用于「无法解析代码」这类前置失败）
+    const badQuote = (bad.quotes || [])[0] || {};
+    const badDiag = Array.isArray(bad.渠道) ? bad.渠道.join('；') : String(bad.渠道 || '');
+    check('C4', '无效代码返回可解释的失败而非抛异常', !!(bad.error || badQuote.error), bad.error || badQuote.error);
+    check('C4', '失败时带 渠道诊断（逐渠道说明）', badDiag.length > 0, badDiag);
+    check('C4', '小石批量与单只两级兜底都被试过', /小石批量/.test(badDiag) && /小石单只/.test(badDiag), badDiag);
     const mixed = await toolExecutors.read_stocks_kline({ codes: ['999999', '600206'], days: 7 });
     const delta = countDelta(mixed.接口调用);
     const stocks = mixed.stocks || [];
@@ -721,8 +725,10 @@ await run('C4 get_stock_quote 999999（负例：脏代码不得带崩同批正�
     console.log('  渠道诊断: ' + JSON.stringify(mixed.实时拼接 && mixed.实时拼接.渠道诊断));
 });
 
-await run('C4b 免费实时全挂 + 同批混脏代码（验证小石单只兜底能救回正常代码）', async () => {
-    // 临时把测试列表换成「1 只无效 + 1 只有效」：小石批量会整批 5xx，只有逐只兜底才能拿回 600206
+await run('C4b 免费实时全挂 + 同批混脏代码（新契约：批量按标的隔离，脏代码不再带崩整批）', async () => {
+    // 2026-09-16 契约变更：小石批量改为 POST /api/v3/market/quotes，单只失败进 errors[]，
+    // 同批有效代码照常返回（旧 GET /data/quotes 是「一颗脏代码整批 503」）。
+    // 因此本用例改断言：有效代码必须仍从批量拿到行情，无效代码自身明确失败且不影响同批。
     const saved = store.local.stockList;
     store.local.stockList = [
         { name: '无效代码', code: '999999', prefix: 'SZ' },
@@ -734,7 +740,8 @@ await run('C4b 免费实时全挂 + 同批混脏代码（验证小石单只兜�
     console.log('  ' + brief(r));
     const hit = (r.quotes || []).find(q => q.code === '600206');
     check('C4b', '免费实时挂掉后确实升级到小石', /xiaoshi/.test(String(r.渠道 || '')), r.渠道);
-    check('C4b', '脏代码整批 503 时，正常代码被单只兜底救回', !!(hit && hit.price > 0 && /单只/.test(String(hit.source || ''))), hit && (hit.source || hit.error));
+    check('C4b', '脏代码不再带崩整批：正常代码仍有行情且来自小石', !!(hit && hit.price > 0 && /xiaoshi/.test(String(hit.source || ''))), hit && (hit.source || hit.error));
+    check('C4b', '脏代码自身仍明确失败（批量未返回 + 单只兜底失败）', /小石批量/.test(String(r.渠道诊断)) && /小石单只/.test(String(r.渠道诊断)), r.渠道诊断);
     check('C4b', '渠道诊断把降级链路说清楚', /免费实时/.test(String(r.渠道诊断)) && /小石/.test(String(r.渠道诊断)), r.渠道诊断);
 });
 

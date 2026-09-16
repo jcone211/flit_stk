@@ -11,9 +11,13 @@
 ```
 工作目录 `flit/config.json` 登记的本地 PostgreSQL 日线库
   → 免费日线：东方财富 push2his（内部再回退 同花顺 / 百度）
-  → 小石 /data/daily（逐只，只缺 1~2 个交易日时才调）
+  → 小石在线日线已退役（`/data/daily`、`/data/kline` 返回 404 operation_not_in_public_contract），不再作为补齐路径
   → 缺口更大：不抽额度，返回「本地数据库缺 N 个交易日…请更新本地日线库」
 ```
+
+> 小石历史日线现在只有一条路：`GET /api/v3/history/download-session` 取 2 小时 R2 直链，
+> 用普通 GET（不带 `Authorization`）下载并校验 `size`/`sha256` 后本地计算。
+> `xiaoshiDailyKline` 已改为直接抛可操作错误，不再发起会被 404 的请求。
 
 **跨度分两档（2026-09-02 口径，常量 `ai_tools.js: FREE_DAILY_MAX_DAYS = 7`）**：
 
@@ -24,9 +28,17 @@
 
 ```
 ① 免费全字段批量：新浪 hq.sinajs.cn + 腾讯 qt.gtimg.cn 并发取数后按代码合并（js/adata_realtime_quote.js: listMarketFull）
-② 小石 /data/quotes 批量（只查第 ① 步没拿到的那几只，ETF 传 instrument=etf）
-③ 小石 /market/quote/:code 单只兜底（限 12 只、并发 4）
+② 小石 POST /api/v3/market/quotes 批量（只查第 ① 步没拿到的那几只，ETF 传 instrument=etf；单次 1-100 只）
+③ 小石 GET /api/v3/market/quote/{symbol} 单只兜底（限 12 只、并发 4）
 ```
+
+> **契约变更（2026-09-16）**：小石已切换到公开 Agent 契约 `xiaoshi-agent-contract/v1`，
+> 旧边缘接口 `GET /api/v3/data/quotes`、`/data/kline/{code}`、`/data/search`、`/data/stocks`、
+> `/data/market-snapshot` 等全部退役，固定返回
+> `404 {"error":"operation_not_in_public_contract"}`。**这是契约退役，不是可用性抖动**：不得重试、
+> 不得改走镜像或单只轮询兜底。当前唯一权威清单是
+> `GET https://api.shizixi.com/api/v3/capabilities` 的 `operations`；离线参考见
+> `plugins/skills/xiaoshi-quant-expert/references/platform-contract.md`。
 
 交易时段（盘中 09:30–11:30、13:00–15:00 与午休 11:30–13:00）问「近 N 日」= **N-1 根已收盘日线 + 1 根当日实时 bar**（`applyIntradayBar` 拼接，行上标 `intraday` / `as_of` / `quote_source`），总行数仍为 N。盘前、15:01 之后、周末不拼，`实时拼接` 字段直接不出现。
 
@@ -55,18 +67,19 @@
 | 腾讯 `qt.gtimg.cn` | 免费 | ✓ | ✗ | ✓ | ✓ **扩展内主力免费实时源** | 同上 `listMarketFullQQ` / `listMarketCurrentQQ` |
 | 东方财富 push2his | 免费 | ✗ | ✓（个股 / ETF 日线） | ✗（逐只） | ✓（偶发空数据，同花顺 / 百度兜底） | `ai/stock/adata_stock_kline.js: getMarketDaily / getMarketEtfDaily` |
 | 同花顺 / 百度（adata 上游） | 免费 | ✗ | ✓（个股日线） | ✗ | 部分需 `Referer` | 同上 `trySources` 第二、三源；`js/adata_realtime_quote.js`（API 直取模式） |
-| 小石量化 `/data/daily` | 需 Key（额度型） | ✗ | ✓（逐只，含 429 退避） | ✗ | ✓ | `ai/stock/xiaoshi_stock_kline.js: xiaoshiDailyKline` |
-| 小石量化 `/market/quote/:code` | 需 Key | ✓ | ✗ | ✗（单只） | ✓ | 同上 `xiaoshiQuote`（实时第 ③ 级兜底） |
-| 小石量化 `/data/quotes` | 需 Key | ✓ | ✗ | ✓（含 ETF，`instrument=etf`） | ✓ | `js/xiaoshi_realtime_quote.js: batchQuotes`（实时第 ② 级） |
-| 小石量化 R2 年度/单日历史文件 | 需 Key（签名 URL） | ✗ | ✓（`dataset=daily` 一年一个全市场文件；`daily-date` 单日快照；`daily-stock` 单只一年） | ✓（一次一年 / 一日） | ✓（实测年文件 20s+，只适合后台跑） | **扩展内没有下载代码**（`ai/`、`js/`、`background/` 只调 `/data/*` 与行情端点，不调 `/history/*`）——年文件由小石官方增量更新器 `/api/v3/history/auto-update.py` 或你自己的脚本落地 |
-| 小石量化 `/data/search` | 需 Key | ✗ | ✗ | 名称 → 代码 | ✓ | `xiaoshiSearchStock`（`resolveStockCode` 用） |
+| 小石量化 在线日线 `/data/daily`、`/data/kline/{code}` | — | ✗ | ✗ | ✗ | ✗ | **已退役（404 operation_not_in_public_contract）**：`ai/stock/xiaoshi_stock_kline.js: xiaoshiDailyKline` 已改为抛可操作错误 |
+| 小石量化 `/market/quote/{symbol}` | 需 Key | ✓ | ✗ | ✗（单只） | ✓ | `xiaoshi_stock_kline.js: xiaoshiQuote`（实时第 ③ 级兜底；须带 `market`+`instrument`） |
+| 小石量化 `POST /market/quotes` | 需 Key | ✓ | ✗ | ✓（含 ETF，`instrument=etf`；现支持 CN/HK/US） | ✓ | `js/xiaoshi_realtime_quote.js: batchQuotes`（实时第 ② 级；1-100 只/次，脏代码只进 `errors[]`） |
+| 小石量化 R2 历史文件 | 需 Key（签名 URL） | ✗ | ✓（`cn-daily` 一年一个全市场文件；`daily-date` 单日快照；`daily-stock` 单只一年） | ✓（一次一年 / 一日） | ✓（实测年文件 20s+，只适合后台跑） | **扩展内没有下载代码**（`ai/`、`js/`、`background/` 只调行情端点，不调 `/history/*`）——历史文件由官方工具包 `xiaoshi-data download`（`xiaoshi-agent-tools`）或你自己的脚本落地 |
+| 小石量化 名称搜索 `/data/search` | — | ✗ | ✗ | ✗ | ✗ | **已退役（404 operation_not_in_public_contract）**：`ai/stock/xiaoshi_stock_kline.js: xiaoshiSearchStock` 已改为直接抛可操作错误，代码解析改走本地列表 / 本地库 / 免费渠道 |
+| 小石量化 在线 K 线 `/data/kline/{code}` | — | ✗ | ✗ | ✗ | ✗ | **已退役（404 operation_not_in_public_contract）**：`xiaoshiDailyKline` 已改为直接抛可操作错误；历史日线只能走 R2 下载 + 本地校验 |
 
 ### 各渠道实测备注
 
 - **本地日线库是「上一交易日 EOD」**，由用户自己的定时任务维护；扩展只读不写。缓存末行若是当日（未收盘残留），`fillKlineFromApi` 会先剔除再算缺口，否则永远判定「已最新」而补不到上一交易日。
 - **CLI 与扩展页环境不同**：Node/Python 里新浪（GBK 正文）、腾讯、东财、adata、小石全部直连可用；用户 Debug 里看到的 `TypeError: Failed to fetch` 基本是扩展页 CORS/禁止头导致，**因此实时必须双源合并、且失败原因要回给模型**。
-- **小石 `/data/quotes` 批量：一个代码不存在 → 整批 503**（实测 `codes=999999` 返回 `批量实时行情暂不可用`），同批有效代码也拿不到。第 ③ 级单只接口是必要兜底而非过度设计：实测屏蔽免费渠道后，`999999 + 600206` 这批里 600206 仍被单只接口救回（`渠道 = xiaoshi(单只)`）。
-- **小石 `/data/daily` 是逐只接口**（文档明确「每次只取一只」+ 429 退避），不存在「一次拿一年全市场」的日线接口——那是下载 R2 年度 parquet 那条路径。
+- **小石批量行情已换契约（2026-09-16）**：`POST /api/v3/market/quotes`，单次 1-100 只，**按标的隔离失败**——`999999` 这类脏代码只进 `errors[]`，同批 `600519` 照常返回（实测 `{requested:3,count:2,missing:['999999'],errors:1}`）。旧 `GET /data/quotes`「一颗脏代码带崩整批 503」的行为已不存在，第 ③ 级单只兜底仍保留（免费渠道兜底与跨市场单只场景）。
+- **小石已无在线日线接口**：`/data/daily`、`/data/kline/{code}`、`/data/kline/batch`、`/data/search` 全部 404 operation_not_in_public_contract。历史数据只有 R2：`history/download-session` 取 2 小时直链 → 本地校验 `size`/`sha256` → 本地计算；名称→代码解析改走本地列表 / 本地库 / 免费渠道。
 - **免费侧没有全市场某日快照、也没有指数日线**（adata 上游 `get_market_daily_a` 返回逐股列表而非指数），所以「一次请求补齐全市场缺口」在免费渠道做不到。
 - **ETF 不在本地库内**（库里没有 51/15/58 代码），ETF 日线一律走免费 ETF 接口（失败再小石）。ETF 代码前缀规则与股票不同：`159 → SZ`、`51/58 → SH`（`shared/utils.js: etfPrefixForCode`，`resolveStockCode` 已复用，勿再用「6 开头才是 SH」的粗推断）。
 - **`time` 字段格式随渠道不同**：免费渠道为 `2026-09-02 11:30:00`，小石为 ISO `2026-09-02T11:33:52`。展示层别做严格解析。
@@ -185,7 +198,7 @@ node docs/verify-free-first.mjs --bridge=real --bridge-url http://127.0.0.1:1732
 | --- | --- | --- |
 | C1（12 项） | 无（假时钟） | 时段/缺口计数口径：盘前/开盘瞬间/盘中/午休/尾盘/15:00 边界/15:01/周末、`weekdaysBetween` 不含两端 |
 | D1~D19（102 项） | `docs/mock-bridge.mjs` 假桥接，不打外部接口（除标注的补齐用例） | 四种不可用话术各自命中（均为 `days=30`）与≤ 7 天降级免费（`days=7` 拿到真行、source=adata、小石 0 次）、库最新时 0 外呼、缺 3 根走免费、缺 2 根才升级小石、缺 30 根不抽额度、config 空走工作目录搜索、表名未登记按列签名探测（排除 `*_today` 干扰表）、名称→代码走库不抽小石搜索、批量一次 SQL、股票+ETF 混批不牵连（含 >7 天 ETF 取不到的现状钉住）、只读闸门 0 拒绝、改 config 表名不必重开窗口、未验证的表名不冒充「数据表」 |
-| C2~C9（21 项） | 真实网络（新浪/腾讯/东财/小石） | 实时三级链（含脏代码整批 503 + 单只兜底）、提示词注入与库口径 |
+| C2~C9（21 项） | 真实网络（新浪/腾讯/东财/小石） | 实时三级链（批量按标的隔离：脏代码只进 `errors[]`，另留单只兜底）、提示词注入与库口径 |
 | C10（6 项） | 无 | 工具表完整性：真跑 `getLoadedToolDefs()`、TOOL_DEFS/TOOL_GROUPS/toolExecutors 三者对齐、**description 与参数描述真的送给了模型**（旧版压成名字导致模型猜代码） |
 | R1（8 项） | 无 | 跳轮上下文：`retain_tool_data` 登记/拒收/上限口径 |
 | G1~G2（14 项） | 无（G2 复用假桥接，0 外呼） | 反编造 guard 三态：解释型正文放行 / 工具终局拒绝后给数值直接丢 / 无证据才 correct；日期与股票代码不被误判；debug.txt 场景回放 |

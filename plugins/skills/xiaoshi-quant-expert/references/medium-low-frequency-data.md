@@ -1,15 +1,14 @@
 # Medium And Low Frequency Research Data
 
-These datasets are free research inputs collected from public sources. They are not guaranteed trading signals. Read `GET /api/v3/factors/library` first for the latest derived snapshot, then use the quant-data endpoints for stock-level evidence and historical validation. A `stale` snapshot is dated older evidence, not a current value and not zero.
+These datasets are free research inputs collected from public sources. They are not guaranteed trading signals. Read `GET /api/v3/quant-data/catalog` first: it carries each dataset's `maturity`, `history_status`, `caveat`, `state` (as_of, sources, record_count, columns) and the published `derived_factors` definitions/snapshots. A `stale` snapshot is dated older evidence, not a current value and not zero.
 
 ## Endpoints
 
-- Catalogue: `GET /api/v3/quant-data/catalog`
-- Factor mapping: `GET /api/v3/quant-data/factors`
-- Records: `GET /api/v3/quant-data/{dataset}?code=&since=&to=&limit=500`
+- Catalogue, derived factors and strategy research: `GET /api/v3/quant-data/catalog`
+- Records: `GET /api/v3/quant-data/{dataset}?code=&since=&to=&limit=500` (`limit` <= 5000)
 - Freshness: `GET /api/v3/quant-data/{dataset}/status`
-- Latest explainable derived values: `GET /api/v3/factors/library` -> `derived_snapshot.factors`
-- Individual stock fund flow remains at `GET /api/v3/stock/fundflow/{code}`.
+- Derived factor snapshots are published inside the catalogue (`derived_factors.definitions` plus `items`); the former `GET /api/v3/factors/library` route is retired.
+- Per-stock fund flow is the `stock_fundflow` (and `stock_fundflow_aggregate`) dataset in the same API; `GET /api/v3/stock/fundflow/{code}` is retired.
 
 Authenticated record requests use the same Bearer API Key as the rest of Xiaoshi. Catalogue and freshness are public. There is no daily quota.
 

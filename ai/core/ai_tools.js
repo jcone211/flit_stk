@@ -23,7 +23,7 @@ import { getMarketDaily as adataGetMarketDaily, getMarketEtfDaily as adataGetMar
 import { batchQuotes as xiaoshiBatchQuotes } from '../../js/xiaoshi_realtime_quote.js';
 import { batchQuotes as adataBatchQuotes, listMarketFull as adataListMarketFull } from '../../js/adata_realtime_quote.js';
 import { parseCronExpr, nextTradingCronTimes } from '../../shared/cron.js';
-import { etfPrefixForCode } from '../../shared/utils.js';
+import { cleanStockName, etfPrefixForCode } from '../../shared/utils.js';
 import { bridgeRequest, bridgeHealth } from './bridge_client.js';
 
 // add_stock_to_portfolio 跨调用共享的页面打开时序计数器
@@ -364,7 +364,8 @@ export const toolExecutors = {
     },
     async add_stock_to_portfolio(args) {
         const rawNames = Array.isArray(args.names) ? args.names : (args.name ? [args.name] : []);
-        const names = rawNames.map(n => String(n).trim()).filter(Boolean);
+        // 名称去空白：模型口报/剪贴板名可能带全角空格，搜索词与落库名保持干净
+        const names = rawNames.map(n => cleanStockName(n)).filter(Boolean);
         if (names.length === 0) return { error: '股票名称不能为空，请提供 names 数组' };
         const etfNames = names.filter(isEtfName);
         if (etfNames.length > 0) {
@@ -394,6 +395,8 @@ export const toolExecutors = {
             }
             const exist = list.find(s => String(s.url || '') === url);
             if (exist) {
+                // 已存在股票名称去空白：修复历史落库时残留的中间空格
+                exist.name = cleanStockName(exist.name);
                 if (importPrice != null && exist.importPrice == null) {
                     // 股票已在组合但初始价还没设置：用用户本次提供的买入价补齐，
                     // 避免后续刷新抓取把最新价当成初始价

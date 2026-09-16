@@ -1824,6 +1824,7 @@ async function parseAndRecordStockTrade(raw) {
         .replace(/(?:买入价|买入价格|成本价|成交价|价格|成交金额)\s*[:：]?\s*[0-9]+(?:\.[0-9]+)?/g, '')
         .replace(/^\s*[0-9]+(?:\.[0-9]+)?\s*元?\s*/, '')
         .replace(/[。！!？?.,，、；;]+$/g, '')
+        .replace(/\s+/g, '') // 股票名称不应含空白：一并移除中间的全角/半角空格
         .trim();
     if (!name) return { ok: false, text: '未识别到股票名称，请填写如「我买入了贵州茅台」' };
     const priceMatch = text.match(/(?:买入价|买入价格|成本价|成交价|价格)\s*[:：]?\s*([0-9]+(?:\.[0-9]+)?)/);

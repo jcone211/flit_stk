@@ -4,7 +4,7 @@
 // 写入一律「读 storage 最新 → 合并 → 写回」，不依赖内存快照，避免覆盖外部（AI 窗口/popup）写入。
 
 import {
-    stripSign, normalizeUrl, effectiveStockUrl, selectorKeyForUrl,
+    stripSign, normalizeUrl, effectiveStockUrl, selectorKeyForUrl, cleanStockName,
 } from '../shared/utils.js';
 import { applyThresholds } from '../popup/notifications.js';
 
@@ -157,7 +157,8 @@ export async function landCapturedDocument(documentData) {
     redirectSync.forEach(([s, url]) => { s.url = url; });
     for (const stock of activeTargets) {
         stock.url = normalizeUrl(stock.url) || stock.url;
-        stock.name = String(parsed.name || '').trim();
+        // 名称去空白：页面文本里的中间全角/半角空格会落成「柳  工」，trim 只去首尾
+        stock.name = cleanStockName(parsed.name);
         if (parsed.code) stock.code = parsed.code;
         if (parsed.prefix) stock.prefix = parsed.prefix;
         if (parsed.lastClose != null) stock.startPrice = parsed.lastClose;
@@ -220,7 +221,7 @@ export async function landApiQuotes(quotes) {
 
 // API 行情字段映射到股票条目（昨收取 last_close，涨跌幅取 change_pct）
 function applyQuoteToStock(stock, q) {
-    if (q.name) stock.name = String(q.name).trim();
+    if (q.name) stock.name = cleanStockName(q.name);
     if (q.price != null) {
         stock.currentPrice = q.price;
         if (stock.importPrice == null) stock.importPrice = q.price; // 初始价首次回填

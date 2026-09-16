@@ -19,6 +19,12 @@ export function normalizeUrl(raw) {
     }
 }
 
+// 股票名称清洗：移除名称中所有空白（普通/全角空格、Tab、换行等）。
+// 股票名称不应含任何空白；trim 只能去首尾，页面文本里的中间空格（如「柳  工」）需整体去除
+export function cleanStockName(name) {
+    return String(name == null ? '' : name).replace(/\s+/g, '');
+}
+
 // 计算导入以来涨跌幅(%)，任一价格缺失或基准价为 0 返回 null
 export function calcImportPercent(currentPrice, importPrice) {
     const cur = numOrNull(currentPrice);

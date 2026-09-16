@@ -1,4 +1,4 @@
-import { stripSign, effectiveStockUrl, isKnownMarketPrefix } from '../shared/utils.js';
+import { stripSign, effectiveStockUrl, isKnownMarketPrefix, cleanStockName } from '../shared/utils.js';
 import { nextCronTime, isTradingTime } from '../shared/cron.js';
 import { batchQuotes } from '../js/xiaoshi_realtime_quote.js';
 import { batchQuotes as adataBatchQuotes } from '../js/adata_realtime_quote.js';
@@ -205,6 +205,13 @@ function ensureMigrated() {
                     const currentSelector = syncSel.selectorName || '';
                     const portfolios = localResult.portfolios || {};
 
+                    // 历史数据清洗：各组合股票名称移除所有空白（页面文本中间空格会落成「柳  工」），
+                    // 复用字段补齐逻辑逐组合清洗，只动 name 等缺失字段
+                    Object.values(portfolios).forEach(combo => {
+                        if (!combo || !Array.isArray(combo.stockList)) return;
+                        combo.stockList = migrateStockFields(combo.stockList);
+                    });
+
                     // 补全缺失的默认组合
                     DEFAULT_PORTFOLIOS.forEach(name => {
                         if (!portfolios[name]) {
@@ -258,6 +265,8 @@ function ensureMigrated() {
 function migrateStockFields(list) {
     for (const item of list) {
         if (!item || typeof item !== 'object') continue;
+        // 名称去空白：页面文本里的中间全角/半角空格会落成「柳  工」，trim 只去首尾
+        item.name = cleanStockName(item.name);
         if (!('importTargetPercentLe' in item)) item.importTargetPercentLe = '';
         if (!('importTargetPercentGe' in item)) item.importTargetPercentGe = '';
         if (!('notifiedDaily' in item)) {

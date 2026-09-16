@@ -1,5 +1,5 @@
 import {
-    getDateTime, normalizeUrl, stripSign, numOrNull,
+    getDateTime, normalizeUrl, stripSign, numOrNull, cleanStockName,
     calcImportPercent, effectiveStockUrl, etfPrefixForCode
 } from '../shared/utils.js';
 import { validateCronExpr } from '../shared/cron.js';
@@ -916,7 +916,9 @@ function executeQuickImport(items, name) {
     const now = Date.now();
     let added = 0;
     let skipped = 0;
-    items.forEach(item => {
+    // 名称去空白：粘贴的股票名可能带全角/半角空格（如「柳  工」），URL 搜索词与落库名称保持一致
+    const toImport = items.map(cleanStockName).filter(Boolean);
+    toImport.forEach(item => {
         const url = normalizeUrl(buildQuickOpenUrl(item)); // 问财/雪球搜索页地址作为股票标识
         if (!url) return;
         if (target.some(s => s.name === item)) { skipped++; return; } // 组合内同名跳过
@@ -955,7 +957,7 @@ function executeQuickImport(items, name) {
         };
         // 逐个延迟打开，避免一次性打开过多页面（1.5-2.2s 随机间隔）
         let delay = 0;
-        items.forEach(item => {
+        toImport.forEach(item => {
             delay += 1500 + Math.random() * 700;
             setTimeout(() => openUrl(item), delay);
         });

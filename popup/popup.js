@@ -861,8 +861,10 @@ quickOpenEl.addEventListener('keydown', (event) => {
         event.preventDefault();
         const items = splitQuickOpenInput();
         if (items.length === 0) return;
-        // 放开抓取窗口：监控未运行时，打开的页面抓取也能回填解析
-        chrome.runtime.sendMessage({ action: 'armCapture' });
+        // 快速打开仅负责打开网页，不放开抓取窗口、不触发数据落地：
+        // 只有「全量刷新 / 开始监控 / 新增·一键导入的 refreshOne」才更新数据，
+        // 避免浏览页面被误回填，或解析失败误报「数据更新失败」
+
         // 逐个延迟打开，避免一次性打开过多页面（1.5-2.2s 随机间隔）
         let delay = 0;
         items.forEach((item) => {

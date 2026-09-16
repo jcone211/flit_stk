@@ -355,8 +355,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         refreshStockTab(request.url);
         sendResponse({ status: 'ok' });
     } else if (request.action === 'armCapture') {
-        // 快速打开/一键导入打开页面后：放开抓取窗口，监控未运行时也允许本次回填解析
-        // （这些页面由 chrome.tabs.create 打开，不设窗口则「未运行即丢弃」会拦掉抓取）
+        // 一键导入（普通页面打开方式）打开页面后：放开抓取窗口，监控未运行时也允许本次回填解析。
+        // 快速打开不调用此消息——其页面仅用于浏览、不更新数据，
+        // 避免误解析/误报「数据更新失败」（见 popup.js 快速打开 Enter 处理）
         allowCapturedUntil = Date.now() + ALLOW_CAPTURE_WINDOW_MS;
         sendResponse({ status: 'ok' });
     } else if (request.action === 'syncCronJobs') {

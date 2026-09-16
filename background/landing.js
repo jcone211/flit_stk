@@ -96,12 +96,6 @@ export async function landCapturedDocument(documentData) {
     const messageUrl = documentData.url;
     const key = selectorKeyForUrl(messageUrl);
     if (!key) return false;
-    const parsed = await parseViaOffscreen(key, documentData.html);
-    if (!parsed) {
-        console.warn('[thswc:bg] 解析失败/名称为空（选择器可能已失效）:', messageUrl);
-        emitLanded(true);
-        return false;
-    }
 
     const storage = await getLocal(['stockList', 'portfolios', 'activePortfolio']);
     const portfolios = storage.portfolios || {};
@@ -141,8 +135,11 @@ export async function landCapturedDocument(documentData) {
             }
         }
     }
+    // 未加入监控列表的页面（快速打开、普通浏览等）直接忽略：不解析、不落地、不报错。
+    // 匹配只依赖 URL/搜索词、不需要解析结果，故可提前判定——
+    // 保证快速打开页面即使处于 5 分钟抓取窗口内也不会被误回填或误报「数据更新失败」
     if (index === -1 && others.length === 0) {
-        return false; // 未加入监控列表的页面（快速打开等）直接忽略，避免普通浏览误报
+        return false;
     }
 
     // 应用到命中的全部股票（当前组合 + 其他组合同 URL 的）；
@@ -153,6 +150,14 @@ export async function landCapturedDocument(documentData) {
     targets.push(...others);
     const activeTargets = documentData.fullRefresh ? targets : targets.filter(s => !s.stopRunning);
     if (activeTargets.length === 0) return false;
+
+    const parsed = await parseViaOffscreen(key, documentData.html);
+    if (!parsed) {
+        // 解析失败只在命中监控股票时上报；未命中的页面已提前返回，不会误报
+        console.warn('[thswc:bg] 解析失败/名称为空（选择器可能已失效）:', messageUrl);
+        emitLanded(true);
+        return false;
+    }
 
     redirectSync.forEach(([s, url]) => { s.url = url; });
     for (const stock of activeTargets) {

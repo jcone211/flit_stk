@@ -106,6 +106,57 @@ export function correctionPromptText() {
 }
 
 /**
+ * guard 是否入场判定（纯函数，可被回归脚本直接测，G4 断言）。
+ * 没有任何行情上下文时的正文（话题非行情、本轮也没调用/拒绝过行情工具）里的行情名词/数字
+ * 几乎必然是「复述用户消息或读到的文件」，不是凭空编造——此时必须放行，
+ * 否则正常问答（读 FACT.md、复述用户卖出价）会被强制取数（debug.txt [052][056]、[023]）。
+ * @param {boolean} topicIsQuote 话题是否行情（quoteTopicNearby 只扫 user 的结果）
+ * @param {boolean} quoteCalled   本轮是否调用过行情工具（含成功与失败）
+ * @param {boolean} quoteRefused  本轮行情工具是否终局拒绝
+ */
+export function shouldJudgeQuote({ topicIsQuote = false, quoteCalled = false, quoteRefused = false } = {}) {
+    return topicIsQuote || quoteCalled || quoteRefused;
+}
+
+// content 可能是字符串或 OpenAI 多模态 parts 数组；只取可判别的文本（图片只留占位，不算话题词）
+function contentToText(content) {
+    if (content == null) return '';
+    if (typeof content === 'string') return content;
+    if (Array.isArray(content)) {
+        return content.map(p => {
+            if (p == null) return '';
+            if (typeof p === 'string') return p;
+            if (p.type === 'text') return p.text || '';
+            return ' [img] ';
+        }).join(' ');
+    }
+    return '';
+}
+
+/**
+ * 最近几条「用户」消息里是否有话题词（纯函数，可被回归脚本直接测，G4 断言）。
+ * **只扫 role='user'，不扫 assistant**——模型回复里自然带出的行情词（如「查行情/查K线」）
+ * 不属于用户意图；若把模型自述算进话题，后续每一轮都会被误判成行情话题，guard 就会
+ * 把读文件/复述用户数据的正文当编造强制取数（debug.txt [052][056]、[023]，bug2 根因）。
+ * 用户连续追问（如只回「好的」）时关键词仍在历史 user 消息里，向上找即可。
+ * @param {Array} apiMessages 发给模型的 API 消息（带 kind 隐藏标记）
+ * @param {RegExp} re 话题词正则
+ * @param {number} maxUsers 最多回看几条用户消息
+ */
+export function recentUserTopic(apiMessages, re, maxUsers = 4) {
+    let users = 0;
+    for (let i = (apiMessages || []).length - 1; i >= 0; i--) {
+        const m = apiMessages[i];
+        if (!m || m.kind === 'tool_trace' || m.kind === 'retained_data' || m.kind === 'compact_note') continue; // 隐藏条目自带行情字样，不能当话题证据
+        if (m.role !== 'user') continue;
+        const text = contentToText(m.content);
+        if (text && re.test(text)) return true;
+        if (++users >= maxUsers) break;
+    }
+    return false;
+}
+
+/**
  * 历史证据验证（纯函数，可被回归脚本直接测）：检查隐藏条目（tool_trace 账本 / retained_data 便签）
  * 里是否有「与话题所需数据维度匹配」的真实行情来源。ai.js 的 hasPriorQuoteEvidence 委托给它。
  * klineNeeded=true 时只认 K 线类工具（read_stock_kline / read_stocks_kline）的证据——

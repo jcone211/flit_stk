@@ -1,0 +1,96 @@
+# 反编造 guard 误杀「非行情话题」正文 + guard 纠正轮气泡残留
+
+- **日期**：2026-09-16
+- **严重级别**：中（正常问答被强制取数打断体验；UI 残留多个气泡）
+- **状态**：已修复（本文件）
+- **关联证据**：`docs/debug.txt`（会话 `chat_mu3uu1enxi1`）
+- **关联代码**：`ai/ai.js`（循环开头 `dropAssistantBubble` / correct 分支清理 / guard 入口 `shouldJudgeQuote` / `quoteTopicNearby`/`topicNeedsKline` 只扫 user）、`ai/core/ai_guard.js`（新增 `shouldJudgeQuote` / `recentUserTopic` 纯函数）
+- **回归断言**：`docs/verify-free-first.mjs` G4 系列
+
+---
+
+## 一、现象
+
+同一条会话里出现两个 bug：
+
+**bug2（误杀）**：用户问「你读取一下/memory/FACT.md」（[037]），模型正常读取文件并总结（[051]，1695 字，内容含行情数据库表结构：收盘/成交量/涨跌幅 + 数值）。guard 判定「行情名词 + 价格形态数值」**命中**（[052]），注入强制纠正「本轮未检测到取数成功的工具调用，已要求重新取数」；二次回复（[055]，1522 字仍是对 FACT.md 的正常总结）再次被判「强制纠正后仍给出行情数值」直接**丢弃正文**并报错（[056][057]）。
+
+**bug1（气泡残留）**：多轮工具调用 + guard 纠正/丢弃过程中，页面上残留多个「空气泡」——工具调用的前置文本气泡、被打断的正文气泡都没有被移除。
+
+## 二、根因（代码级）
+
+### bug2：话题判定把「模型自述行情词」当用户意图 + guard 无上下文入场门槛
+
+`quoteTopicNearby` 旧实现：
+
+```js
+if (m.role !== 'user' && m.role !== 'assistant') continue;   // 扫到 assistant 消息
+if (typeof m.content === 'string' && re.test(m.content)) return true;
+```
+
+**链条**：用户在第一条问题「工作目录中提供了哪些能力」后，模型回复（[034]）里出现「查行情/查K线/查持仓」字样（模型在介绍能力清单时自然提到）→ 该 **assistant 回复被 `quoteTopicNearby` 当成了话题证据** → 后续每一轮 `topicIsQuote` 都恒为 true；加上本轮确实没调行情工具、无历史证据，`decideQuoteGuard` 按旧口径判定「强信号（行情名词+价格数字）」→ `correct`。
+
+**本质**：guard 想验证「本文正文的行情数值是否有真实来源」，却把「模型上轮自述的行话」当成「用户这轮在问行情」。模型读文件、复述用户提供数据这些「有来源、无编造」的正文，被当成无依据编造强制取数——正是《guard-历史证据维度误判导致幻觉漏拦截.md》§7 残余风险 2/4 想压低却未做的「误杀」方向。
+
+### bug1：循环开头只断引用不移除 DOM
+
+`runAgentLoopBody` 循环开头旧实现：
+
+```js
+state.currentAssistantEl = null;   // 只断引用，页面上的气泡节点没人 remove()
+```
+
+**链条**：工具调用轮模型输出的前置文本（如 list_dir 前的 2 字文本）经 `appendToCurrentAssistant` 渲染成气泡 → 该轮以 `continue` 结束 → 下一轮开头 `currentAssistantEl = null` 只扔掉引用，**气泡永久残留在 messagesEl 里**；guard `correct` 分支同样只 push 系统提示、不清理已流式的正文气泡 → 新一轮流式再起第二个气泡，页面上多个气泡叠加。
+
+## 三、修复方案
+
+### 修复 1（bug2a）：话题判定只扫 user、不扫 assistant
+
+`ai/core/ai_guard.js` 新增纯函数 `recentUserTopic(apiMessages, re, maxUsers=4)`：只匹配 `role === 'user'` 的消息，隐藏条目（tool_trace / retained_data / compact_note）一律跳过。`ai/ai.js` 的 `quoteTopicNearby` / `topicNeedsKline` 委托它。
+
+- 模型回复里出现「行情/K线」不再是话题证据 → `topicIsQuote` 回归「用户到底在问什么」。
+- 用户连续追问（如只回「好的」）仍能向上找到关键词（历史 user 消息里）。
+
+### 修复 2（bug2b）：guard 入口加「行情上下文」门槛
+
+`ai/core/ai_guard.js` 新增纯函数 `shouldJudgeQuote({ topicIsQuote, quoteCalled, quoteRefused })`：
+
+```js
+return topicIsQuote || quoteCalled || quoteRefused;
+```
+
+`ai/ai.js` guard 入口该为：
+
+```js
+const quoteCalled = turnCalls.some(c => QUOTE_TOOLS.has(c.name));
+if (!curEvidence && shouldJudgeQuote({ topicIsQuote, quoteCalled, quoteRefused })) { …判定… }
+```
+
+- 话题非行情、本轮没碰任何行情工具 → **guard 不入场**，正文照发（FACT.md 总结、复述用户提供的卖出价等「有来源的行情词」不再被拦截）。
+- 话题是行情 / 本轮调过行情工具 / 工具终局拒绝 → 照旧按三态判定，核心拦截不降级。
+
+### 修复 3（bug1）：所有「未提交」的气泡统一清理
+
+- `runAgentLoopBody` 循环开头：`state.currentAssistantEl = null` → `dropAssistantBubble()`（工具轮前置文本、上轮被打断的正文，既没 commitAssistant 落库，页面就该清掉）。
+- `correct` 分支注入纠正前先 `dropAssistantBubble()`：正文作废立即清气泡，不再等下一轮。
+- `drop` 分支原有 `dropAssistantBubble()` 保留（增加注释说明先清气泡）。
+
+### 修复后行为矩阵（仅 guard 入场路径变化）
+
+| 场景 | 话题（只扫 user） | 本轮行情工具 | 行为 |
+|---|---|---|---|
+| 读文件/复述用户数据（debug [037]…[056]） | ❌ | ❌ | 不入场，正文照发（本次 bug2 修复点） |
+| 问「用k线分析」零调用编造（历史案例 [043]） | ✅ | ❌ | 入场 → correct，核心拦截不破坏 |
+| 连续问现价（历史案例 G3 快照话题） | ✅ | ❌ | 入场 → 历史同维度证据时 correct 降级 pass_warn |
+| 模型调行情工具但失败/拒绝后给数值 | — | ✅ | 入场 → 拒绝时 drop、抛异常时 correct/drop |
+
+## 四、残余风险（列后续项）
+
+1. **入场门槛以「话题词 / 工具调用」为凭**：用户不加行情词、模型又不调工具、正文却出现行情数值（较罕见）会绕过 guard。受《guard-历史证据维度误判导致幻觉漏拦截.md》§7 修复 3 约束：**形态/数值强信号必须与「本轮无任何取数成功」共同前置**，当前判断不对该场景增加拦截以免扩大误杀。
+2. **气泡清理覆盖范围**：`renderHistory` 回放不产生残留（每次重建 DOM）；`retryLast` / `continueGeneration` 路径走 `state.currentAssistantEl = null` 重置，工具轮残留只在同一次用户提问的 function-calling 循环内出现——本次已覆盖。若未来新增 `continue` 分支需同步清理。
+
+## 五、验证
+
+- 语法：`node --check ai/core/ai_guard.js`、`node --check ai/ai.js`、`node --check docs/verify-free-first.mjs` 均通过。
+- 回归：`node docs/verify-free-first.mjs` 全量跑。新增 G4 共 10 项断言：`shouldJudgeQuote` 三输入语义、[052] 读文件场景不入场、K 线话题仍入场、`recentUserTopic` 只认 user（assistant 自述行情词不算话题 / 用户连续追问仍能向上找 / 隐藏条目不当作话题证据）。G1/G2/G3 三态判定纯函数未改动，全绿。
+- 说明：基线即有 D5×2 / C3×1 共 3 项失败（数据源/渠道 mock 相关），与本次 guard 改动无关（改动前后一致）。

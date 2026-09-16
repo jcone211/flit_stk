@@ -133,10 +133,10 @@ import { readyRoot, writeUpload, getBridgeHandle, workspacePermission } from './
 import {
     loadDebugFlag, applyRemoteDebugFlag, isDebugOn, beginDebugSession, dropDebugSession,
     record, recordRepeat, recordMessage, withDebugMuted, bindDebugButton, bindDebugGlobals,
-    flattenContent,
 } from './core/ai_debug.js';
 import {
     QUOTE_TOOLS, KLINE_QUOTE_TOOLS, KLINE_TOPIC_RE, hasQuoteEvidence,
+    shouldJudgeQuote, recentUserTopic,
     decideQuoteGuard, isTerminalRefusal, correctionPromptText,
 } from './core/ai_guard.js';
 
@@ -366,7 +366,10 @@ async function runAgentLoopBody(initialMessages, initialToolGroups, turnCalls) {
     const switchedForVision = requestProvider.id !== activeProvider().id;
     if (switchedForVision) appendMessage('system', `检测到图片，已临时切换到视觉模型「${requestProvider.name || requestProvider.model}」处理本次请求`);
     for (let round = 0; round < state.maxToolIterations; round++) {
-        state.currentAssistantEl = null;
+        // 上一轮若是工具调用轮 / guard 纠正轮 continue 到这里，`currentAssistantEl` 指向的
+        // 流式气泡（前置文本或未提交正文）既没 commitAssistant 落库，页面上也应当清掉——
+        // 只用「 = null」断引用会让气泡永久残留成多个空气泡（debug bug1）。
+        dropAssistantBubble();
         removeWaitingAssistant();
         finishThinking();
         evictToolResults(apiMessages, requestProvider);
@@ -445,14 +448,21 @@ async function runAgentLoopBody(initialMessages, initialToolGroups, turnCalls) {
         if (state.activeToolGroups.size > 0) {
             const replyText = result.content || '';
             const klineNeeded = topicNeedsKline(apiMessages);
+            // 话题判定只以用户消息为准（quoteTopicNearby / topicNeedsKline 内部只扫 user）
+            const topicIsQuote = quoteTopicNearby(apiMessages);
             // 本轮证据按话题维度对口径：K 线话题只有日线取数成功才算真拿到数
             const curEvidence = klineNeeded ? quoteEvidenceKline : quoteEvidence;
             // 历史证据同样按维度验证（hasQuoteEvidence 纯函数，G3 回归）
             const prior = hasQuoteEvidence(state.chatMessages, klineNeeded);
-            if (!curEvidence) {
+            // 没有任何行情上下文时直接放行：话题非行情、本轮也没碰过行情工具，
+            // 正文里的行情名词/数字几乎必然是「复述用户消息/读到的文件」而不是凭空编造
+            // （debug.txt [052][056] 误杀：读 FACT.md 被强制取数；[023] 复述用户卖出价被纠正）。
+            // quoteCalled = 本轮调用过任一行情工具（含失败/终局拒绝）——调用行为本身即行情上下文
+            const quoteCalled = turnCalls.some(c => QUOTE_TOOLS.has(c.name));
+            if (!curEvidence && shouldJudgeQuote({ topicIsQuote, quoteCalled, quoteRefused })) {
                 const decision = decideQuoteGuard({
                     text: replyText,
-                    topicIsQuote: quoteTopicNearby(apiMessages),
+                    topicIsQuote,
                     refusal: quoteRefused,
                     retried: guardRetried,
                 });
@@ -464,13 +474,14 @@ async function runAgentLoopBody(initialMessages, initialToolGroups, turnCalls) {
                 if (decision.action === 'correct') {
                     guardRetried = true;
                     record('guard', { 处理: '注入强制纠正', 原因: decision.why, 文本字符: replyText.length, 正文摘录: clipText(replyText, 300) });
+                    dropAssistantBubble(); // 正文作废，立即清掉已流式的气泡，不残留
                     appendMessage('system', '本轮未检测到取数成功的工具调用，已要求重新取数');
                     apiMessages.push({ role: 'system', content: correctionPromptText() });
                     continue;
                 }
                 if (decision.action === 'drop') {
                     record('guard', { 处理: '丢弃正文', 原因: decision.why, 文本字符: replyText.length, 正文摘录: clipText(replyText, 300) });
-                    dropAssistantBubble();
+                    dropAssistantBubble(); // 先移除假正文气泡
                     appendMessage('error', quoteRefused
                         ? '工具已说明拿不到该数据（原因见上方工具返回），模型却又给出了具体行情数值，该回复已拦截。7 个交易日以内的日 K 与实时行情不需要本地库，可直接问；更长周期需先在 AI 设置启用 Agent 桥接并启动 flit_bridge。'
                         : '模型在未取到真实数据的情况下再次直接给出行情数值，该回复已被拦截。请先让取数链路可用（启用 Agent 桥接查本地库，或改问 7 日内走免费渠道）再问一次。');
@@ -645,34 +656,24 @@ function hasPriorQuoteEvidence(klineNeeded = false) {
     return hasQuoteEvidence(state.chatMessages, klineNeeded);
 }
 
-/** 话题是不是接着行情问的：往回看 4 条用户消息与途中助手回复（用户只回「好的」时，关键词在上一轮） */
+/**
+ * 话题是不是接着行情问的：往回看最多 4 条用户消息（纯判定委托 ai_guard.js recentUserTopic）。
+ * **只扫 user、不扫 assistant**——模型回复里常自然带出行情词（如「查行情/查K线」），
+ * 若把模型自述也算进话题，后续任何一轮都会被误判成「行情话题」，guard 强制取数误杀
+ * 读文件/复述用户数据类正文（debug.txt [052][056] 读 FACT.md 被纠正、[023] 复述用户卖出价被纠正）。
+ * 用户连续追问（如只回「好的」）时关键词仍在历史 user 消息里，向上找即可。
+ */
 function quoteTopicNearby(apiMessages) {
-    const re = /(现价|价格|行情|走势|K\s*线|日k|日线|涨跌|开盘|收盘|股价|涨幅|跌幅|实时|报价)/i;
-    let users = 0;
-    for (let i = apiMessages.length - 1; i >= 0; i--) {
-        const m = apiMessages[i];
-        if (m.kind === 'tool_trace' || m.kind === 'retained_data' || m.kind === 'compact_note') continue;   // 隐藏条目里本身就带「K 线/行情」字样，不能当话题证据
-        if (m.role !== 'user' && m.role !== 'assistant') continue;
-        if (typeof m.content === 'string' && re.test(m.content)) return true;
-        if (Array.isArray(m.content) && re.test(flattenContent(m.content))) return true;
-        if (m.role === 'user' && ++users >= 4) break;
-    }
-    return false;
+    return recentUserTopic(apiMessages, /(现价|价格|行情|走势|K\s*线|日k|日线|涨跌|开盘|收盘|股价|涨幅|跌幅|实时|报价)/i);
 }
 
-/** 话题是不是明确要求「K 线 / 日线 / 技术分析」维度（与 quoteTopicNearby 同口径扫描，词表见 ai_guard.js KLINE_TOPIC_RE）。
- * 命中后只有 K 线类取数成功才算证据——这是 2026-09-16 修复的核心，避免快照证据误充 K 线证据。 */
+/**
+ * 话题是不是明确要求「K 线 / 日线 / 技术分析」维度（委托 recentUserTopic，词表见 ai_guard.js KLINE_TOPIC_RE）。
+ * 同样只扫 user、不扫 assistant（理由同上：模型自述的「K线」字样不能当话题证据）。
+ * 命中后只有 K 线类取数成功才算证据——这是 2026-09-16 修复的核心，避免快照证据误充 K 线证据。
+ */
 function topicNeedsKline(apiMessages) {
-    let users = 0;
-    for (let i = apiMessages.length - 1; i >= 0; i--) {
-        const m = apiMessages[i];
-        if (m.kind === 'tool_trace' || m.kind === 'retained_data' || m.kind === 'compact_note') continue;
-        if (m.role !== 'user' && m.role !== 'assistant') continue;
-        if (typeof m.content === 'string' && KLINE_TOPIC_RE.test(m.content)) return true;
-        if (Array.isArray(m.content) && KLINE_TOPIC_RE.test(flattenContent(m.content))) return true;
-        if (m.role === 'user' && ++users >= 4) break;
-    }
-    return false;
+    return recentUserTopic(apiMessages, KLINE_TOPIC_RE);
 }
 
 /** 丢弃当前流式中的助手气泡（guard 二次命中时用，不把假数据落库也不留页面） */

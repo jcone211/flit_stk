@@ -917,6 +917,51 @@ await run('G3 guard 证据维度：快照不能当 K 线证据；话题词判维
         && !KLINE_TOPIC_RE.test('这周走势如何'));
 });
 
+// 入口门槛：没有任何行情上下文（话题非行情 + 本轮没碰行情工具）时 guard 不入场，
+// 避免读文件/复述用户数据被强制取数（debug.txt [052][056] 读 FACT.md 被纠正、[023] 复述卖出价被纠正）
+await run('G4 guard 入场门槛：无行情上下文直接放行；有行情上下文才判定（0 次接口）', async () => {
+    const { shouldJudgeQuote, recentUserTopic } = await import('../ai/core/ai_guard.js');
+    // 纯函数三输入语义
+    check('G4', '身份上无行情上下文（话题非行情 + 无工具调用）→ 不入场',
+        shouldJudgeQuote({ topicIsQuote: false, quoteCalled: false, quoteRefused: false }) === false);
+    check('G4', '话题是行情 → 入场',
+        shouldJudgeQuote({ topicIsQuote: true }) === true);
+    check('G4', '本轮调用过行情工具（哪怕失败）→ 入场',
+        shouldJudgeQuote({ quoteCalled: true }) === true);
+    check('G4', '工具本轮终局拒绝 → 入场',
+        shouldJudgeQuote({ quoteRefused: true }) === true);
+    // debug.txt [052] 场景回放：用户问「读取 /memory/FACT.md」，本轮只调过 read_file/list_dir
+    // 这类非行情工具——话题非行情、本轮未碰行情工具，guard 不应入场，正文照发
+    check('G4', '[052] 读文件场景：无行情上下文 → 不注入强制取数（本次 bug2 修复点）',
+        shouldJudgeQuote({ topicIsQuote: false, quoteCalled: false, quoteRefused: false }) === false);
+    // guard 核心拦截不因门槛失效：「用k线分析」话题命中 → 仍会入场判定
+    check('G4', 'K 线话题仍入场（guard 核心拦截闭环不破坏）',
+        shouldJudgeQuote({ topicIsQuote: true, quoteCalled: false, quoteRefused: false }) === true);
+    // recentUserTopic：只扫 user、不扫 assistant——模型自述的行情词不能当话题证据
+    const QUOTE_RE = /(现价|价格|行情|走势|K\s*线|日k|日线|涨跌|开盘|收盘|股价|涨幅|跌幅|实时|报价)/i;
+    check('G4', '话题判定只认用户消息：assistant 提到「查行情/查K线」不算话题（bug2 根因）',
+        recentUserTopic([
+            { role: 'user', content: '读取一下 /memory/FACT.md' },
+            { role: 'assistant', content: '日常「查行情/查K线/查持仓」类需求可以直接开工' },
+        ], QUOTE_RE) === false);
+    check('G4', '话题判定：用户消息里带行情词才算行情话题',
+        recentUserTopic([
+            { role: 'user', content: '读取一下 /memory/FACT.md' },
+            { role: 'user', content: '这支股票现在现价多少' },
+        ], QUOTE_RE) === true);
+    check('G4', '话题判定：用户连续追问（如只回「好的」）时仍能向上找到关键词',
+        recentUserTopic([
+            { role: 'user', content: '帮我查下 002940 现价' },
+            { role: 'assistant', content: '现价 34.16 元。' },
+            { role: 'user', content: '好的，那 K 线呢？' },
+        ], QUOTE_RE) === true);
+    check('G4', '话题判定：隐藏条目（tool_trace/retained_data）自带行情字样，不当作话题证据',
+        recentUserTopic([
+            { kind: 'tool_trace', role: 'user', content: 'get_stock_quote(002940) ok', calls: [{ name: 'get_stock_quote' }] },
+            { role: 'user', content: '读一下 NEWS.md' },
+        ], QUOTE_RE) === false);
+});
+
 
 
 // 端到端：拿真工具返回（桥接关闭、>7 天）跑一遍 guard 判定，复现 debug.txt 当时被误杀的那一轮

@@ -1,0 +1,429 @@
+========== flit_stk AI 助手 · DEBUG 日志 ==========
+会话ID: chat_mu3uu1enxi1
+会话名称: 工作目录中提供了哪些能力
+导出时间: 2026-09-16 16:46:39.121
+记录开始: 2026-09-16 16:44:28.727
+事件条数: 55
+环境: 扩展 v1.9.0 | 模型 deepseek-flash @ https://xapi.arctel.net | 工具轮数上限 50
+      供应商「wrai-deepseek-flash」 APIKey 已配置(51 位) | Agent桥接 启用 | 工具组 bridge,workspace
+      工作目录 stock-assistant | 主目录 D:\sundry\7-ai\agents\stock-assistant | 桥接目录 D:\codes\ai\flit_stk\flit_bridge
+---------------------------------------------------
+[004] 2026-09-16 16:44:28.727  会话事件
+  说明: 新建会话
+  ext: 1.9.0
+  会话: chat_mu3uu1enxi1
+  供应商: wrai-deepseek-flash
+  模型: deepseek-flash
+  baseUrl: https://xapi.arctel.net
+  apiKey: 已配置(51 位)
+  工具轮数上限: 50
+  Agent桥接: 启用
+  工作目录: stock-assistant
+  主目录: D:\sundry\7-ai\agents\stock-assistant
+  桥接目录: D:\codes\ai\flit_stk\flit_bridge
+  已加载工具组: bridge
+  ua: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36
+[005] 2026-09-16 16:44:41.800  用户问题
+  |
+  | 工作目录中提供了哪些能力
+[006] 2026-09-16 16:44:41.803  发起请求
+  requestId: 1
+  stream: true
+  模型: deepseek-flash
+  baseUrl: https://xapi.arctel.net
+  关闭思考: false
+  消息数: 2
+  工具数: 9
+[007] 2026-09-16 16:44:44.373  思考过程
+  字符: 61
+  |
+  | 用户问工作目录中提供了哪些能力。我需要先查看工作区上下文来了解配置。让我调用 get_workspace_context。
+[008] 2026-09-16 16:44:44.872  模型响应
+  ok: true
+  结束原因: tool_calls
+  工具调用数: 1
+  文本字符: 2
+  思考字符: 61
+  中断: false
+[009] 2026-09-16 16:44:44.872  工具调用 · get_workspace_context
+  callId: call_8e50de3bc69149d2a5096da5
+  args: {"refresh":true}
+[010] 2026-09-16 16:44:44.901  工具返回 · get_workspace_context
+  callId: call_8e50de3bc69149d2a5096da5
+  耗时ms: 29
+  失败: false
+  返回字符: 2470
+  上限: 8000
+  result: {"workspace_root":"D:\\sundry\\7-ai\\agents\\stock-assistant","protocol_version":1,"sources":["flit/config.json","flit\\memory.md"],"status":"confirmed","context":{"database":[{"name":"local-postgres","type":"postgresql","access":"docker","container":"my-postgres","host":"127.0.0.1","port":5432,"database":"stock","user":"postgres","password":"root"}],"market":{"quote_table":"a_share_daily","stock_table":"stock_basic_cache","adjustment":"qfq","trading_day_only":true},"verified_connection":{"status":"verified","source":"local-postgres","verified_at":"2026-09-03T03:39:43.037Z"},"memory":"---\ncreated:  2026.9.7  15:54\nmodified:  2026.9.7  15:55\n---\n\n# 工作区记忆\n\n## 数据库连接状态\n\n- status: verified\n\n## 可复用流程与查询约定\n\n- 入口：2026-09-03｜已验证：本地日线库连接配置正式落盘\n\n### 结论\n\n数据源 `local-postgres`（PostgreSQL / Docker 容器 `my-postgres`，host 127.0.0.1:5432，库 stock，用户 postgres）已实际连上并通过校验；完整连接配置写入 `flit/config.json`（含密码），同目录自动生成 `flit/.gitignore` 忽略该文件，本记忆不含凭据。工作区状态由 candidate 变为 confirmed。\n\n### 原因\n\n此前没有 `flit/config.json`，日线工具靠「按工作目录搜索候选数据源」才连上 `local-postgres`，一旦换工作目录或候选识别失败，超过 7 个交易日的长周期日K就会彻底取不到。\n\n### 依据（真实查询结果，非猜测）\n\n- 连通性探测返回 database=`stock`、current_user=`postgres`。\n- schema 实测存在 8 个对象：`a_share_daily`、`a_share_daily_today`、`a_share_weekly`、`a_share_monthly`、`v_share_daily`、`v_volumn`、`stock_basic_cache`、`personal_predict`。\n- `a_share_daily` 字段：adjust, market, code, date, open, high, low, close, volume, amount, change_pct, turnover_pct。\n- `stock_basic_cache` 字段：ts_code, name, industry, list_date, dead_tag（注意表名是 cache 而非 base）。\n\n### 复用方式\n\n以后 >7 个交易日的日线直接走本地库，无需再确认连接。流程文档：`flit/workflow/查询股票近N个交易日日线与技术指标.md`（入口：查询股票近 N 个交易日日线与技术指标），内含基础 SQL、历史表与当日快照的去重优先级、以及「对 v_share_daily 做 MAX(date) 会全表扫描」的性能陷阱。\n\n## AI 长期记忆\n\n\n\n## 交易记录引用\n\n- 历史买卖明细见工作目录根下「买入卖出.md」。\n","conventions":["status: verified","入口：2026-09-03｜已验证：本地日线库连接配置正式落盘","连通性探测返回 database=`stock`、current_user=`postgres`。","schema 实测存在 8 个对象：`a_share_daily`、`a_share_daily_today`、`a_share_weekly`、`a_share_monthly`、`v_share_daily`、`v_volumn`、`stock_basic_cache`、`personal_predict`。","`a_share_daily` 字段：adjust, market, code, date, open, high, low, close, volume, amount, change_pct, turnover_pct。","`stock_basic_cache` 字段：ts_code, name, industry, list_date, dead_tag（注意表名是 cache 而非 base）。","历史买卖明细见工作目录根下「买入卖出.md」。"],"workflows":["flit/workflow/查询股票近N个交易日日线与技术指标.md"]},"next_action":"优先使用 flit/config.json 中的已确认数据源；如 context.workflows 有匹配流程，先读取该流程，再查询数据库。","cached":false,"changed":true}
+[011] 2026-09-16 16:44:44.902  发起请求
+  requestId: 2
+  stream: true
+  模型: deepseek-flash
+  baseUrl: https://xapi.arctel.net
+  关闭思考: false
+  消息数: 4
+  工具数: 9
+[012] 2026-09-16 16:44:50.781  思考过程
+  字符: 587
+  |
+  | 用户问「工作目录中提供了哪些能力」。我已经读取了工作区上下文，现在可以基于此概述工作目录提供的能力。让我也检查一下工作流文件和买入卖出.md 是否存在，以便更完整地回答。
+  | 
+  | 我可以看看 workflows 文件清单（已有），还有 workspace 目录下的文件。让我看看是否还需要列出 workspace 中还有什么。实际上 get_workspace_context 已经返回了核心信息。可以简单总结。
+  | 
+  | 也许我可以检查一下工作目录中是否有其他文件。但 get_workspace_context 已返回 workflow 清单。我不需要加载工具组来回答这个问题——用户只是问工作目录提供了哪些能力。我可以直接总结。
+  | 
+  | 不过为了更完整，我可以列出 flit/ 下文件。get_workspace_context 只返回了 workflow 文件清单。让我快速查看工作目录内容，用 run_workspace_process 列一下？其实不必过度调用工具。但为了准确回答"提供了哪些能力"，我可以基于 context 返回内容回答：数据库配置、记忆、工作流文档等。
+  | 
+  | 我也可以加载 workspace 工具组看规则，但用户的问题只是问能力清单，从 get_workspace_context 的返回即可回答。不过也许检查一下目录文件列表会更全面。让我做一次轻量的目录列举。
+[013] 2026-09-16 16:44:51.428  模型响应
+  ok: true
+  结束原因: tool_calls
+  工具调用数: 2
+  文本字符: 2
+  思考字符: 587
+  中断: false
+[014] 2026-09-16 16:44:51.428  工具调用 · load_tool_group
+  callId: call_ae4cdec8fce54c3e9d0c6cb9
+  args: {"group":"workspace"}
+[015] 2026-09-16 16:44:51.429  工具返回 · load_tool_group
+  callId: call_ae4cdec8fce54c3e9d0c6cb9
+  耗时ms: 1
+  失败: false
+  返回字符: 192
+  上限: 12000
+  result: {"ok":true,"group":"workspace","rule":"工作区工具：root 用目录名定位，只访问用户已授权目录；Agent 可直接维护当前工作目录下的 flit/ 文件。","tools":["list_workspaces","list_dir","read_file","write_file","append_file","read_parquet"]}
+[016] 2026-09-16 16:44:51.429  工具调用 · run_workspace_process
+  callId: call_6c2425f3aec849cd8354cf4b
+  args: {"program":"cmd","argv":["/c", "dir", "/b", "flit"]}
+[017] 2026-09-16 16:44:51.433  工具返回 · run_workspace_process
+  callId: call_6c2425f3aec849cd8354cf4b
+  耗时ms: 4
+  失败: false
+  返回字符: 108
+  上限: 10000
+  result: {"ok":false,"request_id":"req_ffa788bb0f56","error":{"code":"program_not_allowed","message":"不允许执行程序: cmd"}}
+[018] 2026-09-16 16:44:51.434  发起请求
+  requestId: 3
+  stream: true
+  模型: deepseek-flash
+  baseUrl: https://xapi.arctel.net
+  关闭思考: false
+  消息数: 7
+  工具数: 15
+[019] 2026-09-16 16:44:54.379  模型响应
+  ok: true
+  结束原因: tool_calls
+  工具调用数: 2
+  文本字符: 2
+  思考字符: 0
+  中断: false
+[020] 2026-09-16 16:44:54.379  工具调用 · list_dir
+  callId: call_cab5ae01e7604053803c3502
+  args: {"path":"flit"}
+[021] 2026-09-16 16:44:54.383  工具返回 · list_dir
+  callId: call_cab5ae01e7604053803c3502
+  耗时ms: 4
+  失败: false
+  返回字符: 175
+  上限: 12000
+  result: [{"name":".gitignore","type":"file"},{"name":"买入卖出.md","type":"file"},{"name":"config.json","type":"file"},{"name":"memory.md","type":"file"},{"name":"workflow","type":"dir"}]
+[022] 2026-09-16 16:44:54.384  工具调用 · list_dir
+  callId: call_9e654ddd80704f448a73db56
+  args: {"path":"."}
+[023] 2026-09-16 16:44:54.388  工具返回 · list_dir
+  callId: call_9e654ddd80704f448a73db56
+  耗时ms: 4
+  失败: false
+  返回字符: 360
+  上限: 12000
+  result: [{"name":".claude","type":"dir"},{"name":"agent-prompt.txt","type":"file"},{"name":"data","type":"dir"},{"name":"flit","type":"dir"},{"name":"llm_context_files","type":"dir"},{"name":"memory","type":"dir"},{"name":"scripts","type":"dir"},{"name":"SOUL.md","type":"file"},{"name":"sql","type":"dir"},{"name":"tmp","type":"dir"},{"name":"USER.md","type":"file"}]
+[024] 2026-09-16 16:44:54.389  发起请求
+  requestId: 4
+  stream: true
+  模型: deepseek-flash
+  baseUrl: https://xapi.arctel.net
+  关闭思考: false
+  消息数: 10
+  工具数: 15
+[025] 2026-09-16 16:44:56.272  思考过程
+  字符: 109
+  |
+  | Let me look at the workflow directory and the overall structure to understand what capabilities are provided.
+[026] 2026-09-16 16:44:56.646  模型响应
+  ok: true
+  结束原因: tool_calls
+  工具调用数: 2
+  文本字符: 2
+  思考字符: 109
+  中断: false
+[027] 2026-09-16 16:44:56.646  工具调用 · list_dir
+  callId: call_6bbbe62e43264856a9482eca
+  args: {"path":"flit/workflow"}
+[028] 2026-09-16 16:44:56.649  工具返回 · list_dir
+  callId: call_6bbbe62e43264856a9482eca
+  耗时ms: 3
+  失败: false
+  返回字符: 47
+  上限: 12000
+  result: [{"name":"查询股票近N个交易日日线与技术指标.md","type":"file"}]
+[029] 2026-09-16 16:44:56.649  工具调用 · read_file
+  callId: call_20727fa6063141b4a0e5ede2
+  args: {"path":"flit/config.json"}
+[030] 2026-09-16 16:44:56.655  工具返回 · read_file
+  callId: call_20727fa6063141b4a0e5ede2
+  耗时ms: 6
+  失败: false
+  返回字符: 775
+  上限: 8000
+  result: {"root":"stock-assistant","path":"flit/config.json","size":586,"truncated":false,"content":"{\n  \"version\": 1,\n  \"data_sources\": [\n    {\n      \"name\": \"local-postgres\",\n      \"type\": \"postgresql\",\n      \"access\": \"docker\",\n      \"container\": \"my-postgres\",\n      \"host\": \"127.0.0.1\",\n      \"port\": 5432,\n      \"database\": \"stock\",\n      \"user\": \"postgres\",\n      \"password\": \"root\"\n    }\n  ],\n  \"market\": {\n    \"quote_table\": \"a_share_daily\",\n    \"stock_table\": \"stock_basic_cache\",\n    \"adjustment\": \"qfq\",\n    \"trading_day_only\": true\n  },\n  \"verified_connection\": {\n    \"status\": \"verified\",\n    \"source\": \"local-postgres\",\n    \"verified_at\": \"2026-09-03T03:39:43.037Z\"\n  }\n}\n"}
+[031] 2026-09-16 16:44:56.656  发起请求
+  requestId: 5
+  stream: true
+  模型: deepseek-flash
+  baseUrl: https://xapi.arctel.net
+  关闭思考: false
+  消息数: 13
+  工具数: 15
+[032] 2026-09-16 16:45:06.676  思考过程
+  字符: 924
+  |
+  | 用户问的是"工作目录中提供了哪些能力"。让我总结一下工作目录的能力。我已经获取了上下文信息，包括：
+  | 1. 数据库连接配置（local-postgres，已验证）
+  | 2. memory.md 中的记忆
+  | 3. workflow 文件清单
+  | 4. 文件目录结构
+  | 
+  | 现在整理回答用户。我可以再验证一下桥接状态吗？用户问的是工作目录提供了哪些能力，我应该总结工作目录的配置和可用能力。可以先检查 bridge_health 来确定本地库访问链路是否可用，但这个不一定要做。其实用户问的是"能力"，我可以基于 get_workspace_context 的返回列出。
+  | 
+  | 让我把能力总结清楚：
+  | 
+  | 1. **本地日线数据库**（local-postgres / Docker my-postgres）— 已验证连接，表结构：
+  |    - a_share_daily（日线，qfq 前复权）
+  |    - a_share_daily_today（当日快照）
+  |    - a_share_weekly / a_share_monthly（周/月线）
+  |    - v_share_daily、v_volumn（视图）
+  |    - stock_basic_cache（股票基础信息：代码、名称、行业、上市日期）
+  |    - personal_predict（个人预测）
+  |    
+  | 2. **工作区文件**：
+  |    - flit/config.json（数据库配置，已验证）
+  |    - flit/memory.md（工作区记忆）
+  |    - flit/买入卖出.md（交易记录）
+  |    - flit/workflow/查询股票近N个交易日日线与技术指标.md（流程文档）
+  |    - scripts、sql、data 等目录
+  | 
+  | 3. **工具组能力**：portfolio、market、events、settings、workspace、memory、bridge（需按组加载）
+  | 
+  | 我应该简洁清晰地陈述。也许可以读取一下 workflow 文档来更好地说明能力？不过用户问题比较泛，我可以给出结构化总结。不需要再调用更多工具。也可以检查一下 buyer卖 records？不必。
+  | 
+  | 组织回答即可。
+[033] 2026-09-16 16:45:09.170  模型响应
+  ok: true
+  结束原因: stop
+  工具调用数: 0
+  文本字符: 1259
+  思考字符: 924
+  中断: false
+[034] 2026-09-16 16:45:09.170  AI 回复
+  |
+  | 工作目录（`stock-assistant`）已确认可用，我整理了一下它提供的能力：
+  | 
+  | ## 1. 本地日线数据库（已验证连接 ✅）
+  | PostgreSQL（Docker 容器 `my-postgres`，库 `stock`），连接配置已落盘 `flit/config.json`，2026-09-03 实际连通验证通过。真实表结构：
+  | 
+  | | 对象 | 用途 |
+  | |---|---|
+  | | `a_share_daily` | A股日线（前复权 qfq），字段：date/open/high/low/close/volume/amount/change_pct/turnover_pct/adjust/code | 
+  | | `a_share_daily_today` | 当日实时快照表（与历史表去重优先级有约定） |
+  | | `a_share_weekly` / `a_share_monthly` | 周线 / 月线 |
+  | | `v_share_daily`、`v_volumn` | 视图 |
+  | | `stock_basic_cache` | 股票基础信息：ts_code、name、industry、list_date、dead_tag |
+  | | `personal_predict` | 个人预测记录 |
+  | 
+  | 典型能力：查任意股票近 N 个交易日日线、技术指标、涨跌幅统计（>7 个交易日走本地库，≤7 天可走免费渠道，链路已有约定）。
+  | 
+  | ## 2. 已沉淀的流程与记忆
+  | - **流程文档**：`flit/workflow/查询股票近N个交易日日线与技术指标.md`（含基础 SQL、历史表与当日快照去重优先级、"对视图 MAX(date) 全表扫描"的性能陷阱）
+  | - **交易记录**：`flit/买入卖出.md`（历史买卖明细，硬规则要求买卖记录追加于此）
+  | - **工作区记忆**：`flit/memory.md`（数据库连接经验为主）
+  | 
+  | ## 3. 可用的工具能力（按组冷加载）
+  | - **portfolio**：组合/股票列表增删改查、切换活动组合与视图（配合"持仓""观察"组合）
+  | - **market**：实时行情与日线取数（批量优先，最多 12 只/次）
+  | - **events**：交易要点与预测事件维护
+  | - **settings**：全局设置（仅 Cron 可改）
+  | - **workspace**：读写 `flit/` 下文件、parquet 文件查看
+  | - **memory**：长期记忆保存（偏好/习惯）
+  | - **bridge**：本地脚本执行与本地数据库查询（桥接在线时）
+  | 
+  | ## 4. 附带目录
+  | `scripts/`、`sql/`、`data/`、`tmp/`、`llm_context_files/` 等周边资产也可以按需查看。
+  | 
+  | 工作目录的状态为 **confirmed**（配置完整且已验证），日常"查行情/查K线/查持仓"类需求可以直接开工。需要我演示某一项能力吗？比如拉一只股票的日线或查看当前持仓。
+[035] 2026-09-16 16:45:09.173  跨轮工具记录 · 本轮 6 次调用
+  调用次数: 6
+  行情成功: false
+  内容: [工具调用记录·系统自动登记，非用户发言] 上一轮工具调用的原始返回已不在你的上下文里，只剩下面这份账本。当时觉得有价值的原始数据如果没调 retain_tool_data 登记成跨轮便签，现在就是丢了：要么重新调用工具（会再花一次免费接口额度），要么只能告诉用户拿不到了。标为「失败」的查询从来没有给过你数据，不得把它们的结论当成已知事实，更不得补写数值。
+- get_workspace_context({"refresh":true}) 29ms → 2470 字
+- run_workspace_process({"program":"cmd","argv":["/c", "dir", "/b", "flit"]}) 4ms → 108 字
+- list_dir({"path":"flit"}) 4ms → 175 字
+- list_dir({"path":"."}) 5ms → 360 字
+- list_dir({"path":"flit/workflow"}) 3ms → 47 字
+- read_file({"path":"flit/config.json"}) 6ms → 586 字节，775 字
+[036] 2026-09-16 16:45:39.181  报错信息
+  在途请求数: 0
+  |
+  | 与后台 service worker 连接断开，500ms 后重连
+[037] 2026-09-16 16:45:52.826  用户问题
+  |
+  | 你读取一下/memory/FACT.md
+[038] 2026-09-16 16:45:52.829  发起请求
+  requestId: 6
+  stream: true
+  模型: deepseek-flash
+  baseUrl: https://xapi.arctel.net
+  关闭思考: false
+  消息数: 5
+  工具数: 15
+[039] 2026-09-16 16:45:56.168  思考过程
+  字符: 249
+  |
+  | 用户要求读取 /memory/FACT.md。这看起来不是 flit/ 目录下的文件。让我先探索一下工作目录结构。
+  | 
+  | 用户说"读取一下/memory/FACT.md"——可能是在工作目录里有 memory/FACT.md 文件，或者有其他位置。让我用 list_dir 查看工作目录内容。
+  | 
+  | 注意规则：写入/读取 flit/... 时使用 Agent 工作目录。但这里用户明确要求读取 /memory/FACT.md，可能是工作目录根下的 memory/FACT.md。
+  | 
+  | 让我先列出工作目录看看。
+[040] 2026-09-16 16:45:56.458  模型响应
+  ok: true
+  结束原因: tool_calls
+  工具调用数: 2
+  文本字符: 2
+  思考字符: 249
+  中断: false
+[041] 2026-09-16 16:45:56.458  工具调用 · list_dir
+  callId: call_0704ce597e674e33bca2e864
+  args: {"path":"."}
+[042] 2026-09-16 16:45:56.461  工具返回 · list_dir
+  callId: call_0704ce597e674e33bca2e864
+  耗时ms: 3
+  失败: false
+  返回字符: 360
+  上限: 12000
+  result: [{"name":".claude","type":"dir"},{"name":"agent-prompt.txt","type":"file"},{"name":"data","type":"dir"},{"name":"flit","type":"dir"},{"name":"llm_context_files","type":"dir"},{"name":"memory","type":"dir"},{"name":"scripts","type":"dir"},{"name":"SOUL.md","type":"file"},{"name":"sql","type":"dir"},{"name":"tmp","type":"dir"},{"name":"USER.md","type":"file"}]
+[043] 2026-09-16 16:45:56.461  工具调用 · list_dir
+  callId: call_8a6b5ce251c4434aafbac200
+  args: {"path":"memory"}
+[044] 2026-09-16 16:45:56.464  工具返回 · list_dir
+  callId: call_8a6b5ce251c4434aafbac200
+  耗时ms: 3
+  失败: false
+  返回字符: 73
+  上限: 12000
+  result: [{"name":"FACT.md","type":"file"},{"name":"JOURNAL.jsonl","type":"file"}]
+[045] 2026-09-16 16:45:56.465  发起请求
+  requestId: 7
+  stream: true
+  模型: deepseek-flash
+  baseUrl: https://xapi.arctel.net
+  关闭思考: false
+  消息数: 8
+  工具数: 15
+[046] 2026-09-16 16:45:58.435  模型响应
+  ok: true
+  结束原因: tool_calls
+  工具调用数: 1
+  文本字符: 2
+  思考字符: 0
+  中断: false
+[047] 2026-09-16 16:45:58.435  工具调用 · read_file
+  callId: call_4935c8c712324fd58f83a947
+  args: {"path":"memory/FACT.md"}
+[048] 2026-09-16 16:45:58.438  工具返回 · read_file
+  callId: call_4935c8c712324fd58f83a947
+  耗时ms: 3
+  失败: false
+  返回字符: 8047
+  上限: 8000
+  result: {"root":"stock-assistant","path":"memory/FACT.md","size":14123,"truncated":false,"content":"# 事实档案（FACT）\n\n> 更新：2026-09-17。分四组：一、数据基础设施 / 二、数据源与API / 三、选股策略体系 / 四、环境约定与坑 / 五、自动化定时任务系统。\n> 仓库：D:\\sundry\\7-ai\\agents\\stock-assistant；策略细节权威来源=仓库 `sql/strategys/策略档案.txt` 与各脚本本身。\n\n## 🔐 权威源与双写约定（2026-09-16 用户确立，最高优先级）\n- **主档案（权威源）= `D:\\sundry\\7-ai\\agents\\stock-assistant\\memory\\FACT.md`**（git 跟踪，随 Obsidian vault 备份）。\n- C盘 `...\\CherryStudio\\Data\\Agents\\b65f8772-...\\memory\\FACT.md` 仅为运行时自动加载的**镜像**：memory 工具路径固定只能写 C盘，无法绕过，故以指针+镜像方式变通。\n- **凡涉及记忆的读取/分析，一律先读 D盘主文件**；两处内容如有分歧，以 D盘为准并回写 C盘。\n- **双写约定：任何一次 FACT 更新（无论 via memory 工具或直接编辑 D盘文件），必须立即将相同完整内容覆盖到另一份，保持逐字一致。**\n- JOURNAL 同理：新条目经 memory 工具 append 到 C盘后，应将 C盘 `JOURNAL.jsonl` 覆盖同步到 D盘 `memory/JOURNAL.jsonl`（C盘为超集，单向镜像）。\n\n---\n\n一、数据基础设施\n\n### 1.1 本地 PostgreSQL（用户默认 SQL 库）\n- Docker 容器 `my-postgres`（postgres:16）；`127.0.0.1:5432`，库 `stock`，`postgres`/`root`\n- **约定：用户所有 SQL 操作默认针对此库，无需再问**\n- 本机无 psql CLI，访问用 Python psycopg2\n\n### 1.2 表结构（双表架构 + 周月K + 资金流）\n- **主表 `a_share_daily`**：A股日线正式归档，**只存 qfq**（禁止 raw 混入）；2016~今约 1106 万行；PK (adjust,code,date)；code 格式 `XXXXXX.SZ/.SH/.BJ`；索引 (code,date)/(date,change_pct)/(date,volume)/(adjust,date,code)\n- **临时表 `a_share_daily_today`**：当日盘中/收盘快照（raw）；PK (adjust,code,date,source)；**现唯一写入源=akshare（source='akshare'）**；每日只留当天；盘中 14:30 + 收盘 15:05 均由 `sync_today_akshare.py` 写入（2026-09-08 起；原小石主脚本 `sync_today.py` 已停用存档为 `sync_today_xiaoshi.py.bak`，勿再调用）\n- **视图 `v_share_daily`**：主表+临时表 UNION，同日临时表优先。**坑：对视图做 MAX(date)/聚合会全表扫描、LATERAL 内引用会每票重复 anti-join 变慢**——取最新交易日分别查两表再 GREATEST；实时选股 SQL 用手工 UNION ALL+DISTINCT ON 去重（~0.6s）\n- **周K `a_share_weekly` / 月K `a_share_monthly`**（2026-08-25 建，日线聚合）：PK (adjust,code,week_start/month_start)；open=首日、close=末日、high/low=MAX/MIN、volume/amount/turnover=SUM、change_pct=(close-open)/open；增量 `sync_weekly_monthly.py`（60-100s+50-80s，`--from`/`--dry-run`；除权少量个股可按 code 过滤重聚合）；全量重建 `sql/weekly_monthly_full_agg.sql`（~12min）；DDL/模板见 sql/ 同名文件\n- 🆕**`a_share_fundflow`**（2026-09-16 建）：小石 quant-data/stock_fundflow（东财分单口径）每日全市场盘后快照归档；PK (code,date)；五档净流入（元）+五档 *_ratio_src（**源端单位混存勿直接用**）+latest_price/change_pct/as_of；回填 2026-08-06~09-15 共 23 日 12.2 万行；**分析一律用视图 `v_share_fundflow`**（JOIN 主表 amount 重算 main_pct 等，单位%）；上游在线历史仅留 ~1 月且有日期洞，本地是唯一持久存储\n- **`stock_basic_cache`**：ts_code(与 code 同格式)/name/industry/list_date；`fetch_list_date.py` 每周三/五 09:00 UPSERT 增量。2026-09-16 重写：拉取/落库解耦（当日快照 CSV 复用、退避重试、真实退出码、--force-fetch/--from-file）；tushare stock_basic 限频=5次/天+1次/小时。**强制约定：任何股票数据输出必须 JOIN 此表带出代码+名称**\n\n### 1.3 复权口径与除权修正\n- qfq 基准=最新交易日：qfq(t)=raw(t)×adj(t)/adj(最新日)；最新日与除权日当天恒有 qfq=raw；**一旦除权，该股全部历史 qfq 重算**（静态文件会失效→数据库是唯一持久存储的根因）\n- 除权检测：tushare pre_close vs 库中前一日 qfq close，比值偏离>0.1% → 该股全历史 OHLC×ratio（change/vol/amt 不变）；`sync_daily_tushare.py` 自动完成\n- 交易对账用 raw、分析回测用 qfq；除权≠亏损\n\n### 1.4 Parquet 策略与冷启动（最高优先级约束，2026-09-02 确立）\n- **Parquet 仅用于新库冷启动装载**（小石年度归档→`parquet_to_postgres.py`），入库后使命结束；日常同步与 Parquet 无关\n- 禁止未经用户明确要求：拉大量历史 Parquet / 从库导出 Parquet；`data/a_share_daily/qfq/data_2016~2026.parquet` 为当日全量快照，**会随除权漂移，禁止当权威数据源**；`export_parquet.py` 仅手动工具\n- 冷启动规程（库可连但无表/零行）：①`sql/bootstrap_ddl.sql` 建表 ②小石 `download-session?dataset=daily&adjust=qfq&year=YYYY` 逐文件校验 size+sha256 ③`parquet_to_postgres.py` 入库 ④校验行数/MAX(date)/抽样 ⑤此后一切更新在库层。**禁止用在线K线逐日回填多年历史**\n- 增量节奏：每日 09:00 归档任务 `sync_daily.py --adjust qfq --clean-today`，小石 404/滞后回退 `sync_daily_tushare.py`；随后周/月K 同步 + 🆕资金流归档（见 5）\n\n二、数据源与 API\n\n### 2.1 小石金融信息与量化专家（Xiaoshi Finance API）\n- Base `https://api.shizixi.com`；鉴权 Bearer Key（存于 `scripts/sync_daily.py` 源码，严禁展示；运行时提取勿复制明文）。平台版本 **2026-09-05.4**（09-16 实测 /status+/capabilities 均此版本；scheduler started_at 09-13 是重启时间非版本号），契约 `xiaoshi-agent-contract/v1`\n- **唯一能力目录：`GET /api/v3/capabilities`**；哈希校验=对规范化JSON（sort_keys+separators(',',':')+ensure_ascii=False）sha256\n- 已下架：market-snapshot / eod-snapshot / /data/quotes；全市场快照唯一源=akshare\n- 实时：`GET /market/quote/{symbol}`、`POST /market/quotes`（小批量）；无 kline 端点，盘中历史+今日拼接用本地 v_shar
+…（已截断，原长 8047 字符）
+[049] 2026-09-16 16:45:58.439  发起请求
+  requestId: 8
+  stream: true
+  模型: deepseek-flash
+  baseUrl: https://xapi.arctel.net
+  关闭思考: false
+  消息数: 10
+  工具数: 15
+[050] 2026-09-16 16:46:04.230  思考过程
+  字符: 473
+  |
+  | 用户让我读取 /memory/FACT.md，我已经读取了。文件被截断（8558字中的一部分），但我已经拿到了主要内容。让我把内容整理出来给用户看。
+  | 
+  | 文件更新日期是 2026-09-17（在用户当前时间 2026-09-16 之后？注意系统说当前时间 2026-09-16，但文件头写 2026-09-17 更新——可能用户时间设定有所出入，不纠结）。
+  | 
+  | 文件内容很大，被截断了。我应该总结核心内容，如果需要完整内容可以再读。用户要求"读取一下"，我可以给出核心摘要，并说明文件较长已截断，需要更详细的部分可以再读。
+  | 
+  | 其实我应该把主要部分呈现给用户。文件被截断在"五、自动"（自动化定时任务系统）。我可以分段读取剩余部分，但用户可能只需要一个概览。不过为了完整，我可以再读一次获取剩余部分？read_file 有截断限制。让我看看能否继续读取——工具没有提供 offset/limit 参数（read_file 只支持 path 和 root）。所以无法分段读取。
+  | 
+  | 那么我就基于已读内容给出总结。核心内容很清晰，我可以给用户一个结构化摘要。
+[051] 2026-09-16 16:46:14.401  模型响应
+  ok: true
+  结束原因: stop
+  工具调用数: 0
+  文本字符: 1695
+  思考字符: 473
+  中断: false
+[052] 2026-09-16 16:46:14.401  反编造拦截
+  处理: 注入强制纠正
+  原因: 行情名词 + 价格形态数值
+  文本字符: 1695
+  正文摘录: 已读取 `memory/FACT.md`（14 KB，已含核心内容，尾部"五、自动化定时任务系统"一节被截断）。这份是工作区的**事实主档案**，要点如下：
+
+## 权威源与双写约定（最高优先级）
+- **主档案 = `D:\sundry\7-ai\agents\stock-assistant\memory\FACT.md`**（git 跟踪 + Obsidian 备份）；C 盘 CherryStudio 的 `memory/FACT.md` 只是运行时自动加载的**镜像**。
+- 读取/分析一律先读 D 盘主文件，分歧以 D 盘为准；**任何更新必须双写两份逐字一致**；JOURNAL 单向…
+[053] 2026-09-16 16:46:14.401  系统提示
+  |
+  | 本轮未检测到取数成功的工具调用，已要求重新取数
+[054] 2026-09-16 16:46:14.402  发起请求
+  requestId: 9
+  stream: true
+  模型: deepseek-flash
+  baseUrl: https://xapi.arctel.net
+  关闭思考: false
+  消息数: 11
+  工具数: 15
+[055] 2026-09-16 16:46:32.472  模型响应
+  ok: true
+  结束原因: stop
+  工具调用数: 0
+  文本字符: 1522
+  思考字符: 0
+  中断: false
+[056] 2026-09-16 16:46:32.472  反编造拦截
+  处理: 丢弃正文
+  原因: 强制纠正后仍给出行情数值
+  文本字符: 1522
+  正文摘录: 已读取 `memory/FACT.md`（约 14KB），简明概括如下：
+
+## 事实档案（FACT）要点
+
+**优先级最高的权威源约定（2026-09-16 确立）**
+- 主档案 = D盘 `agents/stock-assistant/memory/FACT.md`（git 跟踪、随 Obsidian 备份）；C盘 CherryStudio 的 FACT.md 只是自动加载镜像
+- 凡读取/分析先读 D盘主文件，分歧以 D盘为准并回写；**更新必须双写保持逐字一致**；JOURNAL 从 C盘单向镜像到 D盘
+
+**一、数据基础设施**
+- 本地 PG16（Docker `my-post…
+[057] 2026-09-16 16:46:32.472  报错信息
+  |
+  | 模型在未取到真实数据的情况下再次直接给出行情数值，该回复已被拦截。请先让取数链路可用（启用 Agent 桥接查本地库，或改问 7 日内走免费渠道）再问一次。
+[058] 2026-09-16 16:46:32.475  跨轮工具记录 · 本轮 3 次调用
+  调用次数: 3
+  行情成功: false
+  内容: [工具调用记录·系统自动登记，非用户发言] 上一轮工具调用的原始返回已不在你的上下文里，只剩下面这份账本。当时觉得有价值的原始数据如果没调 retain_tool_data 登记成跨轮便签，现在就是丢了：要么重新调用工具（会再花一次免费接口额度），要么只能告诉用户拿不到了。标为「失败」的查询从来没有给过你数据，不得把它们的结论当成已知事实，更不得补写数值。
+- list_dir({"path":"."}) 3ms → 360 字
+- list_dir({"path":"memory"}) 3ms → 73 字
+- read_file({"path":"memory/FACT.md"}) 4ms → 8047 字（已截断）
+========== DEBUG 日志结束 ==========

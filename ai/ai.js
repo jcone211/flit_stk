@@ -1805,29 +1805,37 @@ async function parseAndCreateEvent(raw) {
 async function parseAndRecordStockTrade(raw) {
     let text = raw.replace(/^增加股票[:：]?\s*/, '').trim();
     if (!text) return { ok: false, text: '未识别到股票操作，请填写如「我买入了贵州茅台」或「我卖出了贵州茅台」' };
-    const buyM = text.match(/^(我)?(买入|买进|加仓|建仓|买了|购买)\s*了?\s*/);
-    const sellM = text.match(/^(我)?(卖出|卖了|清仓|减仓)\s*了?\s*/);
+    const NUM = '([0-9]+(?:\\.[0-9]+)?)';
+    // 动词前允许带价格，如「我7.60买入了柳工」「我13.5元加仓」；$1 为价格
+    const buyM = text.match(new RegExp(`^我?\\s*(?:${NUM}\\s*元?\\s*)?(?:买入|买进|加仓|建仓|买了|购买)\\s*了?\\s*`));
+    const sellM = text.match(new RegExp(`^我?\\s*(?:${NUM}\\s*元?\\s*)?(?:卖出|卖了|清仓|减仓)\\s*了?\\s*`));
     let action = 'buy';
     let name = text;
+    let prefixPrice = null;
     if (sellM && (!buyM || sellM[0].length >= (buyM[0] || '').length)) {
         action = 'sell';
         name = text.slice(sellM[0].length);
+        prefixPrice = sellM[1] || null;
     } else if (buyM) {
         name = text.slice(buyM[0].length);
+        prefixPrice = buyM[1] || null;
     }
     name = name
-        .replace(/(?:买入价|买入价格|成交价|价格|成交金额)\s*[:：]?\s*[0-9]+(?:\.[0-9]+)?/g, '')
+        .replace(/(?:买入价|买入价格|成本价|成交价|价格|成交金额)\s*[:：]?\s*[0-9]+(?:\.[0-9]+)?/g, '')
+        .replace(/^\s*[0-9]+(?:\.[0-9]+)?\s*元?\s*/, '')
         .replace(/[。！!？?.,，、；;]+$/g, '')
         .trim();
     if (!name) return { ok: false, text: '未识别到股票名称，请填写如「我买入了贵州茅台」' };
-    const priceMatch = text.match(/(?:买入价|买入价格|成交价|价格)\s*[:：]?\s*([0-9]+(?:\.[0-9]+)?)/);
+    const priceMatch = text.match(/(?:买入价|买入价格|成本价|成交价|价格)\s*[:：]?\s*([0-9]+(?:\.[0-9]+)?)/);
     const amountMatch = text.match(/成交金额\s*[:：]?\s*([0-9]+(?:\.[0-9]+)?)/);
+    // 初始价：优先「买入价：7.6」等标签写法，其次「我7.60买入」的价格前置写法
+    const buyPrice = (priceMatch && priceMatch[1]) || prefixPrice || null;
     const recordFields = [
         `操作日期：${todayStr()}`,
         `操作：${action === 'buy' ? '买入' : '卖出'}`,
         `股票名称：${name}`,
     ];
-    if (priceMatch) recordFields.push(`买入价格：${priceMatch[1]}`);
+    if (buyPrice) recordFields.push(`买入价格：${buyPrice}`);
     if (amountMatch) recordFields.push(`成交金额：${amountMatch[1]}`);
     const recordRes = await toolExecutors.append_file({
         path: 'flit/买入卖出.md',
@@ -1835,9 +1843,12 @@ async function parseAndRecordStockTrade(raw) {
     });
     const recordNote = recordRes && recordRes.error ? `；交易记录写入失败：${recordRes.error}` : '';
     if (action === 'buy') {
-        const res = await toolExecutors.add_stock_to_portfolio({ names: [name], portfolio: '持仓' });
+        const args = { names: [name], portfolio: '持仓' };
+        if (buyPrice != null) args.import_price = buyPrice;
+        const res = await toolExecutors.add_stock_to_portfolio(args);
         if (res && res.error) return { ok: false, text: res.error + recordNote };
-        return { ok: true, text: `已将「${name}」加入【持仓】组合${res && res.hint ? '（' + res.hint + '）' : ''}${recordNote}` };
+        const priceNote = (buyPrice != null && !(res && res.hint)) ? `（初始价已设为 ${buyPrice}，行情刷新不会覆盖）` : '';
+        return { ok: true, text: `已将「${name}」加入【持仓】组合${res && res.hint ? '（' + res.hint + '）' : priceNote}${recordNote}` };
     }
     const res = await toolExecutors.move_stock_to_combo({ name, target_portfolio: '观察', source_portfolio: '持仓' });
     if (res && res.error) return { ok: false, text: res.error + recordNote };

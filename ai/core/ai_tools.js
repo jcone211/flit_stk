@@ -29,6 +29,13 @@ import { bridgeRequest, bridgeHealth } from './bridge_client.js';
 // add_stock_to_portfolio 跨调用共享的页面打开时序计数器
 let nextRefreshOneAt = 0;
 
+// 把工具参数里的买入价/初始价转成数字：空或非法返回 null，负数视为无效
+function parsePriceArg(v) {
+    if (v === null || v === undefined || v === '') return null;
+    const n = Number(v);
+    return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
 function isEtfName(name) {
     return /ETF|交易型开放式|指数基金/i.test(String(name || ''));
 }
@@ -45,7 +52,7 @@ export const TOOL_DEFS = [
     { type: 'function', function: { name: 'create_event', description: '创建一条预测事件。事件内容(content)只填股票名称（如「百通能源」），禁止把分析/预测/操作文字写入 content；判断逻辑、时间与操作应体现为关联要点。关联要点(key_point_text)须优先从 get_key_points 已有的要点中选择（拿不准先用 get_key_points 查看现有要点再对应关联，不要臆造不存在的要点内容），现有要点与意图不完全匹配时才新建要点或留空。time 为 YYYY-MM-DD，缺省今天。若存在超过一周仍未归档的事件会一并提醒用户补充', parameters: { type: 'object', properties: { key_point_text: { type: 'string', description: '关联现有业已存在或本次新建的要点内容，可为空' }, content: { type: 'string', description: '事件内容，仅填股票名称' }, time: { type: 'string', description: '事件日期 YYYY-MM-DD' } }, required: ['content'] } } },
     { type: 'function', function: { name: 'update_event', description: '修改事件（按 id；已归档事件不可修改），可改关联要点/内容/日期/status（pending 待预测 / accurate 准确 / wrong 误判）。不能设置归档——归档只发生在手动点击或事件超 7 天且状态为准确/误判时自动进行，若刚改状态的事件因此被自动归档，结果会说明。当存在多条内容相同的事件时，默认修改其中 time 最早（最久远）的那条 id，并在回复中简略提醒用户还有其它日期存在相同内容事件', parameters: { type: 'object', properties: { id: { type: 'string', description: '事件 id（用 get_events 查询）' }, key_point_text: { type: 'string', description: '新的关联要点' }, content: { type: 'string', description: '新的事件内容' }, time: { type: 'string', description: '新的事件日期 YYYY-MM-DD' }, status: { type: 'string', description: '新状态：pending 待预测 / accurate 准确 / wrong 误判' } }, required: ['id'] } } },
     { type: 'function', function: { name: 'delete_event', description: '删除一条事件（按 id）', parameters: { type: 'object', properties: { id: { type: 'string', description: '事件 id（用 get_events 查询）' } }, required: ['id'] } } },
-    { type: 'function', function: { name: 'add_stock_to_portfolio', description: '按名称或雪球网址向指定组合批量添加股票（组合缺省「持仓」）。普通股票自动生成问财搜索页；传 159/51/58 开头 6 位 ETF 代码会生成雪球个股页；直接传雪球个股网址（如 https://xueqiu.com/S/SH510300）会原样保存并从雪球抓取。ETF 名称（含「ETF」字样）禁止自动导入：先到 https://xueqiu.com 搜索并复制该 ETF 个股地址，再把雪球网址传入本工具或手动新增。仅接受雪球/问财网址，其他网址会被拒绝。一次调用可添加多只', parameters: { type: 'object', properties: { names: { type: 'array', items: { type: 'string' }, description: '股票名称、ETF 代码或雪球个股网址数组，如 ["贵州茅台", "https://xueqiu.com/S/SH510300"]；ETF 名称请勿传入' }, portfolio: { type: 'string', description: '目标组合名，缺省「持仓」' } }, required: ['names'] } } },
+    { type: 'function', function: { name: 'add_stock_to_portfolio', description: '按名称或雪球网址向指定组合批量添加股票（组合缺省「持仓」）。普通股票自动生成问财搜索页；传 159/51/58 开头 6 位 ETF 代码会生成雪球个股页；直接传雪球个股网址（如 https://xueqiu.com/S/SH510300）会原样保存并从雪球抓取。ETF 名称（含「ETF」字样）禁止自动导入：先到 https://xueqiu.com 搜索并复制该 ETF 个股地址，再把雪球网址传入本工具或手动新增。仅接受雪球/问财网址，其他网址会被拒绝。一次调用可添加多只', parameters: { type: 'object', properties: { names: { type: 'array', items: { type: 'string' }, description: '股票名称、ETF 代码或雪球个股网址数组，如 ["贵州茅台", "https://xueqiu.com/S/SH510300"]；ETF 名称请勿传入' }, portfolio: { type: 'string', description: '目标组合名，缺省「持仓」' }, import_price: { type: 'number', description: '买入价/成交价/成本价（用户提供的初始价），设置后作为该股票初始价并固定写入，后续行情刷新抓取不会覆盖它；未提供时初始价留空，首次抓到行情才自动用最新价回填' } }, required: ['names'] } } },
     { type: 'function', function: { name: 'move_stock_to_combo', description: '把股票从来源组合移动到目标组合（按名称匹配、忽略首尾空格；来源缺省当前活动组合，目标缺省「观察」）。用于记录「卖出」等调仓：卖出时应传 source_portfolio 为实际持有该股的组合（通常「持仓」）；若目标组合已存在同名股票，则仅从来源组合删除、不重复添加', parameters: { type: 'object', properties: { name: { type: 'string', description: '股票名称' }, target_portfolio: { type: 'string', description: '目标组合名，缺省「观察」' }, source_portfolio: { type: 'string', description: '来源组合名（卖出的实际持仓组合），缺省当前活动组合' } }, required: ['name'] } } },
     { type: 'function', function: { name: 'get_current_view', description: '读取当前列表视图（股票列表或垃圾池）', parameters: { type: 'object', properties: {}, required: [] } } },
     { type: 'function', function: { name: 'get_settings', description: '读取扩展全局设置（刷新间隔/选择器/分页/cron 定时任务，不含任何密钥）', parameters: { type: 'object', properties: {}, required: [] } } },
@@ -82,7 +89,7 @@ export const TOOL_GROUPS = {
     bridge: ['get_workspace_context', 'discover_database_schema', 'query_local_database', 'save_workspace_database_config', 'record_workspace_memory', 'run_workspace_process', 'bridge_health'],
 };
 export const TOOL_GROUP_RULES = {
-    portfolio: '组合和股票工具：需要组合名时先读取组合结构，按用户指定组合操作。用户说买入或卖出股票时，必须先向 flit/买入卖出.md 追加交易记录，再尝试导入或从组合移除；无论单只/多只股票中有一只或多只导入失败、ETF 被排除、股票已被手动移除、或组合操作失败，都不能跳过记录。每条至少记录操作日期和股票名称；买入价格、成交金额只有用户提供时才记录，未提供的字段不要猜测或写占位值。追加写入，不得覆盖历史记录。买入/导入 ETF 时禁止把 ETF 名称生成问财地址、也禁止把 ETF 名称直接传给 add_stock_to_portfolio（名称含「ETF」会被工具拦截）；ETF 必须使用雪球个股网址——应自行打开 https://xueqiu.com 搜索相关 ETF，复制其个股网址（如 https://xueqiu.com/S/SH588000），把该雪球网址作为 names 传给 add_stock_to_portfolio 直接新增（工具会原样保存并从雪球页面抓取），或在插件中手动新增；绝不能用问财搜索页代替。',
+    portfolio: '组合和股票工具：需要组合名时先读取组合结构，按用户指定组合操作。用户说买入或卖出股票时，必须先向 flit/买入卖出.md 追加交易记录，再尝试导入或从组合移除；无论单只/多只股票中有一只或多只导入失败、ETF 被排除、股票已被手动移除、或组合操作失败，都不能跳过记录。每条至少记录操作日期和股票名称；买入价格、成交金额只有用户提供时才记录，未提供的字段不要猜测或写占位值。用户提供了买入价/成交价/成本价时，把该价格作为 import_price 传给 add_stock_to_portfolio，作为该股票初始价；初始价一旦设置，之后行情刷新抓取不会覆盖（插件只在初始价为空时才用最新价自动回填）。追加写入，不得覆盖历史记录。买入/导入 ETF 时禁止把 ETF 名称生成问财地址、也禁止把 ETF 名称直接传给 add_stock_to_portfolio（名称含「ETF」会被工具拦截）；ETF 必须使用雪球个股网址——应自行打开 https://xueqiu.com 搜索相关 ETF，复制其个股网址（如 https://xueqiu.com/S/SH588000），把该雪球网址作为 names 传给 add_stock_to_portfolio 直接新增（工具会原样保存并从雪球页面抓取），或在插件中手动新增；绝不能用问财搜索页代替。',
     market: '行情工具：实时行情批量用 get_portfolio_quotes（一次返回组合全部股票）；多只股票日线用 read_stocks_kline（一次返回多只派生指标摘要），仅单只需要看原始 OHLCV 时才用 read_stock_kline。取数侧已做免费优先（本地数据库→新浪/腾讯实时、东财/同花顺日线→小石兜底）；日 K 按跨度分两档：≤7 个交易日不依赖桥接（没库就直接走免费，照样出数据），>7 个交易日为保护免费渠道只读本地库。工具返回 error 时照原样转述原因并给可行替代（改查 7 天内 / 改查实时现价 / 启用 Agent 桥接），不要重复调用同一工具。按名称查询就传 name/names，代码由工具解析，禁止自己猜代码。你不需要特意指定渠道；ETF 不在本地库内，由免费接口负责。若工具报「工作目录不存在可用数据库」，照原样转述给用户，不要改用其他工具硬凑 K 线（实时现价仍可查）。结论里要标数据日期：末行带 intraday 的是当日实时未收盘价（可称现价），不带的是已收盘日线（只能称"某日收盘"）；量能能不能当整日用看 实时拼接.量能说明。\n[上下文口径] tool 原始返回不跨轮保留（下一轮只剩一行「哪个工具成功/失败」的记录）；后面还要用这份数据就在本轮调 retain_tool_data 登记成隐藏便签，不必抄进正文。没登记又没写进正文的数据就是没了，只能重新调用（再花一次免费额度）。\n[强制取数] 输出任何行情数值（价格、涨跌幅、成交量、成交额、OHLCV、K 线表格、现价、收盘）前，本轮必须已经成功调用过行情工具（get_stock_quote / get_portfolio_quotes / read_stock_kline / read_stocks_kline）拿到真实数据；数据只能来自本轮工具返回或已登记且仍有效的跨轮便签。「≤7 个交易日不依赖本地库/桥接」只是说免费渠道能出数，绝不等于可以不调工具直接回答。用户改天数或换股票（例如 30 日改 7 日），必须重新调用取数工具，凭上一轮失败信息或记忆补写即视为编造。\n[禁止编造] 绝对禁止凭空编造行情数据。没有通过工具实际获取到真实数据前，不得输出价格数字、涨跌幅、跌停/涨停判定。宁可说「我没有查到」也不准编造。',
     events: '要点/事件工具：先读取已有要点；事件 content 只写股票名称。',
     settings: '设置工具：仅 Cron 可修改；修改前校验表达式，成功后立即生效。',
@@ -372,21 +379,35 @@ export const toolExecutors = {
         const combos = portfolios || {};
         const target = combos[portfolio];
         if (!target) return { error: `组合「${portfolio}」不存在`, available: Object.keys(combos) };
+        const mirror = (combos[activePortfolio] && combos[activePortfolio].stockList) || stockList || [];
+        const importPrice = parsePriceArg(args.import_price != null ? args.import_price : args.importPrice);
         const list = target.stockList || (target.stockList = []);
         const added = [];
         const skipped = [];
         const rejected = [];
+        const backfilled = [];
         for (const name of names) {
             const url = stockSearchUrl(name);
             if (!url) {
                 rejected.push({ name, reason: '只支持普通股票名称、ETF 代码（159/51/58 开头 6 位）或雪球/问财网址，其他网址不支持' });
                 continue;
             }
-            if (list.some(s => String(s.url || '') === url)) { skipped.push(name); continue; }
+            const exist = list.find(s => String(s.url || '') === url);
+            if (exist) {
+                if (importPrice != null && exist.importPrice == null) {
+                    // 股票已在组合但初始价还没设置：用用户本次提供的买入价补齐，
+                    // 避免后续刷新抓取把最新价当成初始价
+                    exist.importPrice = importPrice;
+                    exist.notifiedImport = false;
+                    backfilled.push(name);
+                }
+                skipped.push(name);
+                continue;
+            }
             list.push({
                 url, name: '', code: '', prefix: '',
                 startPrice: null, currentPrice: null, percent: null,
-                importPrice: null,
+                importPrice,
                 targetPercentLe: null, targetPercentGe: null,
                 importTargetPercentLe: null, importTargetPercentGe: null,
                 stopRunning: false, notifiedDaily: false, notifiedImport: false,
@@ -398,10 +419,15 @@ export const toolExecutors = {
             if (rejected.length > 0) {
                 return { error: `没有可导入的股票：${rejected.map(r => r.name).join('、')}（${rejected[0].reason}）`, rejected };
             }
+            if (backfilled.length > 0) {
+                // 股票原本已在组合，仅补齐初始价
+                await storageSet(chrome.storage.local, { portfolios: combos, stockList: mirror });
+                chrome.runtime.sendMessage({ action: 'refresh' });
+                return { ok: true, names: backfilled, portfolio, hint: `初始价已设为 ${importPrice}（行情刷新不会覆盖）`, backfilled };
+            }
             if (skipped.length > 0) return { error: `全部已在组合「${portfolio}」中：${skipped.join('、')}` };
             return { error: '没有可导入的股票' };
         }
-        const mirror = (combos[activePortfolio] && combos[activePortfolio].stockList) || stockList || [];
         await storageSet(chrome.storage.local, { portfolios: combos, stockList: mirror });
         // 为每只股票安排延迟+抖动的页面打开（后台执行，不阻塞返回）
         const now = Date.now();
@@ -416,6 +442,7 @@ export const toolExecutors = {
         const hintParts = [`已保存 ${added.length} 支到「${portfolio}」`];
         if (skipped.length > 0) hintParts.push(`${skipped.length} 支已在组合中`);
         if (rejected.length > 0) hintParts.push(`${rejected.length} 项不支持（${rejected.map(r => r.name).join('、')}）`);
+        if (importPrice != null) hintParts.push(`初始价已设为 ${importPrice}（行情刷新不会覆盖）`);
         hintParts.push(`页面将逐个打开抓取`);
         return { ok: true, names: added.map(a => a.name), portfolio, hint: hintParts.join('，'), rejected };
     },
@@ -1873,7 +1900,7 @@ export function buildSystemPrompt() {
     const eodRules = '[数据时效] 日线取数按跨度分两档：≤7 个交易日——本地库（工作目录 flit/config.json 登记，经 Agent 桥接只读查询）→ 免费渠道（东方财富/同花顺）→ 小石，桥接关闭或未选工作目录时直接走免费，不影响这一档取数；>7 个交易日——只能读本地库（保护免费渠道），库不可用时工具会给「缺前置条件（本地库）」的原因，照原样转述并给替代方案，不得改用免费/小石补齐。不再读 parquet——年文件只是某时刻全市场快照，供回测/入库用。链路：本地库 → 免费渠道（新浪/腾讯实时、东方财富/同花顺日线）→ 小石 API（只缺 1~2 个交易日且免费不可用时才兜底）。本地库通常滞后一个交易日（由用户侧定时任务发布），工具会自动用免费接口补齐，不算错误；库里缺口更大时不补，如实告知用户本地日线库待更新，不要反复重试，也不要替用户执行任何同步脚本。ETF/指数不在该库，走免费同花顺 ETF 日线（失败再小石，且只有未复权价）。工具报「工作目录不存在可用数据库」时照原样转述，不要改用别的工具硬凑 K 线。盘中（含午休）时，日线末行是工具用一次免费批量行情拼上的当日未收盘 bar（行上标 intraday/as_of）：此时末行 close 可以当「现价」，但当日成交量不满全天，量能结论要看工具返回的 实时拼接.量能说明（已接近收盘时才可当整日量比）。没拼上实时（盘前/收盘后/渠道失败）时，末行只是已收盘日线，只能称「某日收盘价」，不得写成现价/最新价，当日价格请另调 get_stock_quote（单只）或 get_portfolio_quotes（批量）。结论中必须写明数据日期与行情时间；工具返回的 接口调用 / 渠道诊断 / 本地库诊断 是真实渠道状况，报告有异就如实告知用户，不要猜测或重复重试。';
     const lines = [
         '你是「flit stk - 量化盯盘」Chrome 扩展 AI 助手，使用中文。工具按组冷加载：需要能力时先调用 load_tool_group。全局设置只能修改 Cron，直接执行并说明修改结果。flit_stk 是 Chrome 扩展安装目录，不是 Agent 项目目录；不要把文件写入 flit_stk。写入/读取 flit/... 时使用 Agent 工作目录，多个工作目录时自行选择 root。' + wsGuide,
-        '[交易记录硬规则] 当用户要求对当前持仓做操作，或要求记忆当前持仓、买入、卖出记录时，直接使用 append_file 自行创建或修改 flit/买入卖出.md，不要调用 save_memory，也不要把这类内容写入 flit/memory.md。用户说买入或卖出股票时，必须先向 flit/买入卖出.md 追加记录，再尝试导入或从组合移除；无论一只或多只股票无法导入、ETF 被排除、股票已手动移除、或组合操作失败，都必须记录，不能因操作失败而跳过。每条至少写操作日期和股票名称；买入价格、成交金额只有用户提供时才写，未提供不要猜测、不要写占位值；必须追加，不得覆盖历史记录。',
+        '[交易记录硬规则] 当用户要求对当前持仓做操作，或要求记忆当前持仓、买入、卖出记录时，直接使用 append_file 自行创建或修改 flit/买入卖出.md，不要调用 save_memory，也不要把这类内容写入 flit/memory.md。用户说买入或卖出股票时，必须先向 flit/买入卖出.md 追加记录，再尝试导入或从组合移除；无论一只或多只股票无法导入、ETF 被排除、股票已手动移除、或组合操作失败，都必须记录，不能因操作失败而跳过。每条至少写操作日期和股票名称；买入价格、成交金额只有用户提供时才写，未提供不要猜测、不要写占位值；用户提供了买入价/成交价/成本价时，把该价格作为 import_price 一并传给 add_stock_to_portfolio，作为该股票初始价固定写入，之后行情刷新抓取不会覆盖这个初始价；必须追加，不得覆盖历史记录。',
         '[ETF 买入硬规则] 用户表示买入、持有或导入 ETF 时，必须把该 ETF 从按名称自动导入中排除：禁止把 ETF 名称（含「ETF」字样）传给 add_stock_to_portfolio（会被工具拦截），也禁止生成问财搜索地址。你必须自行打开 https://xueqiu.com 搜索对应 ETF，复制雪球个股网址（如 https://xueqiu.com/S/SH588000），再把该雪球网址作为 names 传给 add_stock_to_portfolio 直接新增——工具会原样保存雪球地址并从雪球页面抓取。若尚未取得准确雪球网址，不得猜代码或先用问财地址代替，应先完成雪球搜索或明确告知用户需要手动完成。普通股票仍按原流程自动导入。',
         '[工具组]\n' + bridgeCatalog,
         bridgeHardRules,

@@ -1475,11 +1475,12 @@ function autoSessionTitle() {
     return '新会话';
 }
 
-function saveChat() {
+function saveChat(touch = true) {
     if (!state.currentChatId || !state.sessions[state.currentChatId]) return Promise.resolve();
     const session = state.sessions[state.currentChatId];
     session.messages = state.chatMessages;
-    session.updatedAt = Date.now();
+    // touch=false 仅持久化、不刷新 updatedAt——switchSession 用它避免「只是切过去看了下」就把会话顶到列表最前
+    if (touch) session.updatedAt = Date.now();
     if ((!session.title || session.title === '新会话') && !session.deferAutoTitle) {
         session.title = autoSessionTitle();
     }
@@ -1495,7 +1496,7 @@ function deferAutoTitleForVisionInput(content) {
 
 async function switchSession(id, debugReason = 'switch') {
     if (!state.sessions[id] || id === state.currentChatId) return;
-    await saveChat();
+    await saveChat(false);
     state.currentChatId = id;
     state.chatMessages = state.sessions[id].messages || [];
     state.contextEvicted = state.chatMessages.some(m => m.kind === 'compact_note');

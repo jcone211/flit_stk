@@ -57,7 +57,7 @@ export const TOOL_DEFS = [
     { type: 'function', function: { name: 'get_current_view', description: '读取当前列表视图（股票列表或垃圾池）', parameters: { type: 'object', properties: {}, required: [] } } },
     { type: 'function', function: { name: 'get_settings', description: '读取扩展全局设置（刷新间隔/选择器/分页/cron 定时任务，不含任何密钥）', parameters: { type: 'object', properties: {}, required: [] } } },
     { type: 'function', function: { name: 'update_cron', description: '直接修改 Cron 并返回新配置和后续执行时间', parameters: { type: 'object', properties: { operation: { type: 'string', enum: ['add', 'update', 'delete', 'enable', 'disable'] }, target: { type: 'string', description: '任务序号、任务 ID 或当前表达式；新增时可省略' }, expr: { type: 'string', description: '目标 Cron 表达式；删除时省略' } }, required: ['operation'] } } },
-    { type: 'function', function: { name: 'save_memory', description: '保存一条长期记忆（仅限用户偏好/习惯等）。当前持仓、买入卖出记录不得使用本工具，必须直接追加到 flit/买入卖出.md；普通记忆之后每轮对话都会注入，同时更新 flit/memory.md', parameters: { type: 'object', properties: { content: { type: 'string', description: '要记住的用户偏好或习惯；不要传当前持仓或买卖记录' } }, required: ['content'] } } },
+    { type: 'function', function: { name: 'save_memory', description: '保存一条长期记忆（仅限用户偏好/习惯等）。当前持仓、买入卖出记录不得使用本工具，必须直接追加到 flit/买入卖出.md。未设置工作目录时保存到扩展本地 aiMemory；已设置工作目录时写入工作区 flit/memory.md 的「AI 长期记忆」段；桥接启用且有工作目录时请直接用 write_file / append_file 编辑该段，不走本工具。保存后每轮对话自动注入', parameters: { type: 'object', properties: { content: { type: 'string', description: '要记住的用户偏好或习惯；不要传当前持仓或买卖记录' } }, required: ['content'] } } },
     { type: 'function', function: { name: 'refresh_all', description: '触发扩展全量刷新全部组合股票（按全局设置的数据获取方式执行）', parameters: { type: 'object', properties: {}, required: [] } } },
     { type: 'function', function: { name: 'list_workspaces', description: '列出已授权的全部工作目录（主目录与附加目录）及其权限状态', parameters: { type: 'object', properties: {}, required: [] } } },
     { type: 'function', function: { name: 'list_dir', description: '列出工作目录（或子目录）内容。root 缺省为主目录，可传附加目录名；软链接条目无法访问（浏览器安全限制）', parameters: { type: 'object', properties: { path: { type: 'string', description: '相对所选目录的路径，空为根目录' }, root: { type: 'string', description: '工作目录名，可用 list_workspaces 查询；缺省为主目录' } }, required: [] } } },
@@ -111,7 +111,7 @@ export const TOOL_GROUP_SUMMARY = {
     events: '交易要点与预测事件维护',
     settings: '全局设置（仅 Cron 可改）',
     workspace: '工作目录文件读写与 parquet 查询',
-    memory: '长期记忆保存（仅用户偏好/习惯；当前持仓与买入卖出记录禁止调用 save_memory，直接追加到 flit/买入卖出.md）',
+    memory: '长期记忆保存（仅用户偏好/习惯；当前持仓与买入卖出记录禁止调用 save_memory，直接追加到 flit/买入卖出.md；未设置工作目录时存扩展 aiMemory，已设置时写 flit/memory.md 的「AI 长期记忆」段，桥接启用且有工作目录时直接用 write_file / append_file 编辑该段）',
     bridge: '本地脚本执行与本地数据库查询',
 };
 
@@ -1854,7 +1854,91 @@ function eventStatusLabel(s) {
 
 // ============== 长期记忆 ==============
 
+// 记忆源同步规则：AI 窗口每次打开 / 工作目录变更后调用 loadMemory()，按「是否已指定有效主工作目录」决定——
+// 已指定 → 记忆读写工作区 flit/memory.md 的「## AI 长期记忆」段；未指定（或权限失效）→ 读写扩展 aiMemory。
+
+/** 是否存在「已授权且 readwrite 权限 granted」的主工作目录（决定记忆落点） */
+async function hasPrimaryWorkspace() {
+    if (!state.workspaceHandles || state.workspaceHandles.length === 0) return false;
+    try {
+        const perm = await workspacePermission(state.workspaceHandles[0].handle);
+        return perm === 'granted';
+    } catch {
+        return false;
+    }
+}
+
+/** 从主工作目录 flit/memory.md 解析「## AI 长期记忆」段为 memoryItems；无目录/无段/读取失败 → [] */
+async function loadMemoryFromWorkspace() {
+    try {
+        const dir = await readyRoot(state.workspaceHandles, '');
+        const { content } = await readFile(dir.handle, 'flit/memory.md', Infinity);
+        return memoryItemsFromMarkdown(content);
+    } catch {
+        return [];
+    }
+}
+
+/** 解析「## AI 长期记忆」段：-/* 开头的行是一条记忆，其下的续行合并进该条 */
+function memoryItemsFromMarkdown(md) {
+    // 注意：不能带 'm' 标志，否则 $ 会按行尾匹配，非贪婪捕获会被截断到第一条 bullet
+    const m = new RegExp('(?:^|\\n)## AI 长期记忆\\s*([\\s\\S]*?)(?=\\n## |$)').exec(String(md || ''));
+    if (!m) return [];
+    const items = [];
+    let cur = null;
+    for (const line of m[1].split(/\r?\n/)) {
+        const t = line.trim();
+        if (!t) continue;
+        const bullet = /^[-*]\s+(.+)$/.exec(t);
+        if (bullet) {
+            if (cur) items.push(cur);
+            cur = { content: bullet[1] };
+        } else if (cur) {
+            cur.content += '\n' + t;
+        }
+    }
+    if (cur) items.push(cur);
+    return items;
+}
+
+/** 把 state.memoryItems 整体写回工作区 flit/memory.md 的「## AI 长期记忆」段（保留文件其他段落） */
+async function saveMemorySectionToWorkspace() {
+    const dir = await readyRoot(state.workspaceHandles, '');
+    const memoryPath = 'flit/memory.md';
+    let existing = '';
+    try { existing = (await readFile(dir.handle, memoryPath, Infinity)).content; } catch { }
+    const section = '## AI 长期记忆\n\n' + state.memoryItems.map(m => '- ' + (m.content ?? '')).join('\n');
+    const marker = /(^|\n)## AI 长期记忆\n[\s\S]*?(?=\n## |$)/;
+    const md = marker.test(existing)
+        ? existing.replace(marker, '\n' + section)
+        : (existing.trimEnd() ? existing.trimEnd() + '\n\n' + section : section) + '\n';
+    await writeFile(dir.handle, memoryPath, md);
+}
+
+/** 一次性迁移：aiMemory 有历史记忆且工作区 memory.md 尚无「AI 长期记忆」段时，写入该段（aiMemory 保留不删） */
+async function migrateMemoryOnce() {
+    const res = await storageGet(chrome.storage.local, MEMORY_KEY);
+    const old = (res[MEMORY_KEY] && Array.isArray(res[MEMORY_KEY].items)) ? res[MEMORY_KEY].items : [];
+    if (!old.length) return;
+    try {
+        const dir = await readyRoot(state.workspaceHandles, '');
+        let existing = '';
+        try { existing = (await readFile(dir.handle, 'flit/memory.md', Infinity)).content; } catch { }
+        if (/(^|\n)## AI 长期记忆\s*(\r?\n|$)/m.test(existing)) return; // 已有段落，不重复迁移
+        state.memoryItems = old
+            .map(m => ({ content: typeof m.content === 'string' ? m.content : '' }))
+            .filter(m => m.content);
+        await saveMemorySectionToWorkspace();
+    } catch { /* 迁移失败不阻塞窗口打开，下次 loadMemory 会再次尝试 */ }
+}
+
 export async function loadMemory() {
+    if (await hasPrimaryWorkspace()) {
+        state.memoryItems = await loadMemoryFromWorkspace();
+        if (state.memoryItems.length === 0) await migrateMemoryOnce();
+        return;
+    }
+    // 未设置工作目录（或主目录权限失效）：仍走扩展 aiMemory 通道
     const res = await storageGet(chrome.storage.local, MEMORY_KEY);
     state.memoryItems = (res[MEMORY_KEY] && Array.isArray(res[MEMORY_KEY].items)) ? res[MEMORY_KEY].items : [];
 }
@@ -1865,24 +1949,24 @@ async function saveMemoryItems() {
 
 export async function addMemory(content) {
     if (!content) return { ok: false, error: '记忆内容不能为空' };
-    state.memoryItems.push({ id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), content: content.slice(0, 1000), ts: Date.now() });
+    const item = { id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), content: content.slice(0, 1000), ts: Date.now() };
+    if (await hasPrimaryWorkspace()) {
+        // 已设置工作目录：记忆存到工作区 flit/memory.md 的「## AI 长期记忆」段，不再写扩展 aiMemory
+        state.memoryItems = await loadMemoryFromWorkspace();
+        state.memoryItems.push(item);
+        if (state.memoryItems.length > MAX_MEMORY_ITEMS) state.memoryItems = state.memoryItems.slice(-MAX_MEMORY_ITEMS);
+        try {
+            await saveMemorySectionToWorkspace();
+            return { ok: true, store: 'memory.md', mirrored: true };
+        } catch (err) {
+            return { ok: false, error: '工作目录记忆写入失败：' + (err && err.message || err), store: 'memory.md' };
+        }
+    }
+    // 未设置工作目录（或权限失效）：走扩展 aiMemory 通道
+    state.memoryItems.push(item);
     if (state.memoryItems.length > MAX_MEMORY_ITEMS) state.memoryItems = state.memoryItems.slice(-MAX_MEMORY_ITEMS);
     await saveMemoryItems();
-    let mirrored = false;
-    try {
-        const dir = await readyRoot(state.workspaceHandles, '');
-        const memoryPath = 'flit/memory.md';
-        let existing = '';
-        try { existing = (await readFile(dir.handle, memoryPath, Infinity)).content; } catch { }
-        const section = '## AI 长期记忆\n\n' + state.memoryItems.map(m => '- ' + m.content).join('\n');
-        const marker = /(^|\n)## AI 长期记忆\n[\s\S]*?(?=\n## |$)/;
-        const md = marker.test(existing)
-            ? existing.replace(marker, '\n' + section)
-            : (existing.trimEnd() ? existing.trimEnd() + '\n\n' + section : section) + '\n';
-        await writeFile(dir.handle, memoryPath, md);
-        mirrored = true;
-    } catch { }
-    return { ok: true, mirrored };
+    return { ok: true, store: 'aiMemory', mirrored: false };
 }
 
 export function buildSystemPrompt() {
@@ -1898,6 +1982,11 @@ export function buildSystemPrompt() {
     const bridgeHardRules = bridgeEnabled
         ? '[桥接硬约束] 各组详细规则以 load_tool_group 返回的 rule 为准，不得推测表名/字段，先读 get_workspace_context 与 workflow 再查询。若 bridge_health 返回 bridge_unreachable，立即停止工具调用，只把 start_command 里的 pwsh 命令连同 start_note 的内容一起输出给用户手动执行；绝对禁止用 run_workspace_process 等工具自行启动 flit_bridge。凭据只能写入被 .gitignore 忽略的 flit/config.json，不得写入 memory.md。\n[桥接不通时无级可降] bridge 报 config_invalid / bridge_unreachable / query_failed 时，**不要** docker inspect 查容器标签、不要搜 bridge 源码找 label key、不要推测 bridge 内部机制。两种情况：① 用户要 ≤7 天 K 线或实时行情 → 告知桥接问题后立即降级免费渠道；② 用户要 >7 天 K 线 → 桥接不通就是彻底无路可走，直接告知用户「flit/config.json 已写入但桥接不认，请确保启动；当前无法查 30 日 K，可选：只查 7 天 / 修桥接 / 自备数据源」。禁止 docker exec/psql 直连绕过桥接。1 次重试即降级，不超 2 轮 debug。'
         : '[桥接] 当前未启用。若用户需要本地脚本或数据库查询，告知在 AI 设置中启用桥接、授权目录并启动 flit_bridge 后，重开 AI 窗口并新建会话。';
+    const memoryRule = state.workspaceHandles.length > 0
+        ? (state.bridgeEnabled
+            ? '[长期记忆存储] 工作目录已设置且桥接启用：长期记忆统一维护在工作区 flit/memory.md 的「## AI 长期记忆」段（扩展每轮自动注入读取，无需手动读文件）。新增/修改请直接使用 write_file / append_file 编辑该段，不要调用 save_memory 或 record_workspace_memory 追加。'
+            : '[长期记忆存储] 工作目录已设置：长期记忆自动读写工作区 flit/memory.md 的「## AI 长期记忆」段（扩展每轮自动注入），也可用 write_file / append_file 自行修改该段。')
+        : '[长期记忆存储] 尚未设置工作目录：长期记忆保存在扩展本地（save_memory），自动注入每一轮提示。';
     const dataRules = '[强制取数] 只要回复里会出现行情数值（价格/涨跌幅/成交量/成交额/OHLCV/K 线表格/现价/收盘），本轮就必须先成功调用行情工具取到真实数据，禁止不调工具直接给出行情结论。工具没被调用、或调用失败，任何数值都不能出现——「之前问过」「规则说可查」「记得大概价位」都不构成数据来源；能用的是本轮工具返回，或已用 retain_tool_data 登记且仍然有效的跨轮便签。用户改查范围（如 30 日改 7 日）或换股票/换天数，必须重新调用取数工具，凭上一轮的失败信息或自己的记忆补写即视为编造。「≤7 个交易日不依赖本地库/桥接」只表示免费渠道能满足取数，绝不等于可以跳过工具直接回答。\n[取数纪律] 多只股票必须一次批量取数（日线用 read_stocks_kline，最多 12 只；实时行情用 get_portfolio_quotes），禁止逐只重复 query；[免费渠道保护] 日 K 跨度分两档：≤7 个交易日——本地库 → 免费（东财/同花顺）→ 小石，**Agent 桥接关闭或未选工作目录也照样能取**；>7 个交易日——为保护免费渠道只能读本地库，禁止改用免费/小石补齐。工具返回「本地数据库不可用/不存在可用数据库/保护免费渠道」等 error 时，照原样转述原因并给出可行替代（改查 7 天内、改查实时现价、或启用桥接），不要重复调用同一工具硬凑。同一批股票的同一类查询只调一次，不要把刚拿过的数据再拉一遍（每次调用都会真花免费接口额度并叠加延时）；最多 2 轮数据收集就要给出结论，超过 3 轮会触发旧工具结果驱逐（早期原始数据被丢弃）；结果被截断或已驱逐时不要反复重试同一查询，必要时缩小范围重取；工具提示本地缓存缺口过大时，直接告知用户跑历史更新脚本，不要反复重查。\n[禁止编造] 你绝对禁止凭空编造股票价格、涨跌幅、成交量等行情数据。没有通过工具（get_stock_quote / get_portfolio_quotes / read_stock_kline）实际获取到真实数据前，不得输出价格数字、涨跌幅、跌停/涨停判定。如果你不确定或没查到，直接说「我没有查到该股票的实时数据」——宁可说不知道也不准编造。每一条价格结论都必须有对应的工具调用记录佐证。\n[上下文口径] 工具的原始返回只在当轮有效：你给出回复后，tool 结果不进入后续上下文（下一轮只能看到一份「哪个工具调过、成功还是失败」的记账）。某份原始数据后面还要用（行情数值、K 线行、库配置、文件要点、SQL 结果），就在本轮调 retain_tool_data 登记成「跨轮上下文便签」：它以隐藏消息回灌给你、不出现在用户界面，也不必抄进回复正文；不登记就等于丢掉，需要时只能重新调用工具。正文只写给用户看的结论与必要数据。反过来，记账里标「失败」的查询从未给过你数据，后续任何一轮都不得把它的结果编成数值。';
     // 数据时效：用户的“今天”与日线的“最新一天”经常不是一个日期，不把这条讲清楚就会被当成查错数据
     const eodRules = '[数据时效] 日线取数按跨度分两档：≤7 个交易日——本地库（工作目录 flit/config.json 登记，经 Agent 桥接只读查询）→ 免费渠道（东方财富/同花顺）→ 小石，桥接关闭或未选工作目录时直接走免费，不影响这一档取数；>7 个交易日——只能读本地库（保护免费渠道），库不可用时工具会给「缺前置条件（本地库）」的原因，照原样转述并给替代方案，不得改用免费/小石补齐。不再读 parquet——年文件只是某时刻全市场快照，供回测/入库用。链路：本地库 → 免费渠道（新浪/腾讯实时、东方财富/同花顺日线）→ 小石 API（只缺 1~2 个交易日且免费不可用时才兜底）。本地库通常滞后一个交易日（由用户侧定时任务发布），工具会自动用免费接口补齐，不算错误；库里缺口更大时不补，如实告知用户本地日线库待更新，不要反复重试，也不要替用户执行任何同步脚本。ETF/指数不在该库，走免费同花顺 ETF 日线（失败再小石，且只有未复权价）。工具报「工作目录不存在可用数据库」时照原样转述，不要改用别的工具硬凑 K 线。盘中（含午休）时，日线末行是工具用一次免费批量行情拼上的当日未收盘 bar（行上标 intraday/as_of）：此时末行 close 可以当「现价」，但当日成交量不满全天，量能结论要看工具返回的 实时拼接.量能说明（已接近收盘时才可当整日量比）。没拼上实时（盘前/收盘后/渠道失败）时，末行只是已收盘日线，只能称「某日收盘价」，不得写成现价/最新价，当日价格请另调 get_stock_quote（单只）或 get_portfolio_quotes（批量）。结论中必须写明数据日期与行情时间；工具返回的 接口调用 / 渠道诊断 / 本地库诊断 是真实渠道状况，报告有异就如实告知用户，不要猜测或重复重试。';
@@ -1909,6 +1998,7 @@ export function buildSystemPrompt() {
         bridgeHardRules,
         dataRules,
         eodRules,
+        memoryRule,
     ];
     if (state.memoryItems.length > 0) {
         lines.push('', '[长期记忆]：');

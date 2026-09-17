@@ -119,7 +119,7 @@ import {
     TOOL_DEFS, TOOL_GROUPS, TOOL_GROUP_DEF, TOOL_GROUP_RULES, TOOL_CATALOG,
     getLoadedToolDefs, toolExecutors,
     CONTEXT_TOOL_DEFS,
-    loadMemory, buildSystemPrompt, todayStr,
+    buildSystemPrompt, todayStr,
 } from './core/ai_tools.js';
 import {
     loadProviders, activeProvider, bindProviderEvents,
@@ -2055,7 +2055,8 @@ async function init() {
     });
     // The onChanged handler for aiProviders needs dynamic import of settings renders
     // We replace it above with a proper implementation
-    await loadMemory();
+    // 长期记忆统一由 refreshDirStatus()（下方调用）在目录就绪后按规则加载：
+    // 未指定工作目录读扩展 aiMemory，已指定则读工作区 flit/memory.md 的「AI 长期记忆」段
     await ensureChat();
     beginDebugSession(state.currentChatId, 'init');
     renderHistory();

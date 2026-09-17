@@ -19,6 +19,7 @@ import {
     workspacePermission, reauthorizeWorkspace,
     getBridgeHandle, pickBridgeDirectory, writeFile,
 } from './fsa.js';
+import { loadMemory } from './ai_tools.js';
 
 // ============== 供应商配置 ==============
 
@@ -433,6 +434,9 @@ function dirActionBtn(label, onClick) {
 
 export async function refreshDirStatus() {
     state.workspaceHandles = await getWorkspaceHandles();
+    // 记忆源同步：目录就绪后按「是否已指定有效主工作目录」重新加载长期记忆
+    // （未指定 → 读扩展 aiMemory；已指定 → 读工作区 flit/memory.md 的「AI 长期记忆」段）
+    try { await loadMemory(); } catch { /* 记忆同步失败不阻塞目录状态条 */ }
     renderUploadState();
     dirStatusBar.innerHTML = '';
     if (state.workspaceHandles.length === 0) {

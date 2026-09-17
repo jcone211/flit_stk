@@ -83,6 +83,13 @@ export function createEditForm(els, deps) {
             refreshImportDerived();
             refreshAllPriceInputs();
         });
+        // 刷新图标：一键将初始价设为当前现价（直接取库存现价，不触发行情更新）
+        els.importPriceRefreshBtnEl.addEventListener('click', () => {
+            const price = numOrNull(getStock()?.currentPrice);
+            if (price === null) return;
+            els.importPriceInputEl.value = price;
+            els.importPriceInputEl.dispatchEvent(new Event('input')); // 复用上方的联动刷新
+        });
     }
 
     function render(stock) {
@@ -102,6 +109,8 @@ export function createEditForm(els, deps) {
         els.percentEl.textContent = dailyVal !== null ? dailyVal + '%' : '-';
         // 导入以来
         els.importPriceInputEl.value = stock.importPrice != null ? stock.importPrice : '';
+        // 无现价时禁用「设为现价」刷新按钮（编辑框只读态已有防护，这里直接灭掉入口）
+        els.importPriceRefreshBtnEl.disabled = stock.currentPrice == null;
         refreshImportDerived();
         // 目标涨跌幅
         els.targetPercentLeEl.value = stock.targetPercentLe ? stock.targetPercentLe : '';
@@ -125,6 +134,7 @@ export function createEditForm(els, deps) {
         els.importTargetPercentLeEl.value = '';
         els.importTargetPercentGeEl.value = '';
         els.importPriceInputEl.value = '';
+        els.importPriceRefreshBtnEl.disabled = true;
         els.lastUpdateAtEl.textContent = '-';
         els.startPriceEl.textContent = '-';
         els.headerCurrentPriceEl.textContent = '-';

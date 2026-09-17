@@ -102,6 +102,7 @@ const targetPercentGeEl = document.getElementById('targetPercentGe');
 const dailyLePriceInputEl = document.getElementById('dailyLePriceInput');
 const dailyGePriceInputEl = document.getElementById('dailyGePriceInput');
 const importPriceInputEl = document.getElementById('importPriceInput');
+const importPriceRefreshBtnEl = document.getElementById('importPriceRefreshBtn');
 const importPercentEl = document.getElementById('importPercent');
 const importTargetPriceEl = document.getElementById('importTargetPrice');
 const importTargetPercentLeEl = document.getElementById('importTargetPercentLe');
@@ -175,7 +176,7 @@ const keepRefreshOnCloseToggleEl = document.getElementById('keepRefreshOnCloseTo
 const editForm = createEditForm({
     stockNameEl, stockCodeEl, stockUrlEl, headerCurrentPriceEl, lastUpdateAtEl,
     startPriceEl, percentEl, targetPriceEl,
-    importPriceInputEl, importPercentEl, importTargetPriceEl,
+    importPriceInputEl, importPriceRefreshBtnEl, importPercentEl, importTargetPriceEl,
     targetPercentLeEl, targetPercentGeEl, dailyLePriceInputEl, dailyGePriceInputEl,
     importTargetPercentLeEl, importTargetPercentGeEl, importLePriceInputEl, importGePriceInputEl,
     editActionsTopEl, trashToggleBtnEl,

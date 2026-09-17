@@ -983,6 +983,28 @@ button:disabled {
   border-radius: 2px;
 }
 
+/* 导入以来标题右侧「设为现价」刷新图标：紧贴标题文字，距标题 10px
+   （父级 h5 flex gap 6px + 本按钮 margin-left 4px = 10px） */
+.import-price-refresh {
+  margin-left: 4px;
+  border: none;
+  background: none;
+  cursor: pointer;
+  padding: 2px 5px;
+  font-size: 14px;
+  line-height: 1;
+  color: #8a919a;
+  border-radius: 4px;
+}
+.import-price-refresh:hover:not(:disabled) {
+  color: #4caf50;
+  background: #e8ebee;
+}
+.import-price-refresh:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 /* 数据区两层结构：首行为表头（弱化小字），次行为数值（加粗） */
 .detail-section .stock-data span {
   font-size: 14px;

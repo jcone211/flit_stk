@@ -1,8 +1,8 @@
-// ai_guard.js —— 反编造 guard 的**纯判定**（不碰 DOM、不碰 chrome，方便 docs/verify-free-first.mjs 直接断言）
-// 口径来源：docs/plan-桥接关闭时对话体验.md §1-R3/§2-M3。
+// ai_guard.js —— 反编造 guard 的**纯判定**（不碰 DOM、不碰 chrome，方便 scripts/verify/verify-free-first.mjs 直接断言）
+// 口径来源：docs/archive/2026-09-plans/plan-桥接关闭时对话体验.md §1-R3/§2-M3。
 // 旧版只有「成功取数 / 没查」两态，且命中只看**名词**（收盘、涨跌幅…），
 // 于是「解释为什么拿不到数据」的天然措辞必被误杀 —— 本文件把三态与数值形态写在一处。
-// 2026-09-16 维度修复（docs/risk/guard-历史证据维度误判导致幻觉漏拦截.md）：
+// 2026-09-16 维度修复（docs/incidents/2026-09-16-guard-历史证据维度误判导致幻觉漏拦截.md）：
 //   行情工具按「数据维度」分快照 / K 线两类。历史证据验证必须与话题维度匹配，
 //   否则上一轮取到的「实时报价」会被当成「K 线历史」的证据，guard 整体短路放行——
 //   debug.txt [043] 无工具调用却输出 1111 字编造 K 线的根因。
@@ -24,7 +24,7 @@ const QUOTE_WORDS = /(现价|收盘|开盘|最高|最低|涨跌幅|涨跌额|成
 const PRICE_NUMBER = /\d+\.\d+|\d+\s*%|[+\-]\d+(?:\.\d+)?(?=\s*%)/;
 
 // 话题明确要求「K 线 / 日线 / 技术分析」维度的词。命中后只有 K 线类取数（read_stock_kline /
-// read_stocks_kline）的成功记录才算证据，实时报价不算（docs/risk/guard-历史证据维度误判导致幻觉漏拦截.md）。
+// read_stocks_kline）的成功记录才算证据，实时报价不算（docs/incidents/2026-09-16-guard-历史证据维度误判导致幻觉漏拦截.md）。
 // 有意收窄：不带「走势 / 形态 / 20日 / 30日」这类可能是口语宽泛表达的词，避免误触发强制取数。
 export const KLINE_TOPIC_RE = /(K\s*线|日k|日线|技术分析|均线|MACD|KDJ|MA5|MA10|MA20|复盘|K线图|蜡烛图)/i;
 // 带数字的 markdown 表格行（| 600206 | 12.3 | ...），文件清单这类要靠「行情话题」再加一道闸
@@ -160,7 +160,7 @@ export function recentUserTopic(apiMessages, re, maxUsers = 4) {
  * 历史证据验证（纯函数，可被回归脚本直接测）：检查隐藏条目（tool_trace 账本 / retained_data 便签）
  * 里是否有「与话题所需数据维度匹配」的真实行情来源。ai.js 的 hasPriorQuoteEvidence 委托给它。
  * klineNeeded=true 时只认 K 线类工具（read_stock_kline / read_stocks_kline）的证据——
- * 上一轮取到的实时报价不能充当 K 线分析的证据（docs/risk/guard-历史证据维度误判导致幻觉漏拦截.md）。
+ * 上一轮取到的实时报价不能充当 K 线分析的证据（docs/incidents/2026-09-16-guard-历史证据维度误判导致幻觉漏拦截.md）。
  * @param {Array} entries 隐藏条目数组（{ kind: 'tool_trace'|'retained_data', source?, calls? }）
  * @param {boolean} klineNeeded 话题是否明确要求 K 线/日线/技术分析维度
  */

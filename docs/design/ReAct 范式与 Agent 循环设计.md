@@ -1,3 +1,4 @@
+> **STATUS: 设计解析（2026-09-06）** 描述性文档，文内行号为参考，以代码为准。
 # ReAct 范式与 Agent 循环设计
 
 > 分析日期：2026-09-06
@@ -182,11 +183,11 @@ tool 消息直接注入 apiMessages，下一轮 sendRound 时模型可见所有�
 | 思考过程展示 | ai/ai.js | L1230-L1270 |
 | tool_trace 账本 | ai/ai.js | L542-L556 |
 | 常量定义 | ai/core/ai_state.js | L11-L77 |
-| 回归测试 | docs/verify-free-first.mjs | C9/C10/G1/R1 |
+| 回归测试 | scripts/verify/verify-free-first.mjs | C9/C10/G1/R1 |
 
 ## 七、回归验证
 
-docs/verify-free-first.mjs 含 167 项断言覆盖 ReAct 核心链路：
+scripts/verify/verify-free-first.mjs 含 167 项断言覆盖 ReAct 核心链路：
 C9 系统提示、C10 工具完整性、G1-G2 guard 决策、R1 跨轮便签安全
 
 ## 八、总结

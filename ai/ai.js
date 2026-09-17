@@ -17,7 +17,7 @@
  *                  记录点：appendMessage(user/assistant/system/error)、commitAssistant、executeToolCalls、
  *                  sendRound/logResponse、会话生命周期；renderHistory 等回放靠 withDebugMuted 抑制
  *   fsa.js         文件系统访问：readyRoot / writeUpload / getBridgeHandle / workspacePermission
- *   ai_guard.js    反编造 guard 的**纯判定**（不碰 DOM/chrome，可被 docs/verify-free-first.mjs 直接 import）：
+ *   ai_guard.js    反编造 guard 的**纯判定**（不碰 DOM/chrome，可被 scripts/verify/verify-free-first.mjs 直接 import）：
  *                  QUOTE_TOOLS / quoteFabricationSignal / isTerminalRefusal / decideQuoteGuard / correctionPromptText
  *                  三态：成功取数→放行；工具终局拒绝→解释型放行(note)、给数值直接丢(drop)；什么都没查→先 correct 再丢
  *
@@ -334,7 +334,7 @@ function logResponse(result) {
 /**
  * 一次用户提问 = 一整串 function-calling 轮。
  * 外层只负责兜底：不管正常收工 / 报错 / 中断 / 轮数耗尽，本轮的工具账本都要落到 chatMessages，
- * 否则下一轮模型既不知道自己查过什么，也不知道哪些查失败了（docs/debug.txt 的根因）。
+ * 否则下一轮模型既不知道自己查过什么，也不知道哪些查失败了（docs/archive/debug.txt 的根因）。
  */
 async function runAgentLoop(initialMessages, initialToolGroups = []) {
     const turnCalls = [];
@@ -353,7 +353,7 @@ async function runAgentLoopBody(initialMessages, initialToolGroups, turnCalls) {
     const apiMessages = initialMessages || state.chatMessages.map(toApiMessage);
     state.activeToolGroups = new Set(initialToolGroups);
     // 本轮是否真拿到过行情数据（guard 的硬证据）、「工具本轮是否终局拒绝」（回了 error + 诊断）、与「强制纠正只做一次」的闭锁
-    // quoteEvidenceKline：K 线维度的证据单独记录——K 线话题只有日线取数成功才构成证据，实时报价不算（修复见 docs/risk/）
+    // quoteEvidenceKline：K 线维度的证据单独记录——K 线话题只有日线取数成功才构成证据，实时报价不算（修复见 docs/incidents/）
     let quoteEvidence = false;
     let quoteEvidenceKline = false;
     let quoteRefused = false;
@@ -440,7 +440,7 @@ async function runAgentLoopBody(initialMessages, initialToolGroups, turnCalls) {
         // ② 工具本轮「终局拒绝」（回了 error + 取数诊断）→ 取数义务已尽，解释型正文放行只补一行灰字；
         //    此时出现的任何价格数值必然没来源，且重查还是同样结果 → 直接丢弃，不再白烧一轮；
         // ③ 完全没查到 → 先强制纠正一次，二次命中按强/弱信号丢弃或放行加免责。
-        // ④（2026-09-16 修复，docs/risk/guard-历史证据维度误判导致幻觉漏拦截.md）证据按数据维度验证：
+        // ④（2026-09-16 修复，docs/incidents/2026-09-16-guard-历史证据维度误判导致幻觉漏拦截.md）证据按数据维度验证：
         //    话题要 K 线/日线/技术分析时，只有 K 线类取数（read_stock_kline / read_stocks_kline）成功才算证据，
         //    上一轮取到的实时报价（get_stock_quote）不能替日线历史买单——debug.txt [043] 编造案例根因；
         //    历史确有「同维度」证据但本轮没重新取数时，correct 降级为 pass_warn（正文照发 + 一行时效提示），
@@ -650,7 +650,7 @@ function trimHiddenEntries() {
 
 /** 跨轮证据：历史隐藏条目里有没有与「话题所需数据维度」匹配的真实行情数据（已登记的行情便签，或最近账本里成功的行情调用）。
  *  klineNeeded=true 时只认 K 线类取数（read_stock_kline / read_stocks_kline）的证据——实时报价不能当 K 线历史，
- *  否则上一轮 get_stock_quote 成功会让 guard 整体短路放行（debug.txt [043] 幻觉案例，见 docs/risk/guard-历史证据维度误判导致幻觉漏拦截.md）。 */
+ *  否则上一轮 get_stock_quote 成功会让 guard 整体短路放行（debug.txt [043] 幻觉案例，见 docs/incidents/2026-09-16-guard-历史证据维度误判导致幻觉漏拦截.md）。 */
 function hasPriorQuoteEvidence(klineNeeded = false) {
     // 两类条目本身已被 trimHiddenEntries 限在最近几条，直接全扫即可，不必只盯最近一条
     return hasQuoteEvidence(state.chatMessages, klineNeeded);

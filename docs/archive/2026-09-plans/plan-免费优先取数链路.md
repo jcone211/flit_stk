@@ -1,8 +1,9 @@
+> **ARCHIVED**（2026-09-17 归档整理）：历史会话交接文档，只读。当前口径见根目录 `CLAUDE.md` / `API_CHANNELS.md`，索引见 `docs/README.md`；验证脚本现位于 `scripts/verify/`。
 # 实施计划：AI 取数链路「免费优先 + 当日实时拼接」收尾
 
 > 状态记录用文档，写给下一个会话/接手的人。
-> **更新（2026-09-02 盘中）**：§3 的 P0 四项已全部完成，见 §7。原「未再跑联网验证」的说法已失效——现在有 `docs/verify-free-first.mjs` 一次性回归（44 项断言全通过）。
-> **⚠️ 已被后续任务覆盖**：同日用户改口径——**K 线不再读 parquet，改读 `flit/config.json` 登记的本地数据库**。本文件的 §1/§2/§5 中「本地 parquet」口径已失效，进度与待办见 `docs/plan-K线取数改本地数据库.md`（实时行情三级链、时段口径、API_CHANNELS.md 那部分仍然有效）。
+> **更新（2026-09-02 盘中）**：§3 的 P0 四项已全部完成，见 §7。原「未再跑联网验证」的说法已失效——现在有 `scripts/verify/verify-free-first.mjs` 一次性回归（44 项断言全通过）。
+> **⚠️ 已被后续任务覆盖**：同日用户改口径——**K 线不再读 parquet，改读 `flit/config.json` 登记的本地数据库**。本文件的 §1/§2/§5 中「本地 parquet」口径已失效，进度与待办见 `plan-K线取数改本地数据库.md`（实时行情三级链、时段口径、API_CHANNELS.md 那部分仍然有效）。
 > 时间：2026-09-02 盘中之后整理。仓库：`D:/codes/ai/flit_stk`
 
 ## 1. 起因与目标
@@ -72,7 +73,7 @@
    - 建议做法（**先问用户再改**）：保留 `apiKey` 输入框，删掉 `dataSource` 下拉？或者整块保留、只把描述文案改成「小石为额度型接口，AI 工具已免费优先，这里仅在你需要自有 Key / 用 API 直取-小石模式时填写」。**不要在未确认前删功能。**
 6. **耗时优化**（用户问过「单次执行时间较长能否优化」）：现状 12 只 ≈ 8.4s，瓶颈是**每只各发一次免费日线请求**（12 次 HTTP，约 500ms/只）。可选方案，需用户拍：
    - a) 缓存健康时不请求日线接口（现在只有缺口才请求，已是这样）→ 真正把耗时降下来靠**用户跑年度更新脚本**，把 parquet 补到最新；
-   - b) 缺口大时改用**小石年度文件**（一次请求补多年，R2 CDN，但 23s 量级，见 `docs/debug.txt`）；
+   - b) 缺口大时改用**小石年度文件**（一次请求补多年，R2 CDN，但 23s 量级，见 `docs/archive/debug.txt`）；
    - c) 把免费日线的 `retries` 从默认 3 降到 1、并在 `fillKlineFromApi` 里对同一批代码只请求一次窗口（当前每只独立调用，无法合并——`adata_stock_kline.js` 无批量接口）；
    - d) 并发度 `API_CONCURRENCY` 从 4 提到 6~8（会加重大概率 429 风险，谨慎）。
    **建议：默认只做 (a)（文档里写清楚"缺口大请跑更新脚本"），(b)(c)(d) 等用户明确要求再做。**
@@ -111,7 +112,7 @@
 
 ## 6. 交接注意
 
-- 工作树当前**同时含有用户自己的改动**（`ai/ai.css`、`ai/ai.js`、`ai/core/ai_debug.js`、`background/background.js`、`docs/debug.txt`、`js/quote_batch.js`、`shared/quickOpen.js`、`CLAUDE.md`、`ai/core/ai_state.js`、新增 `quick_panel.js/html`、`plugins/` 等）。**提交前务必 `git diff --stat` 与用户确认范围**，不要 `git add -A`。
+- 工作树当前**同时含有用户自己的改动**（`ai/ai.css`、`ai/ai.js`、`ai/core/ai_debug.js`、`background/background.js`、`docs/archive/debug.txt`、`js/quote_batch.js`、`shared/quickOpen.js`、`CLAUDE.md`、`ai/core/ai_state.js`、新增 `quick_panel.js/html`、`plugins/` 等）。**提交前务必 `git diff --stat` 与用户确认范围**，不要 `git add -A`。
 - 语法检查方式：`cp ai/core/ai_tools.js /tmp/chk.mjs && node --check /tmp/chk.mjs`（Windows 下用 `$TEMP`）。
 - 本项目无构建/测试/lint，最终需用户在 Chrome 里 `chrome://extensions` 重新加载扩展并关窗重开 AI 助手验证。
 
@@ -119,7 +120,7 @@
 
 ### 7.1 P0-1 回归验证：已做，方式与 §3.1 的设想不同
 
-新增 `docs/verify-free-first.mjs`：在 Node 里用假 `chrome` / 假 `document` / 假 File System Access 目录句柄（直接映射到真实 parquet 目录）驱动 `toolExecutors`，**一次进程内跑完全部用例**，避免反复打接口。用法见 `API_CHANNELS.md` §5。
+新增 `scripts/verify/verify-free-first.mjs`：在 Node 里用假 `chrome` / 假 `document` / 假 File System Access 目录句柄（直接映射到真实 parquet 目录）驱动 `toolExecutors`，**一次进程内跑完全部用例**，避免反复打接口。用法见 `API_CHANNELS.md` §5。
 
 | 用例 | 覆盖点 | 结果 |
 | --- | --- | --- |
@@ -159,4 +160,4 @@
 - 新增 `API_CHANNELS.md`（渠道清单 + 时段口径 + 实测备注 + 验证脚本用法 + Key 优先级），P0-2。
 - `README.md`：核心能力加「免费优先取数」一行、详细文档加 `API_CHANNELS.md` 链接，P0-3。
 - `CLAUDE.md`：旧的「日线数据时效（`EOD_PUBLISH_HOUR`/`eodAvailableThrough`）」bullet 已换成三条新口径（渠道链 / 时段口径 / 自证字段），`plugins` 一节的回退链方向修正并指向 `API_CHANNELS.md`，P0-4。
-- 新增 `docs/verify-free-first.mjs`；`ai/core/ai_tools.js` 见 §7.2 的 5 项修改（`node --check` 通过）。
+- 新增 `scripts/verify/verify-free-first.mjs`；`ai/core/ai_tools.js` 见 §7.2 的 5 项修改（`node --check` 通过）。

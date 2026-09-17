@@ -1,10 +1,11 @@
+> **ARCHIVED**（2026-09-17 归档整理）：历史会话交接文档，只读。当前口径见根目录 `CLAUDE.md` / `API_CHANNELS.md`，索引见 `docs/README.md`；验证脚本现位于 `scripts/verify/`。
 # 实施计划：桥接未启用时的 AI 对话体验修复（M1~M6）
 
-> 状态记录用文档，写给下一个会话/接手的人。口径来源：`docs/debug.txt` 两次导出（会话 `chat_mtk7gshxtw7` / `chat_mtk7pokg1o2`，扩展 v1.9.0，qwen3.8-flash，**Agent桥接 关闭**，工作目录 stock-assistant）。
-> 状态（2026-09-02 深夜）：**M1~M7 已全部落盘**，`node docs/verify-free-first.mjs` → **163 项断言、0 失败**（`--offline-cases` 12/12）；尚待用户在 Chrome 扩展里实测（§4 第 4 步），尚未 commit。
-> 相关代码改动：`ai/core/ai_tools.js`（分流/话术/描述）、`ai/core/ai_guard.js`（新增）、`ai/ai.js`（guard 改写 + 账本带目标代码）、`docs/verify-free-first.mjs`（D1/D2/D8/D9/D14 重写 + D19/G1/G2 新增）、`CLAUDE.md`、`API_CHANNELS.md`。
+> 状态记录用文档，写给下一个会话/接手的人。口径来源：`docs/archive/debug.txt` 两次导出（会话 `chat_mtk7gshxtw7` / `chat_mtk7pokg1o2`，扩展 v1.9.0，qwen3.8-flash，**Agent桥接 关闭**，工作目录 stock-assistant）。
+> 状态（2026-09-02 深夜）：**M1~M7 已全部落盘**，`node scripts/verify/verify-free-first.mjs` → **163 项断言、0 失败**（`--offline-cases` 12/12）；尚待用户在 Chrome 扩展里实测（§4 第 4 步），尚未 commit。
+> 相关代码改动：`ai/core/ai_tools.js`（分流/话术/描述）、`ai/core/ai_guard.js`（新增）、`ai/ai.js`（guard 改写 + 账本带目标代码）、`scripts/verify/verify-free-first.mjs`（D1/D2/D8/D9/D14 重写 + D19/G1/G2 新增）、`CLAUDE.md`、`API_CHANNELS.md`。
 > 时间：2026-09-02 22:51 之后整理。仓库：`D:/codes/ai/flit_stk`
-> 相关既有文档：`API_CHANNELS.md`（渠道清单）、`docs/plan-免费优先取数链路.md`、`docs/plan-K线取数改本地数据库.md`。
+> 相关既有文档：`API_CHANNELS.md`（渠道清单）、`plan-免费优先取数链路.md`、`plan-K线取数改本地数据库.md`。
 
 ## 0. 现象
 
@@ -49,7 +50,7 @@ if (db.error && !isEtfCode(code6)) {
 - `klineDbUnavailable` 自己的 `hint`（`:1197`）：「7 天内 K 线可走免费渠道（无需数据库）」；
 - `CLAUDE.md`「AI 工具取数一律 本地数据库 → 免费公开渠道 → 小石额度兜底」。
 
-**注意**：`docs/verify-free-first.mjs` 的 D1 / D8 / D9 现在断言「桥接关闭/无库 → 0 次免费日线」，坏行为被回归脚本锁住了，改代码必须连断言一起改。
+**注意**：`scripts/verify/verify-free-first.mjs` 的 D1 / D8 / D9 现在断言「桥接关闭/无库 → 0 次免费日线」，坏行为被回归脚本锁住了，改代码必须连断言一起改。
 
 ### R3 反编造 guard 只有「成功 / 没查」两态
 
@@ -118,7 +119,7 @@ const hasPriceData = /(现价|收盘|开盘|最高价|最低价|涨跌幅|涨跌
 - `TOOL_GROUP_RULES.market`、`read_stock_kline` / `read_stocks_kline` 描述与 `days`/`name` 参数描述、`buildSystemPrompt` 的 `[取数纪律]`/`[数据时效]`：全部改成两档口径，并新增「按名称查询就传 name/names，禁止自己猜代码」；旧的「提示『保护免费渠道…联系项目作者』」写法在提示词里删除（仅 `KLINE_RANGE_PROTECTION` 常量本身保留，用于 `fillKlineFromApi` 缺口路径）。
 - `getLoadedToolDefs()`（M7）：保留真实 description（上限 320）与参数 description（上限 80）。**实测 market 组共送出 1380 字**（旧压缩≈ 60 字），对比模型猜代码的代价，这点预算值得。
 
-**`docs/verify-free-first.mjs` 新增**
+**`scripts/verify/verify-free-first.mjs` 新增**
 
 - `G1 guard 判定`（10 项）：解释型不算编造 / 日期代码不误判 / 真编造型仍识别 / note / drop / correct→drop / 弱信号 pass_warn / `isTerminalRefusal` 三例 / 纠正文案口径。
 - `G2 debug.txt 场景回放`（4 项）：桥接关闭 + `days=30` 的真载荷→refusal=true→解释型回复判 `note`（当时正是这类正文被连丢两次），同载荷下编造型判 `drop`，全程 0 次外呼。
@@ -143,7 +144,7 @@ const hasPriceData = /(现价|收盘|开盘|最高价|最低价|涨跌幅|涨跌
 
 **效果（对比 debug.txt）**：[012] 的「保护免费渠道…自备数据源…联系项目作者」变成「本地数据库不可用：AI 设置里未启用「Agent 桥接」……才能查超过 7 天的日 K」；[040] 的 `days=7` 从「拒绝 + 0 次接口」变成「7 行真数据，source=adata，0 次小石」。
 
-**`docs/verify-free-first.mjs` 回归同步**（旧断言锁死了坏行为，已改）
+**`scripts/verify/verify-free-first.mjs` 回归同步**（旧断言锁死了坏行为，已改）
 
 - D1 → 改名「>7 天给启用指引、≤ 7 天照样降级免费」，双跑 `days=30`/`days=7`，新增 5 项（不冒充保护免费渠道 / N 天前置条件句 / ≤ 7 天拿到 7 行 / 数据表=null 与诊断文案 / 只打免费不抽小石）。
 - D2 / D8 / D9 → 话术类断言改用 `days=30`（该分支现在只在 >7 天命中），D2/D9 各加 ≤ 7 天降级断言；D8 原文正则同步新文案「当前无法查询该长度的 K 线」。
@@ -154,8 +155,8 @@ const hasPriceData = /(现价|收盘|开盘|最高价|最低价|涨跌幅|涨跌
 #### ✅ 上一轮（同批工作区，未提交）
 
 - `ai/core/ai_tools.js:91-92` 恢复被 `7e33b64` 误删的 `export const TOOL_BY_NAME`（缺失导致每轮组装工具时 `ReferenceError: TOOL_BY_NAME is not defined`，整轮对话必死）。
-- `docs/verify-free-first.mjs` 新增 **C10 工具表完整性**（4 项）：真跑 `getLoadedToolDefs()` 全组激活 + 校对 TOOL_DEFS/TOOL_GROUPS/toolExecutors 三者对齐。反向验证过：注掉 TOOL_BY_NAME 后 C10 立刻 FAIL。
-- `docs/verify-free-first.mjs` D9 断言同步 `7e33b64` 已改写的话术（旧断言还在匹配被删掉的「日线表读取失败或桥接不可用」）。
+- `scripts/verify/verify-free-first.mjs` 新增 **C10 工具表完整性**（4 项）：真跑 `getLoadedToolDefs()` 全组激活 + 校对 TOOL_DEFS/TOOL_GROUPS/toolExecutors 三者对齐。反向验证过：注掉 TOOL_BY_NAME 后 C10 立刻 FAIL。
+- `scripts/verify/verify-free-first.mjs` D9 断言同步 `7e33b64` 已改写的话术（旧断言还在匹配被删掉的「日线表读取失败或桥接不可用」）。
 - `CLAUDE.md` 断言计数与 C10 口径说明。
 
 ## 3. 不做清单（红线，别为了体验破口径）

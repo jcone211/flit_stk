@@ -1,16 +1,16 @@
 // verify-free-first.mjs —— 「本地数据库 → 免费公开渠道 → 小石」取数链路回归（一次性跑完全部用例）
 //
-// 用途：对应 docs/plan-K线取数改本地数据库.md 的 P0-1。在 Node 里用假 chrome/document +
+// 用途：对应 docs/archive/2026-09-plans/plan-K线取数改本地数据库.md 的 P0-1。在 Node 里用假 chrome/document +
 //       假 File System Access handle 直接驱动 ai/core/ai_tools.js 的工具执行器；K 线的「库」
-//       由 docs/mock-bridge.mjs 造假（照 flit_bridge 的真实响应形状），从而能确定性地构造
+//       由 scripts/verify/mock-bridge.mjs 造假（照 flit_bridge 的真实响应形状），从而能确定性地构造
 //       「库里缺 3 根 / 缺 30 根 / config 为空 / 桥接未启用 / 表名没登记」这些分支——
 //       这些靠用户真库是测不出来的，也不该拿真库当测试床反复打。
 // 用法：
-//   node docs/verify-free-first.mjs                       # 全量：时段口径 + 假桥接库用例 + 真实实时/免费用例
-//   node docs/verify-free-first.mjs --offline-cases       # 只跑不打网络、不起桥接的时钟/缺口口径用例
-//   node docs/verify-free-first.mjs --only=D4             # 单跑某条（C*/D*/E* 前缀均可）
-//   node docs/verify-free-first.mjs --bridge=real         # 追加真实桥接用例（先 node flit_bridge/server.js）
-//   node docs/verify-free-first.mjs --root "D:/path/ws"   # 真实桥接模式的工作目录（含 flit/config.json）
+//   node scripts/verify/verify-free-first.mjs                       # 全量：时段口径 + 假桥接库用例 + 真实实时/免费用例
+//   node scripts/verify/verify-free-first.mjs --offline-cases       # 只跑不打网络、不起桥接的时钟/缺口口径用例
+//   node scripts/verify/verify-free-first.mjs --only=D4             # 单跑某条（C*/D*/E* 前缀均可）
+//   node scripts/verify/verify-free-first.mjs --bridge=real         # 追加真实桥接用例（先 node flit_bridge/server.js）
+//   node scripts/verify/verify-free-first.mjs --root "D:/path/ws"   # 真实桥接模式的工作目录（含 flit/config.json）
 // 说明：
 //   - D*（假桥接）用例不打任何外部接口，除标注「免费补齐/小石兜底」的四条（合计约 4 次外呼）；
 //   - C*（真实行情）用例覆盖新浪+腾讯→小石批量→小石单只，靠拦截 fetch 模拟渠道失效，不额外耗额度；
@@ -23,7 +23,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { startMockBridge, SCHEMA_FULL, dailySource, minusWeekdays } from './mock-bridge.mjs';
 
-const REPO = path.resolve(import.meta.dirname, '..');
+const REPO = path.resolve(import.meta.dirname, '..', '..');
 const ARGS = process.argv.slice(2);
 const argOf = (name, dflt) => {
     const i = ARGS.indexOf('--' + name);
@@ -220,7 +220,7 @@ const from = src.indexOf('// ============ A股交易时段与数据时效口径'
 const to = src.indexOf('\nfunction klineStartDate(');
 if (from < 0 || to < 0) throw new Error('未能从 ai_tools.js 抽取时段口径代码块，脚本需更新');
 const block = src.slice(from, to);
-const { fmtDateTimeStr } = await import('../ai/core/ai_state.js');
+const { fmtDateTimeStr } = await import('../../ai/core/ai_state.js');
 const helpers = new Function('fmtDateTimeStr', block + '\nreturn { marketPhase, hasLiveSession, expectedDailyLastDate, lastClosedSessionStr, sessionVolumeNote, localDateStr, nowContext, weekdaysBetween, liveSpliceInfo };')(fmtDateTimeStr);
 
 const CLOCK_CASES = [
@@ -267,8 +267,8 @@ await run('C1 时段/时效口径（假时钟，0 次接口）', () => {
 if (OFFLINE_ONLY) { report(); process.exit(failures ? 1 : 0); }
 
 // ---------------------------------------------------------------- 2. 装配假桥接 + 假工作目录
-const { state } = await import('../ai/core/ai_state.js');
-const { toolExecutors } = await import('../ai/core/ai_tools.js');
+const { state } = await import('../../ai/core/ai_state.js');
+const { toolExecutors } = await import('../../ai/core/ai_tools.js');
 const now = new Date();
 const TODAY = helpers.localDateStr(now);
 const LIVE = helpers.hasLiveSession(now);
@@ -746,7 +746,7 @@ await run('C4b 免费实时全挂 + 同批混脏代码（新契约：批量按�
 });
 
 await run('C9 系统提示注入（buildSystemPrompt）', async () => {
-    const { buildSystemPrompt, TOOL_GROUP_RULES } = await import('../ai/core/ai_tools.js');
+    const { buildSystemPrompt, TOOL_GROUP_RULES } = await import('../../ai/core/ai_tools.js');
     const p = buildSystemPrompt();
     const content = String((p && p.content) || p);
     const line = content.split('\n').find(l => l.includes('[当前时间]')) || '';
@@ -812,7 +812,7 @@ await run('R1 retain_tool_data 登记与拒收口径（0 次接口）', async ()
 
 // ---------------------------------------------------------------- 4.10 C10 工具表完整性（getLoadedToolDefs 曾经因 TOOL_BY_NAME 被删而每轮抛 ReferenceError）
 await run('C10 工具表完整性：定义/分组/执行器三者对齐（0 次接口）', async () => {
-    const mod = await import('../ai/core/ai_tools.js');
+    const mod = await import('../../ai/core/ai_tools.js');
     const { TOOL_DEFS, TOOL_GROUPS, TOOL_BY_NAME, getLoadedToolDefs, CONTEXT_TOOL_DEFS } = mod;
     const groupNames = Object.keys(TOOL_GROUPS);
     // 逐组激活后走 ai.js 每轮真实取值路径（这里不拦异常，抛了就 FAIL）
@@ -835,7 +835,7 @@ await run('C10 工具表完整性：定义/分组/执行器三者对齐（0 次�
             + Object.values(d.function.parameters?.properties || {}).reduce((k, p) => k + String(p.description || '').length, 0), 0);
         console.log('  market 组送出的描述字符合计：' + sentChars);
         check('C10', '单组只回该组工具', one.length === TOOL_GROUPS.market.length, one.map(d => d.function.name).join(','));
-        // 旧版把 description 压成下划线替空格的名字，模型看不到参数语义→凭记忆猜代码（docs/debug.txt [030]）
+        // 旧版把 description 压成下划线替空格的名字，模型看不到参数语义→凭记忆猜代码（docs/archive/debug.txt [030]）
         check('C10', 'description 保留原文（不再是名字替换下划线）且不超长',
             one.every(d => d.function.description.length > 8 && !/^[a-z ]+$/.test(d.function.description) && d.function.description.length <= 321),
             one.map(d => d.function.name + ':' + d.function.description.length).join(' '));
@@ -850,8 +850,8 @@ await run('C10 工具表完整性：定义/分组/执行器三者对齐（0 次�
 
 // ---------------------------------------------------------------- 4.11 G 系列：反编造 guard 三态判定（`ai/core/ai_guard.js`，0 接口 0 网络）
 await run('G1 guard 判定：解释型放行 / 终局拒绝后编数字直接丢 / 无证据才纠正', async () => {
-    const { decideQuoteGuard, quoteFabricationSignal, isTerminalRefusal, correctionPromptText } = await import('../ai/core/ai_guard.js');
-    // 下面两段文案取自 docs/debug.txt 实际被拦截的回复（[042] 解释型 / 虚构的编造型）
+    const { decideQuoteGuard, quoteFabricationSignal, isTerminalRefusal, correctionPromptText } = await import('../../ai/core/ai_guard.js');
+    // 下面两段文案取自 docs/archive/debug.txt 实际被拦截的回复（[042] 解释型 / 虚构的编造型）
     const explain = '无法获取昂利康（300534）的 30 日日 K 数据。工具返回原因：保护免费渠道，仅支持查询近7日日K数据。'
         + '可选方案：1. 缩短到 7 天以内；2. 在 AI 设置启用 Agent 桥接；3. 改查实时行情（现价/涨跌幅）。';
     const fabricated = '昂利康近 30 个交易日走势如下：最新收盘价 34.16 元，跌 3.21%，成交量 1.2 万手，换手率 0.85%。';
@@ -877,12 +877,12 @@ await run('G1 guard 判定：解释型放行 / 终局拒绝后编数字直接丢
         !/请立即调用/.test(correctionPromptText()) && /照原样转述该原因/.test(correctionPromptText()) && /出现过的股票代码/.test(correctionPromptText()));
     check('G1', '强制纠正正文强调「行情输出必须先成功调用工具取数」', /必须以本轮成功取数的工具调用为前提/.test(correctionPromptText()));
 });
-// 修复回归（2026-09-16，docs/risk/guard-历史证据维度误判导致幻觉漏拦截.md）：
+// 修复回归（2026-09-16，docs/incidents/2026-09-16-guard-历史证据维度误判导致幻觉漏拦截.md）：
 // 证据按「数据维度」验证——上一轮 get_stock_quote 的实时报价不能充当 K 线分析的历史证据
 await run('G3 guard 证据维度：快照不能当 K 线证据；话题词判维度（0 次接口）', async () => {
     const {
         QUOTE_TOOLS, SNAPSHOT_QUOTE_TOOLS, KLINE_QUOTE_TOOLS, KLINE_TOPIC_RE, hasQuoteEvidence,
-    } = await import('../ai/core/ai_guard.js');
+    } = await import('../../ai/core/ai_guard.js');
     check('G3', '工具三层集合关系正确',
         SNAPSHOT_QUOTE_TOOLS.has('get_stock_quote') && SNAPSHOT_QUOTE_TOOLS.has('get_portfolio_quotes')
         && KLINE_QUOTE_TOOLS.has('read_stock_kline') && KLINE_QUOTE_TOOLS.has('read_stocks_kline')
@@ -920,7 +920,7 @@ await run('G3 guard 证据维度：快照不能当 K 线证据；话题词判维
 // 入口门槛：没有任何行情上下文（话题非行情 + 本轮没碰行情工具）时 guard 不入场，
 // 避免读文件/复述用户数据被强制取数（debug.txt [052][056] 读 FACT.md 被纠正、[023] 复述卖出价被纠正）
 await run('G4 guard 入场门槛：无行情上下文直接放行；有行情上下文才判定（0 次接口）', async () => {
-    const { shouldJudgeQuote, recentUserTopic } = await import('../ai/core/ai_guard.js');
+    const { shouldJudgeQuote, recentUserTopic } = await import('../../ai/core/ai_guard.js');
     // 纯函数三输入语义
     check('G4', '身份上无行情上下文（话题非行情 + 无工具调用）→ 不入场',
         shouldJudgeQuote({ topicIsQuote: false, quoteCalled: false, quoteRefused: false }) === false);
@@ -966,7 +966,7 @@ await run('G4 guard 入场门槛：无行情上下文直接放行；有行情上
 
 // 端到端：拿真工具返回（桥接关闭、>7 天）跑一遍 guard 判定，复现 debug.txt 当时被误杀的那一轮
 await run('G2 debug.txt 场景回放：桥接关闭问 30 日 K → 解释型回复不再被丢弃（0 次外呼）', async () => {
-    const { decideQuoteGuard, isTerminalRefusal } = await import('../ai/core/ai_guard.js');
+    const { decideQuoteGuard, isTerminalRefusal } = await import('../../ai/core/ai_guard.js');
     await useWorkspace('g2', { config: [dailySource()] });
     dbHas({});
     state.bridgeEnabled = false;

@@ -1,4 +1,4 @@
-// mock-bridge.mjs —— 假 Agent 桥接（docs/verify-free-first.mjs 专用，不参与扩展打包）
+// mock-bridge.mjs —— 假 Agent 桥接（scripts/verify/verify-free-first.mjs 专用，不参与扩展打包）
 //
 // 为什么要它：K 线取数已改成「读工作目录 flit/config.json → 经 flit_bridge 只读查库」，
 //   真实链路依赖用户机器上的 docker + my-postgres，回归脚本不能拿用户库当测试床反复打，

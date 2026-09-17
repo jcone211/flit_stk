@@ -17,7 +17,7 @@ credentials.json
 .aws/
 .ssh/
 
-# 回归脚本临时工作目录（docs/verify-free-first.mjs 跑完会自删）
+# 回归脚本临时工作目录（scripts/verify/verify-free-first.mjs 跑完会自删）
 .verify-workspaces/
 .verify-empty-root/
 

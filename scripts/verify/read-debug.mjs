@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * docs/read-debug.mjs —— DEBUG 日志（docs/debug.txt）专用读取器
+ * scripts/verify/read-debug.mjs —— DEBUG 日志（docs/archive/debug.txt）专用读取器
  *
  * 为什么要有它：debug.txt 里经常混着超长的数据行（工具返回 result: {...} JSON、
  * 跨轮数据便签、AI 回复原文，实测最长 3719 字/行），直接整文件读会刷爆上下文。
@@ -11,18 +11,18 @@
  *   3) 支持只看统计 / 只看超长行 / 只看开头或结尾，按需控制输出量。
  *
  * 用法：
- *   node docs/read-debug.mjs                     读 docs/debug.txt（默认紧凑模式：事件级折叠压缩）
- *   node docs/read-debug.mjs --full              逐行完整版（只按行长截断，不折叠事件）
- *   node docs/read-debug.mjs --compact           强制紧凑模式（默认已开）
- *   node docs/read-debug.mjs <文件路径>           读指定文件
- *   node docs/read-debug.mjs --max 400           单行显示上限改为 400 字符（默认 600）
- *   node docs/read-debug.mjs --stats-only        只看统计摘要，不输出正文
- *   node docs/read-debug.mjs --long-only         只看超长行明细
- *   node docs/read-debug.mjs --no-prefix         正文不打印「行号·长度」前缀
- *   node docs/read-debug.mjs --limit 80          正文只看前 80 行（统计仍基于全文件）
- *   node docs/read-debug.mjs --tail 30           正文只看末尾 30 行
- *   node docs/read-debug.mjs --tail-ratio 0.3    超长行保留前 70% + 末尾 30%（默认 0.3）
- *   node docs/read-debug.mjs --help              帮助
+ *   node scripts/verify/read-debug.mjs                     读 docs/archive/debug.txt（默认紧凑模式：事件级折叠压缩）
+ *   node scripts/verify/read-debug.mjs --full              逐行完整版（只按行长截断，不折叠事件）
+ *   node scripts/verify/read-debug.mjs --compact           强制紧凑模式（默认已开）
+ *   node scripts/verify/read-debug.mjs <文件路径>           读指定文件
+ *   node scripts/verify/read-debug.mjs --max 400           单行显示上限改为 400 字符（默认 600）
+ *   node scripts/verify/read-debug.mjs --stats-only        只看统计摘要，不输出正文
+ *   node scripts/verify/read-debug.mjs --long-only         只看超长行明细
+ *   node scripts/verify/read-debug.mjs --no-prefix         正文不打印「行号·长度」前缀
+ *   node scripts/verify/read-debug.mjs --limit 80          正文只看前 80 行（统计仍基于全文件）
+ *   node scripts/verify/read-debug.mjs --tail 30           正文只看末尾 30 行
+ *   node scripts/verify/read-debug.mjs --tail-ratio 0.3    超长行保留前 70% + 末尾 30%（默认 0.3）
+ *   node scripts/verify/read-debug.mjs --help              帮助
  *
  * 紧凑模式压缩点：发起请求/模型响应折叠固定字段为一行；相同 result 引用省略；
  * 报错按块一行；跨轮账本/便签只留标题摘要；用户问题/AI 回复/工具调用 args 保留原文。
@@ -70,10 +70,10 @@ function parseArgs(argv) {
 }
 
 function helpText() {
-  return `docs/read-debug.mjs —— DEBUG 日志专用读取器
+  return `scripts/verify/read-debug.mjs —— DEBUG 日志专用读取器
 
 用法:
-  node docs/read-debug.mjs [<文件路径>] [选项]
+  node scripts/verify/read-debug.mjs [<文件路径>] [选项]
 
 选项:
   --max <n>          单行显示上限（默认 600 字符，超长即截断并注明原长）
@@ -87,7 +87,7 @@ function helpText() {
   --tail-ratio <r>   超长行保留头部比例倒推尾部（默认 0.3：前 70% + 末 30%）
   -h/--help          帮助
 
-默认文件: docs/debug.txt（相对当前目录；找不到时依次回退脚本上级目录）。
+默认文件: docs/archive/debug.txt（相对当前目录；找不到时依次回退脚本上级目录）。
 `;
 }
 
@@ -382,12 +382,12 @@ try { opt = parseArgs(process.argv.slice(2)); } catch (e) { console.error(e.mess
 if (opt.help) { console.log(helpText()); process.exit(0); }
 if (opt.max < 40) { console.error('--max 至少 40，避免截断后失去可读性'); process.exit(2); }
 
-// 定位文件：显式参数 > ./docs/debug.txt > 脚本同级 debug.txt > 脚本 ../docs/debug.txt
+// 定位文件：显式参数 > ./docs/archive/debug.txt > 脚本同级 debug.txt > 脚本 ../docs/archive/debug.txt
 const candidates = opt.file
   ? [path.resolve(process.cwd(), opt.file)]
-  : [path.resolve(process.cwd(), 'docs', 'debug.txt'),
+  : [path.resolve(process.cwd(), 'docs', 'archive', 'debug.txt'),
      path.resolve(__dirname, 'debug.txt'),
-     path.resolve(__dirname, '..', 'docs', 'debug.txt')];
+     path.resolve(__dirname, '..', 'docs', 'archive', 'debug.txt')];
 const file = candidates.find((c) => fs.existsSync(c)) ?? candidates[0];
 
 let loaded;

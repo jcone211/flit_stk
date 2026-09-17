@@ -1,8 +1,9 @@
+> **ARCHIVED**（2026-09-17 归档整理）：历史会话交接文档，只读。当前口径见根目录 `CLAUDE.md` / `API_CHANNELS.md`，索引见 `docs/README.md`；验证脚本现位于 `scripts/verify/`。
 # 代码与回归已完成：AI K 线取数改「本地数据库优先」（不再读 parquet）
 
 > 交接/状态文档，写给下一个会话。日期：2026-09-02（盘中开始，回归收尾约 14:50）。仓库：`D:/codes/ai/flit_stk`
-> 前一条任务线（免费优先 + 实时拼接）的收尾见 `docs/plan-免费优先取数链路.md`，其 P0 已完成。
-> **当前状态（2026-09-02 第二轮）：§4 的 P0-1（回归脚本改造）与 P0-2（文档收尾）已做完——`node docs/verify-free-first.mjs` 116 项断言 0 失败（含 `--bridge=real` 真库用例）。剩下的只有 P0-3（Chrome 人工验证，唯一不可省）与 P1/P2 优化项。**
+> 前一条任务线（免费优先 + 实时拼接）的收尾见 `plan-免费优先取数链路.md`，其 P0 已完成。
+> **当前状态（2026-09-02 第二轮）：§4 的 P0-1（回归脚本改造）与 P0-2（文档收尾）已做完——`node scripts/verify/verify-free-first.mjs` 116 项断言 0 失败（含 `--bridge=real` 真库用例）。剩下的只有 P0-3（Chrome 人工验证，唯一不可省）与 P1/P2 优化项。**
 > 桥接注意：`curl http://127.0.0.1:17321/health` 在本机因代理环境变量会误报 connection refused，用 `curl --noproxy '*'` 或 `node` 探活才准。
 
 ## 1. 需求与已确认口径（用户拍板，照此实现，不要再问）
@@ -44,8 +45,8 @@
 
 | 文件 | 内容 |
 | --- | --- |
-| **新增 `docs/mock-bridge.mjs`** | 假 Agent 桥接：`node:http` 临时端口，照抄 `flit_bridge/server.js` 的 `/v1/workspace/context`、`/v1/database/schema`、`/v1/database/query` 响应形状与**只读 SQL 闸门**；真解析扩展拼出的 SQL（表名 / `code IN` / `adjust` / `date >=` / `rn <=`），行值由 fixture 造。暴露 `total.{klineSql,nameSql,forbidden,looseSql,klineTables}` 累计计数供安全自证 |
-| `docs/verify-free-first.mjs` | 删 parquet 语境（`PARQUET_ROOT`/`maxYear`/空 qfq 目录/C6b 全下线），新增 **D1~D18**（假桥接库用例）+ **E1~E3**（`--bridge=real` 真库用例，桥接没起会显式 FAIL 一条 `E0` 而不是静默跳过）；新增按渠道计数 `fetch` 包层 `markNet/netDelta`；`--root` 改为「含 `flit/config.json` 的工作目录」；临时目录写 `REPO/.verify-workspaces/` 跑完删 |
+| **新增 `scripts/verify/mock-bridge.mjs`** | 假 Agent 桥接：`node:http` 临时端口，照抄 `flit_bridge/server.js` 的 `/v1/workspace/context`、`/v1/database/schema`、`/v1/database/query` 响应形状与**只读 SQL 闸门**；真解析扩展拼出的 SQL（表名 / `code IN` / `adjust` / `date >=` / `rn <=`），行值由 fixture 造。暴露 `total.{klineSql,nameSql,forbidden,looseSql,klineTables}` 累计计数供安全自证 |
+| `scripts/verify/verify-free-first.mjs` | 删 parquet 语境（`PARQUET_ROOT`/`maxYear`/空 qfq 目录/C6b 全下线），新增 **D1~D18**（假桥接库用例）+ **E1~E3**（`--bridge=real` 真库用例，桥接没起会显式 FAIL 一条 `E0` 而不是静默跳过）；新增按渠道计数 `fetch` 包层 `markNet/netDelta`；`--root` 改为「含 `flit/config.json` 的工作目录」；临时目录写 `REPO/.verify-workspaces/` 跑完删 |
 | `ai/core/ai_tools.js` | 顺带做掉 P1-4 / P1-5 与一条 ETF 细节：① `readDbConfigSources` 返回 config 原文稀疏指纹 `stamp`，`dbPlanCache` 的 key 变成「目录+源名+指纹」并加 16 条上限（`dbPlanSet`）——**改了表名不必重开 AI 窗口**；② 猜出来的表名标 `plan.tableGuessed`，`readKlineFromDb` 不再往上报 `table` → `数据表` 留空、只在 `本地库诊断` 里写「表名未经验证」；③ `数据表` 对 ETF 一律给「本库不含 ETF（走免费同花顺日线）」（单只与整批都算），不再摆股票表名 |
 | `API_CHANNELS.md` | §3.1 重写为「本地库不可用时的四种话术」；新增 §3.2「config → 桥接 → 表探测 → SQL 形状」（两段真实 SQL + 用户库实测事实）；备注补 `本地数据库` 计数键、「K 线不读 parquet / 不提私人同步脚本」「一条 SQL 取整批的实测耗时」；§4 自证字段补 `数据表`/`本地库诊断`/`取数诊断`，样例换成真库真桥接输出；§5 换成三组用例表。删掉 `sync_daily.py` / 年文件刷新那段说明（需求 6） |
 | `CLAUDE.md` | 开发方式里回归脚本一行更新；「取数渠道」bullet 改题「取数渠道与本地库优先口径」并补 config/桥接/探测/四话术/名称解析链；自证字段 bullet 补 `数据表`/`本地库诊断` |
@@ -67,8 +68,8 @@
 
 | 文件 | 内容 |
 | --- | --- |
-| **新增 `docs/mock-bridge.mjs`** | 假 Agent 桥接（`node:http`，临时端口）。照抄 `flit_bridge/server.js` 的三个响应形状与**只读 SQL 闸门**；真解析扩展拼出的 SQL（表名 / `code IN` / `adjust` / `date >=` / `rn <=`），行值由 fixture 造 → 「缺 3 根 / 缺 30 根 / config 空 / 无记忆 / 查表报错」全部可复现。累计计数 `total.{klineSql,nameSql,forbidden,looseSql,klineTables}` 不随 `resetCounts()` 清零，供安全自证用例用。`contextDatabase`（工作目录推断结果）只有在工作目录真的存在 `flit/memory.md`/`AGENTS.md`/`README.md` 时才给，避免把推断做成凭空捏造 |
-| `docs/verify-free-first.mjs` | 重写：删掉 `PARQUET_ROOT`/`maxYear`/空 qfq 目录那套；新增 **D1~D18**（假桥接库用例）与 **E1~E3**（`--bridge=real` 真库用例）；C5/C6/C6b/C7/C8 的口径迁入 D 系列（断言改为 `数据表`/`本地库诊断`/`source=db…`）。新增按渠道计数的 `fetch` 包层（`markNet/netDelta`）——错误分支不返 `接口调用` 字段时，仍能断言「没抽小石额度」。`--root` 语义改为「含 `flit/config.json` 的工作目录」（仅真库模式用）；临时工作目录写 `REPO/.verify-workspaces/`（已进 `.gitignore`），跑完删除 |
+| **新增 `scripts/verify/mock-bridge.mjs`** | 假 Agent 桥接（`node:http`，临时端口）。照抄 `flit_bridge/server.js` 的三个响应形状与**只读 SQL 闸门**；真解析扩展拼出的 SQL（表名 / `code IN` / `adjust` / `date >=` / `rn <=`），行值由 fixture 造 → 「缺 3 根 / 缺 30 根 / config 空 / 无记忆 / 查表报错」全部可复现。累计计数 `total.{klineSql,nameSql,forbidden,looseSql,klineTables}` 不随 `resetCounts()` 清零，供安全自证用例用。`contextDatabase`（工作目录推断结果）只有在工作目录真的存在 `flit/memory.md`/`AGENTS.md`/`README.md` 时才给，避免把推断做成凭空捏造 |
+| `scripts/verify/verify-free-first.mjs` | 重写：删掉 `PARQUET_ROOT`/`maxYear`/空 qfq 目录那套；新增 **D1~D18**（假桥接库用例）与 **E1~E3**（`--bridge=real` 真库用例）；C5/C6/C6b/C7/C8 的口径迁入 D 系列（断言改为 `数据表`/`本地库诊断`/`source=db…`）。新增按渠道计数的 `fetch` 包层（`markNet/netDelta`）——错误分支不返 `接口调用` 字段时，仍能断言「没抽小石额度」。`--root` 语义改为「含 `flit/config.json` 的工作目录」（仅真库模式用）；临时工作目录写 `REPO/.verify-workspaces/`（已进 `.gitignore`），跑完删除 |
 | `API_CHANNELS.md` | §3.1 重写为「本地库不可用时的四种话术」（表格 + 软规则）；新增 §3.2「`flit/config.json` → 桥接 → 表探测 → SQL 形状」（含两段真实 SQL 与用户库实测事实）；备注补 `本地数据库` 计数键与「K 线不读 parquet / 不提私人同步脚本」；§4 自证字段表补 `数据表`/`本地库诊断`/`取数诊断`，样例换成 09-02 14:42 真库真桥接输出；§5 换成三组用例表 + 新参数。`sync_daily.py` / 年文件刷新那段说明已删 |
 | `CLAUDE.md` | 「取数渠道」bullet 改题为「取数渠道与本地库优先口径」，补 config/桥接/探测/四话术/名称解析链；自证字段 bullet 补 `数据表`/`本地库诊断`；开发方式里回归脚本一行更新（116 项、假桥接、`--bridge=real`） |
 | `.gitignore` | 忽略 `.verify-workspaces/`、`.verify-empty-root/` |
@@ -97,8 +98,8 @@
 
 ### P0 —— 只剩 1 项（1、2 已完成，留着当变更说明）
 
-1. ~~**改造 `docs/verify-free-first.mjs`**~~ ✅ **已完成**（2026-09-02 第二轮）。做法比原计划多做了一步：把假桥接抽成 `docs/mock-bridge.mjs`（真解析 SQL、行值由 fixture 造、照抄只读闸门），用例分成 C（真网络实时）/ D（假库，可复现）/ E（真库，`--bridge=real`）三组。原计划的六条要求逐条落地：错误分支不假设 `rows`、断言改成 `数据表`/`本地库诊断`/`source=db`、默认走 mock 而真桥接要显式 `--bridge=real`、`--root` 改成工作目录语义、C6b 换成 D4（库缺 3 根）、顶部注释与统计同步更新。**旧脚本的 `:356` TypeError 已不存在**。
-2. ~~**文档收尾**~~ ✅ **已完成**：`API_CHANNELS.md` §3.1 重写为四种话术、新增 §3.2（config → 桥接 → 表探测 → SQL 形状，含两段真实 SQL 与环境事实）、§4 自证字段补 `数据表`/`本地库诊断`/`取数诊断` 并换成真库实测样例、§5 换成三组用例表；`CLAUDE.md` 的开发方式一行 + 取数渠道 bullet + 自证字段 bullet 已改（T1 bullet 上一轮已改）；`docs/plan-免费优先取数链路.md` 顶部已指向本文件。`sync_daily.py` 与年文件刷新那段说辞已从 `API_CHANNELS.md` 删除。
+1. ~~**改造 `scripts/verify/verify-free-first.mjs`**~~ ✅ **已完成**（2026-09-02 第二轮）。做法比原计划多做了一步：把假桥接抽成 `scripts/verify/mock-bridge.mjs`（真解析 SQL、行值由 fixture 造、照抄只读闸门），用例分成 C（真网络实时）/ D（假库，可复现）/ E（真库，`--bridge=real`）三组。原计划的六条要求逐条落地：错误分支不假设 `rows`、断言改成 `数据表`/`本地库诊断`/`source=db`、默认走 mock 而真桥接要显式 `--bridge=real`、`--root` 改成工作目录语义、C6b 换成 D4（库缺 3 根）、顶部注释与统计同步更新。**旧脚本的 `:356` TypeError 已不存在**。
+2. ~~**文档收尾**~~ ✅ **已完成**：`API_CHANNELS.md` §3.1 重写为四种话术、新增 §3.2（config → 桥接 → 表探测 → SQL 形状，含两段真实 SQL 与环境事实）、§4 自证字段补 `数据表`/`本地库诊断`/`取数诊断` 并换成真库实测样例、§5 换成三组用例表；`CLAUDE.md` 的开发方式一行 + 取数渠道 bullet + 自证字段 bullet 已改（T1 bullet 上一轮已改）；`plan-免费优先取数链路.md` 顶部已指向本文件。`sync_daily.py` 与年文件刷新那段说辞已从 `API_CHANNELS.md` 删除。
 3. **Chrome 内人工验证**（唯一未做、也不可省的一项）：
 
    前提：`node flit_bridge/server.js` 在跑（**本轮会话已替用户在后台起了一个，127.0.0.1:17321，只读服务；不需要就关掉那个终端/window**），docker 的 `my-postgres` 已在跑，AI 设置里「Agent 桥接」已勾选。然后 `chrome://extensions` 重载扩展 → 关窗重开 AI 助手：
@@ -128,12 +129,12 @@
 
 ```bash
 cd D:/codes/ai/flit_stk
-node --check ai/core/ai_tools.js && node --check docs/mock-bridge.mjs && node --check docs/verify-free-first.mjs   # 当前均通过
-node docs/verify-free-first.mjs --offline-cases   # 时段/缺口口径 12 项，0 次接口 → 全通过
-node docs/verify-free-first.mjs                   # 全量 116 项（约 25s）→ 0 失败
-node docs/verify-free-first.mjs --only=D6         # 单跑一条（D* 靠假桥接，不打用户库）
+node --check ai/core/ai_tools.js && node --check scripts/verify/mock-bridge.mjs && node --check scripts/verify/verify-free-first.mjs   # 当前均通过
+node scripts/verify/verify-free-first.mjs --offline-cases   # 时段/缺口口径 12 项，0 次接口 → 全通过
+node scripts/verify/verify-free-first.mjs                   # 全量 116 项（约 25s）→ 0 失败
+node scripts/verify/verify-free-first.mjs --only=D6         # 单跑一条（D* 靠假桥接，不打用户库）
 node flit_bridge/server.js                        # 真桥接（默认 127.0.0.1:17321），只读查询
-node docs/verify-free-first.mjs --bridge=real     # 追加 E1~E3 真库用例（需上一步在跑）
+node scripts/verify/verify-free-first.mjs --bridge=real     # 追加 E1~E3 真库用例（需上一步在跑）
 ```
 
 已知环境坑：本机 bash 里 `curl http://127.0.0.1:17321/health` 会因代理环境变量报 connection refused（`--noproxy '*'` 也拒），要确认桥接在不在，用 `netstat -ano | grep 17321` 或直接跑 `--bridge=real` 看 E0。
@@ -142,4 +143,4 @@ node docs/verify-free-first.mjs --bridge=real     # 追加 E1~E3 真库用例（
 
 ## 6. 工作树提交范围提醒
 
-工作树同时含用户自己的在途改动：`ai/ai.html`、`ai/core/ai_state.js`、`docs/debug.txt`、`js/adata_realtime_quote.js`，以及未跟踪的 `plugins/`。本任务真正碰过的文件是：`ai/core/ai_tools.js`、`ai/stock/xiaoshi_stock_kline.js`、`API_CHANNELS.md`、`README.md`、`CLAUDE.md`、`.gitignore`、`docs/mock-bridge.mjs`（新增）、`docs/verify-free-first.mjs`、`docs/plan-*.md`。**提交前 `git diff --stat` 与用户确认，勿 `git add -A`。**
+工作树同时含用户自己的在途改动：`ai/ai.html`、`ai/core/ai_state.js`、`docs/archive/debug.txt`、`js/adata_realtime_quote.js`，以及未跟踪的 `plugins/`。本任务真正碰过的文件是：`ai/core/ai_tools.js`、`ai/stock/xiaoshi_stock_kline.js`、`API_CHANNELS.md`、`README.md`、`CLAUDE.md`、`.gitignore`、`scripts/verify/mock-bridge.mjs`（新增）、`scripts/verify/verify-free-first.mjs`、`plan-*.md`。**提交前 `git diff --stat` 与用户确认，勿 `git add -A`。**

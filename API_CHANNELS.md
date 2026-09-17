@@ -105,7 +105,7 @@
 1. 四条话术都带 `hint`——**实时行情（现价 / 涨跌幅）与 ≤7 个交易日的日 K 都不需要数据库**，所以「没库」不等于「什么都答不了」。
 2. **不抽额度的口径按跨度分档**：`days > 7` 且库不可用 → `fillKlineFromApi` 根本不会被调用，回归用例直接数 HTTP 外呼断言「小石 0 次、免费 0 次」（假桥接模式下连一条 SQL 都不发）；`days ≤ 7` 且库不可用 → 只打免费日线，仍旧断言 **小石 0 次**（D1 / D2 / D9 / D14 / D19）。
 3. 系统提示已要求模型「照原样转述不可用结论，不要重试或换工具硬凑 K 线」。
-4. **股票与 ETF 混批时不互相牵连**：`read_stocks_kline` 只在「整批都是股票且 >7 天」时才顶层报错，混了 ETF 就逐项给 error——ETF 本来就不在库里，走免费 ETF 日线照取（用例 D14）。已知旧缺口：**>7 天的 ETF 目前必定取不到**（空缓存必命中 7 天闸门），只在 D14 里用断言钉住现状，口径见 `docs/plan-桥接关闭时对话体验.md` §5 Q4。
+4. **股票与 ETF 混批时不互相牵连**：`read_stocks_kline` 只在「整批都是股票且 >7 天」时才顶层报错，混了 ETF 就逐项给 error——ETF 本来就不在库里，走免费 ETF 日线照取（用例 D14）。已知旧缺口：**>7 天的 ETF 目前必定取不到**（空缓存必命中 7 天闸门），只在 D14 里用断言钉住现状，口径见 `docs/archive/2026-09-plans/plan-桥接关闭时对话体验.md` §5 Q4。
 5. 库里**没有数据**（查询成功但 0 行）不算「库不可用」：走 §1 的补齐链，`source` 变成 `adata` / `xiaoshi`，`本地库诊断` 会写「命中 0/N 只」。
 6. **已知口径（容易踩）**：日线 SQL 带 `date >= 今天-(days*2+5) 自然日`，所以「库里有数据但末行比这个窗口还老」会被滤成 0 行 → 按「库里没有这只股票」处理：`cacheLast` 为空 → `gapDays=0` → **免费拿不到时是允许升级到小石的**（一次 `limit=days` 的整窗请求，不是逐日循环）。要测「缺口过大不抽额度」，`days` 必须大到窗口能盖住库内末行（回归用例 D6 用 `days=60`，注释里写了原因）。
 
@@ -184,12 +184,12 @@ SELECT ts_code, name FROM stock_basic_cache
 ## 5. 改取数链路后怎么验证（一次跑完，别反复打接口）
 
 ```bash
-node docs/verify-free-first.mjs                       # 全量（116 项断言，约 25s）
-node docs/verify-free-first.mjs --offline-cases       # 只跑不打网络、不起桥接的时段/缺口口径（12 项）
-node docs/verify-free-first.mjs --only=D6             # 只跑某条（C*/D*/E* 前缀均可）
-node docs/verify-free-first.mjs --bridge=real         # 追加真库用例 E1~E3（先 node flit_bridge/server.js）
-node docs/verify-free-first.mjs --bridge=real --root "D:/path/to/workspace"   # 真库模式的工作目录（含 flit/config.json）
-node docs/verify-free-first.mjs --bridge=real --bridge-url http://127.0.0.1:17321
+node scripts/verify/verify-free-first.mjs                       # 全量（116 项断言，约 25s）
+node scripts/verify/verify-free-first.mjs --offline-cases       # 只跑不打网络、不起桥接的时段/缺口口径（12 项）
+node scripts/verify/verify-free-first.mjs --only=D6             # 只跑某条（C*/D*/E* 前缀均可）
+node scripts/verify/verify-free-first.mjs --bridge=real         # 追加真库用例 E1~E3（先 node flit_bridge/server.js）
+node scripts/verify/verify-free-first.mjs --bridge=real --root "D:/path/to/workspace"   # 真库模式的工作目录（含 flit/config.json）
+node scripts/verify/verify-free-first.mjs --bridge=real --bridge-url http://127.0.0.1:17321
 ```
 
 五组用例，**库的部分全在假桥接里跑**，不拿用户真库当测试床（合计 163 项）：
@@ -197,7 +197,7 @@ node docs/verify-free-first.mjs --bridge=real --bridge-url http://127.0.0.1:1732
 | 组 | 依赖 | 覆盖 |
 | --- | --- | --- |
 | C1（12 项） | 无（假时钟） | 时段/缺口计数口径：盘前/开盘瞬间/盘中/午休/尾盘/15:00 边界/15:01/周末、`weekdaysBetween` 不含两端 |
-| D1~D19（102 项） | `docs/mock-bridge.mjs` 假桥接，不打外部接口（除标注的补齐用例） | 四种不可用话术各自命中（均为 `days=30`）与≤ 7 天降级免费（`days=7` 拿到真行、source=adata、小石 0 次）、库最新时 0 外呼、缺 3 根走免费、缺 2 根才升级小石、缺 30 根不抽额度、config 空走工作目录搜索、表名未登记按列签名探测（排除 `*_today` 干扰表）、名称→代码走库不抽小石搜索、批量一次 SQL、股票+ETF 混批不牵连（含 >7 天 ETF 取不到的现状钉住）、只读闸门 0 拒绝、改 config 表名不必重开窗口、未验证的表名不冒充「数据表」 |
+| D1~D19（102 项） | `scripts/verify/mock-bridge.mjs` 假桥接，不打外部接口（除标注的补齐用例） | 四种不可用话术各自命中（均为 `days=30`）与≤ 7 天降级免费（`days=7` 拿到真行、source=adata、小石 0 次）、库最新时 0 外呼、缺 3 根走免费、缺 2 根才升级小石、缺 30 根不抽额度、config 空走工作目录搜索、表名未登记按列签名探测（排除 `*_today` 干扰表）、名称→代码走库不抽小石搜索、批量一次 SQL、股票+ETF 混批不牵连（含 >7 天 ETF 取不到的现状钉住）、只读闸门 0 拒绝、改 config 表名不必重开窗口、未验证的表名不冒充「数据表」 |
 | C2~C9（21 项） | 真实网络（新浪/腾讯/东财/小石） | 实时三级链（批量按标的隔离：脏代码只进 `errors[]`，另留单只兜底）、提示词注入与库口径 |
 | C10（6 项） | 无 | 工具表完整性：真跑 `getLoadedToolDefs()`、TOOL_DEFS/TOOL_GROUPS/toolExecutors 三者对齐、**description 与参数描述真的送给了模型**（旧版压成名字导致模型猜代码） |
 | R1（8 项） | 无 | 跳轮上下文：`retain_tool_data` 登记/拒收/上限口径 |

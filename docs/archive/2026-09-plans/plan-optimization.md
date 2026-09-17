@@ -1,6 +1,7 @@
+> **ARCHIVED**（2026-09-17 归档整理）：历史会话交接文档，只读。当前口径见根目录 `CLAUDE.md` / `API_CHANNELS.md`，索引见 `docs/README.md`；验证脚本现位于 `scripts/verify/`。
 # flit_stk AI 对话优化方案
 
-> 基于 `docs/debug.txt`（2026-09-01 对话中断事故）的系统性优化计划。
+> 基于 `docs/archive/debug.txt`（2026-09-01 对话中断事故）的系统性优化计划。
 > 完成状态标记：✅ 已实现 | 🔲 待实现 | ⏳ 实现中
 >
 > 进度（2026-09-02）：第一优先级 T0（T0-1~T0-4）与第二优先级 T1（T1-1~T1-4、T1-6）已全部交付；
@@ -8,7 +9,7 @@
 
 ---
 
-## 一、事故诊断（`docs/debug.txt` 复盘）
+## 一、事故诊断（`docs/archive/debug.txt` 复盘）
 
 10 轮 `read_stock_kline`（29k 字符）→ 第 6 轮模型要写长结论 → 思考型模型(`qwen3.8-flash`) 的
 `reasoning_content` 未被解析 → **120s 内页面上收不到任何 `content` delta** →

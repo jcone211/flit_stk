@@ -52,7 +52,7 @@ export function contextBudgetChars(provider) {
     return Math.round(maxContextTokens(provider) * 3);
 }
 // 跨轮「工具调用记录」：tool 的原始返回只在当轮 function-calling 循环内有效，用户发下一条消息时
-// 会被 chatMessages 的 {role,content} 重建抹掉（docs/debug.txt 里模型就是靠这个空档凭空补了 7 根 K 线）。
+// 会被 chatMessages 的 {role,content} 重建抹掉（docs/archive/debug.txt 里模型就是靠这个空档凭空补了 7 根 K 线）。
 // 每轮结束只留一行账本（调了哪些工具、成功还是失败、失败原因）；原始数据想跨轮存活只能靠 retain_tool_data 登记便签。
 export const TRACE_MESSAGE_ROLE = 'user';    // 隐藏上下文回灌时用的 role：统一用 user（会话中途的 system 个别供应商不接受）
 export const MAX_TRACE_CHARS = 900;           // 单轮账本字符上限

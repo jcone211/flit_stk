@@ -1,3 +1,4 @@
+> **ARCHIVED**（2026-09-17 归档整理）：历史会话交接文档，只读。当前口径见根目录 `CLAUDE.md` / `API_CHANNELS.md`，索引见 `docs/README.md`；验证脚本现位于 `scripts/verify/`。
 # plan —— 模型上下文容量标识 / token 环形指示器 / 动态上下文预算
 
 ## 目标
@@ -40,13 +41,13 @@
 - `ai/ai.js`：`updateContextMeter`（每轮构建 requestMessages 后刷新）；`evictToolResults(apiMessages, provider)` 改 token 口径动态预算并置 `state.contextEvicted`；init/供应商切换/切换会话/清空会话时刷新指示器并重置压缩标记。
 - `demo/lib/seed.mjs`：提供 `context1M` 默认值（demo 目录未入库，本地一致性）。
 - `CLAUDE.md`：行 41 上下文预算口径描述与实现同步。
-- `docs/plan-optimization.md` 保留历史 T1-2 记录（24k 字符时代），未改动。
+- `plan-optimization.md` 保留历史 T1-2 记录（24k 字符时代），未改动。
 
 ## 验证
 
 - `node --experimental-vm-modules` SourceTextModule 解析 `ai.js` / `ai_state.js` / `ai_settings.js` 全部通过。
 - `estimateTokens` 单测：纯中文 1000 字→700、ASCII 2000 字→500、混合→950；千分位与「used / limit (pct%) model [压缩]」格式与需求示例一致。
-- 全局 `MAX_CONTEXT_CHARS` 仅剩历史文档 `docs/plan-optimization.md:143` 引用（不加区分上下文预算符号）。
+- 全局 `MAX_CONTEXT_CHARS` 仅剩历史文档 `plan-optimization.md:143` 引用（不加区分上下文预算符号）。
 - T6 后：4 个文件语法全过；`1-50` / `max="50"` / `n > 50` / `Math.min(50,…)` 等旧上限已全部清除（仅剩新文案文字）。
 - T7 后：`.ctx-meter::after` 右对齐圆环右缘 + `max-width:260px` + 自动换行，长模型名不再向窗口右侧溢出。
 - T8 后：3 个文件 syntax 全过；`compact` 相关引用完整闭环：HTML 按钮 → `ai_state` DOM/常量 → `ai.js` import → `sendRound(suppressRender)` → `handleCompact/applyCompact/buildCompactSource` → `renderHistory` 摘要行 → `quoteTopicNearby` 跳过 → `bindEvents` 绑定 → CLAUDE.md 备注。

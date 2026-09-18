@@ -964,6 +964,88 @@ await run('G4 guard 入场门槛：无行情上下文直接放行；有行情上
 
 
 
+// ---------------------------------------------------------------- H 系列：组合工具回归（内存存储，0 次外呼）
+// 对应 debug.txt 会话 chat_mu6mk1zzygx「5.7买入合百集团、6.67买入海峡股份」暴露的问题：
+//   1) 批量 add 只能共用一个 import_price；2) 新增股票 name 落库为空显示「待抓取」；
+//   3) 没有删除/垃圾池工具 → 模型只能「移出→重加」修价格、观察留下残留。
+const savedPortfolios = store.local.portfolios;
+const savedStockList = store.local.stockList;
+
+await run('H1 批量添加逐股初始价：import_price 数组一一对应，名称立即落库', async () => {
+    store.local.portfolios = {
+        持仓: { selectorName: 'wc1', stockList: [] },
+    };
+    if (store.local.activePortfolio) delete store.local.activePortfolio;
+    const r = await toolExecutors.add_stock_to_portfolio({ names: ['合百集团', '海峡股份'], portfolio: '持仓', import_price: [5.7, 6.67] });
+    check('H1', '返回 ok 且 names 内不含 ETF 剔除', r.ok === true, brief(r));
+    const list = store.local.portfolios.持仓.stockList;
+    const hebai = list.find(s => s.name === '合百集团');
+    const haixi = list.find(s => s.name === '海峡股份');
+    check('H1', '合百集团 name 立即落库为「合百集团」（不再留空显示待抓取）', hebai && hebai.name === '合百集团', hebai && hebai.name);
+    check('H1', '海峡股份 name 立即落库为「海峡股份」', haixi && haixi.name === '海峡股份', haixi && haixi.name);
+    check('H1', '合百集团 importPrice=5.7（不再被共享成 6.67）', hebai && hebai.importPrice === 5.7, hebai && hebai.importPrice);
+    check('H1', '海峡股份 importPrice=6.67', haixi && haixi.importPrice === 6.67, haixi && haixi.importPrice);
+    check('H1', 'rejected 为空', Array.isArray(r.rejected) && r.rejected.length === 0, brief(r.rejected));
+});
+
+await run('H2 单值 import_price 仍兼容（全部同价）', async () => {
+    store.local.portfolios = { 持仓: { selectorName: 'wc1', stockList: [] } };
+    if (store.local.activePortfolio) delete store.local.activePortfolio;
+    const r = await toolExecutors.add_stock_to_portfolio({ names: ['甲股'], portfolio: '持仓', import_price: 3.5 });
+    check('H2', '导入成功', r.ok === true, brief(r));
+    const s = store.local.portfolios.持仓.stockList[0];
+    check('H2', '甲股 importPrice=3.5', s && s.importPrice === 3.5, s && s.importPrice);
+    check('H2', '甲股 name=甲股', s && s.name === '甲股', s && s.name);
+});
+
+await run('H3 混合 ETF 名称：只剔除含 ETF 的项，其余正常导入（不再整批失败）', async () => {
+    store.local.portfolios = { 持仓: { selectorName: 'wc1', stockList: [] } };
+    if (store.local.activePortfolio) delete store.local.activePortfolio;
+    const r = await toolExecutors.add_stock_to_portfolio({ names: ['好股', '证券ETF'], portfolio: '持仓', import_price: [2.1] });
+    check('H3', 'ok 仍为 true（好股导入成功）', r.ok === true, brief(r));
+    check('H3', 'excluded 含「证券ETF」', Array.isArray(r.excluded) && r.excluded.includes('证券ETF'), brief(r.excluded));
+    const list = store.local.portfolios.持仓.stockList;
+    check('H3', '证券ETF 没有被按名称导入', list.every(s => s.name !== '证券ETF'), list.map(s => s.name).join('、'));
+    check('H3', '好股已导入且 importPrice=2.1', list.some(s => s.name === '好股' && s.importPrice === 2.1), brief(list));
+});
+
+await run('H4 已在组合但初始价为空：按传入价补齐（backfill）', async () => {
+    store.local.portfolios = { 持仓: { selectorName: 'wc1', stockList: [] } };
+    if (store.local.activePortfolio) delete store.local.activePortfolio;
+    await toolExecutors.add_stock_to_portfolio({ names: ['老股'], portfolio: '持仓' }); // name 无价导入
+    const s0 = store.local.portfolios.持仓.stockList[0];
+    check('H4', '预置：老股 importPrice 为空', s0 && s0.importPrice == null, s0 && s0.importPrice);
+    const r = await toolExecutors.add_stock_to_portfolio({ names: ['老股'], portfolio: '持仓', import_price: [9.9] });
+    const s = store.local.portfolios.持仓.stockList[0];
+    check('H4', '老股 importPrice 补齐为 9.9', s && s.importPrice === 9.9, s && s.importPrice);
+    check('H4', '返回 backfilled 含老股', Array.isArray(r.backfilled) && r.backfilled.length === 1 && r.backfilled[0].name === '老股', brief(r.backfilled));
+});
+
+await run('H5 remove_stock：真删除股票', async () => {
+    store.local.portfolios = { 持仓: { selectorName: 'wc1', stockList: [{ name: '舒华体育', code: '605299', prefix: 'SH', url: 'https://example.invalid/605299', importPrice: 12.18 }] } };
+    if (store.local.activePortfolio) delete store.local.activePortfolio;
+    const r = await toolExecutors.remove_stock({ name: '舒华体育', portfolio: '持仓' });
+    check('H5', '删除成功', r.ok === true && r.removed === true, brief(r));
+    check('H5', '列表中已无舒华体育', store.local.portfolios.持仓.stockList.length === 0, brief(store.local.portfolios.持仓.stockList));
+    // 找不到的负例
+    const r2 = await toolExecutors.remove_stock({ name: '不存在的股票', portfolio: '持仓' });
+    check('H5', '删除不存在的股票返回可解释错误', !!r2.error, brief(r2));
+});
+
+await run('H6 move_stock_to_trash：移入垃圾池', async () => {
+    store.local.portfolios = { 持仓: { selectorName: 'wc1', stockList: [{ name: '海峡股份', code: '002320', prefix: 'SZ', url: 'https://example.invalid/002320', importPrice: 6.67 }] } };
+    if (store.local.activePortfolio) delete store.local.activePortfolio;
+    const r = await toolExecutors.move_stock_to_trash({ name: '海峡股份', portfolio: '持仓' });
+    check('H6', '移入垃圾池成功', r.ok === true && r.in_trash === true, brief(r));
+    const s = store.local.portfolios.持仓.stockList[0];
+    check('H6', 'inTrash 置 true', s && s.inTrash === true, s && s.inTrash);
+});
+
+// 恢复 store（不影响后续用例）
+store.local.portfolios = savedPortfolios;
+store.local.stockList = savedStockList;
+
+
 // 端到端：拿真工具返回（桥接关闭、>7 天）跑一遍 guard 判定，复现 debug.txt 当时被误杀的那一轮
 await run('G2 debug.txt 场景回放：桥接关闭问 30 日 K → 解释型回复不再被丢弃（0 次外呼）', async () => {
     const { decideQuoteGuard, isTerminalRefusal } = await import('../../ai/core/ai_guard.js');

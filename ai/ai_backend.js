@@ -55,10 +55,19 @@ export async function streamAiChat(opts, emit) {
         body.tool_choice = 'auto';
     }
     // 关闭思考：用户显式勾选后才注入（未知字段严格校验的端点不会因此受影响）。
-    // 兼容两种写法：DashScope/火山类看 enable_thinking，vLLM/SGLang 类看 chat_template_kwargs。
+    // 兼容写法：
+    //   DashScope/火山类（Qwen 系）→ enable_thinking:false
+    //   vLLM/SGLang 类              → chat_template_kwargs:{ enable_thinking:false }
+    //   DeepSeek 官方（OpenAI 格式）→ thinking:{ type:'disabled' }；
+    //     官方不识别 enable_thinking / chat_template_kwargs（静默忽略），
+    //     不额外注入 thinking 的话「关闭思考」勾选了也还是照常思考。
     if (disableThinking) {
         body.enable_thinking = false;
         body.chat_template_kwargs = { enable_thinking: false };
+        // 按主机/模型名识别 DeepSeek 端点，注入其官方「关闭思考」字段
+        if (/(^|\.)deepseek\./i.test(url.hostname) || /^deepseek[:/-]/i.test(model)) {
+            body.thinking = { type: 'disabled' };
+        }
     }
 
     let resp;

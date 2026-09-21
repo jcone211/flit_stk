@@ -3,6 +3,10 @@ import { calcImportPercent, numOrNull, etfPrefixForCode } from '../shared/utils.
 // 默认组合（不可删除、不可重命名）
 const DEFAULT_PORTFOLIOS = ['默认', '持仓', '观察'];
 
+// 虚拟自动组合「动态仓」：不存入 portfolios，恒显示、不可删除、不参与组合切换，
+// 展示内容为其他全部组合股票的源引用，对其操作直接作用于源股票
+const DYNAMIC_PORTFOLIO = '动态仓';
+
 // 名称链接跳转：与刷新目标一致——
 // ETF（159/51/58）不论选择器恒跳雪球个股页（问财不支持 ETF）；
 // 其余跟随当前选择器：xq1 优先 prefix+code 拼个股页，无代码回退雪球搜索；wc1 用问财名称搜索
@@ -45,8 +49,9 @@ export async function copyText(text, imgEl) {
     }
 }
 
-// 渲染单行：handlers = { onEdit, onStop, onTogglePin }（无状态，行为由调用方注入）
-export function renderStock(stock, selectorName, handlers) {
+// 渲染单行：handlers = { onEdit, onStop, onTogglePin }（无状态，行为由调用方注入）；
+// opts.sourceCombo 存在时（动态仓视图）在名称旁追加源组合角标
+export function renderStock(stock, selectorName, handlers, opts = {}) {
     const tr = document.createElement('tr');
 
     // 名称（可点击跳转）+ 复制图标
@@ -71,6 +76,14 @@ export function renderStock(stock, selectorName, handlers) {
             copyText(stock.name, copyImg);
         });
         nameTd.appendChild(copyImg);
+        // 动态仓视图：标注源组合（操作将作用于源股票）
+        if (opts.sourceCombo) {
+            const tag = document.createElement('span');
+            tag.className = 'stock-source-tag';
+            tag.textContent = '源:' + opts.sourceCombo;
+            tag.title = `该股票来自「${opts.sourceCombo}」组合，编辑/删除等操作将直接作用于源股票`;
+            nameTd.appendChild(tag);
+        }
     } else {
         nameTd.textContent = '-';
     }
@@ -139,13 +152,17 @@ export function renderStock(stock, selectorName, handlers) {
     stopImg.style.marginLeft = '5px';
     stopImg.title = stock.stopRunning ? '已停止，点击恢复' : '运行中，点击停止';
     stopImg.addEventListener('click', () => handlers.onStop(stock));
-    const pinImg = document.createElement('img');
-    pinImg.className = 'edit';
-    pinImg.style.marginLeft = '5px';
-    pinImg.src = stock.pinned ? chrome.runtime.getURL('icons/pin.svg') : chrome.runtime.getURL('icons/to-top.svg');
-    pinImg.title = stock.pinned ? '取消置顶' : '置顶到最前';
-    pinImg.addEventListener('click', () => handlers.onTogglePin(stock));
-    div.append(editImg, stopImg, pinImg);
+    div.append(editImg, stopImg);
+    // 置顶按钮：仅当调用方提供 onTogglePin（动态仓行无置顶功能）
+    if (handlers.onTogglePin) {
+        const pinImg = document.createElement('img');
+        pinImg.className = 'edit';
+        pinImg.style.marginLeft = '5px';
+        pinImg.src = stock.pinned ? chrome.runtime.getURL('icons/pin.svg') : chrome.runtime.getURL('icons/to-top.svg');
+        pinImg.title = stock.pinned ? '取消置顶' : '置顶到最前';
+        pinImg.addEventListener('click', () => handlers.onTogglePin(stock));
+        div.appendChild(pinImg);
+    }
     // 切换组合按钮（仅当传入 onMoveToCombo 时渲染）
     if (handlers.onMoveToCombo) {
         const moveBtn = document.createElement('span');
@@ -208,9 +225,10 @@ export function renderSortToggles(currentSort, els) {
 }
 
 // 渲染组合切换 chip（单选语义：checkbox 外观，仅一个活动）；
-// handlers = { onSwitch, onDelete, onAdd }，删除钮为 chip 内独立 ×（默认组合不渲染）；
-// 末尾追加 + 新建按钮
-export function renderComboSwitches(portfolios, active, container, { onSwitch, onDelete, onAdd }) {
+// handlers = { onSwitch, onDelete, onAdd, onSwitchDynamic }，删除钮为 chip 内独立 ×（默认组合不渲染）；
+// dynamicActive = 当前是否处于虚拟组合「动态仓」视图；
+// 常规组合之后追加【动态仓】chip，末尾追加 + 新建按钮
+export function renderComboSwitches(portfolios, active, container, { onSwitch, onDelete, onAdd, onSwitchDynamic, dynamicActive }) {
     container.innerHTML = '';
     const names = Object.keys(portfolios);
     // 排序：默认组合按 DEFAULT_PORTFOLIOS 顺序在前，其余保持登记顺序
@@ -254,6 +272,31 @@ export function renderComboSwitches(portfolios, active, container, { onSwitch, o
         }
         container.appendChild(label);
     });
+    // 虚拟自动组合「动态仓」：恒显示在默认组合「持仓」后一位、不参与切换/新增删除，
+    // 不可删除；持仓组合不存在时兜底追加到末位
+    if (onSwitchDynamic) {
+        const label = document.createElement('label');
+        label.className = 'combo-chip combo-chip-dynamic' + (dynamicActive ? ' active' : '');
+        label.title = '自动组合：展示其他全部组合的股票，编辑/删除等操作直接作用于源股票';
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.checked = !!dynamicActive;
+        cb.addEventListener('change', () => {
+            if (cb.checked) onSwitchDynamic();
+            else cb.checked = true; // 不允许取消当前活动组合
+        });
+        const txt = document.createElement('span');
+        txt.textContent = DYNAMIC_PORTFOLIO;
+        label.append(cb, txt);
+        // 定位到名称为「持仓」的 chip 之后（textContent 即该 chip 的文本）
+        const anchor = Array.from(container.children).find(child =>
+            child.classList.contains('combo-chip') && child.textContent.trim() === '持仓');
+        if (anchor && anchor.nextSibling) {
+            container.insertBefore(label, anchor.nextSibling);
+        } else {
+            container.appendChild(label);
+        }
+    }
     // 末尾追加 + 新建按钮
     if (onAdd) {
         const addBtn = document.createElement('span');

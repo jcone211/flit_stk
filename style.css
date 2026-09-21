@@ -771,6 +771,35 @@ button:disabled {
   color: #2e7d32;
 }
 
+/* 虚拟自动组合「动态仓」：虚线弱化，激活时紫系高亮 */
+.combo-chip-dynamic {
+  border-style: dashed;
+  border-color: #b39ddb;
+  color: #7e57c2;
+}
+
+.combo-chip-dynamic.active {
+  border-style: solid;
+  border-color: #7e57c2;
+  background: #ede7f6;
+  color: #4527a0;
+}
+
+/* 源组合角标：动态仓列表行/编辑弹窗中标注股票所属真实组合 */
+.stock-source-tag {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 0 3px;
+  font-size: 10px;
+  line-height: 1.4;
+  color: #8e8e8e;
+  background: #f5f5f5;
+  border: 1px solid #e0e0e0;
+  border-radius: 3px;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
 /* 组合删除钮：默认弱化，hover 变红 */
 .combo-del {
   margin-left: 2px;

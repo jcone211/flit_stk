@@ -213,6 +213,18 @@
                 <select id="defaultPortfolioSelect" class="settings-select"></select>
                 <p class="settings-desc">选择后，每次打开弹窗将自动切换到该组合</p>
             </div>
+            <!-- 动态仓展示逻辑 -->
+            <div class="settings-item">
+                <label class="settings-toggle" for="dynamicLogicSelect">
+                    <span class="toggle-label">动态仓展示逻辑</span>
+                </label>
+                <select id="dynamicLogicSelect" class="settings-select">
+                    <option value="top5-both">展示今日涨势最好/跌幅最大的各5支股票</option>
+                    <option value="all">展示全部组合的全部股票</option>
+                    <option value="import-top5-both">展示导入至今跌幅最大/涨幅最大的各5支股票</option>
+                </select>
+                <p class="settings-desc">动态仓为自动组合：汇总其他全部组合的股票（跨组合按生效地址去重、排除垃圾池），编辑/删除等操作直接作用于源股票；展示逻辑可在此下拉切换</p>
+            </div>
             <!-- 所有勾选项放最下面 -->
             <div class="settings-item">
                 <label class="settings-toggle">
@@ -342,6 +354,8 @@
                 <div class="stock-identity">
                     <span id="stockName" class="stock-name">待抓取</span>
                     <span id="stockCode" class="code-tag">-</span>
+                    <!-- 动态仓视图编辑时显示源组合（保存/删除将作用于该组合中的源股票） -->
+                    <span id="editSourceTag" class="stock-source-tag" style="display:none"></span>
                     <span class="identity-sep">-</span>
                     <span id="headerCurrentPrice" class="header-price">-</span>
                 </div>

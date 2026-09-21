@@ -41,6 +41,20 @@ let portfolios = {};
 let activePortfolio = '持仓';
 // 默认组合（不可删除、不可重命名）
 const DEFAULT_PORTFOLIOS = ['默认', '持仓', '观察'];
+// 虚拟自动组合「动态仓」：不存入 portfolios，点击进入动态视图；展示其他全部组合股票的源引用
+const DYNAMIC_PORTFOLIO = '动态仓';
+// 动态仓展示逻辑选项：
+//   top5-both          今日涨势最好/跌幅最大的各5支（默认）
+//   all                展示全部组合的全部股票
+//   import-top5-both   导入至今跌幅最大/涨幅最大的各5支
+const DYNAMIC_LOGIC_TOP5_BOTH = 'top5-both';
+const DYNAMIC_LOGIC_ALL = 'all';
+const DYNAMIC_LOGIC_IMPORT_TOP5_BOTH = 'import-top5-both';
+const KNOWN_DYNAMIC_LOGICS = [DYNAMIC_LOGIC_TOP5_BOTH, DYNAMIC_LOGIC_ALL, DYNAMIC_LOGIC_IMPORT_TOP5_BOTH];
+let dynamicLogic = DYNAMIC_LOGIC_TOP5_BOTH; // 全局设置中的动态仓展示逻辑（存 sync）
+let specialView = false; // 当前是否处于虚拟组合「动态仓」视图
+let dynamicItems = []; // 动态仓当前展示条目映射：{ stock, srcCombo }（stock 为源股票对象引用）
+let editSrc = null; // 动态仓视图编辑中：{ srcCombo, stock }，保存/删除时作用于源股票
 let stockList = [];
 let editUrl = undefined;
 let keyPoints = []; // 要点列表：[{ text, weight }]
@@ -80,6 +94,7 @@ const refreshAllBtnEl = document.getElementById('refreshAllBtn');
 const openAiChatBtnEl = document.getElementById('openAiChatBtn');
 const overlayEl = document.getElementById('stockEditOverlay');
 const closeBtnEl = overlayEl.querySelector('.close-btn');
+const editSourceTagEl = document.getElementById('editSourceTag'); // 动态仓编辑弹窗的源组合角标
 const lastMonitorEl = document.getElementById('lastMonitor');
 const saveStockBtnEl = document.getElementById('saveStock');
 const delStockBtnEl = document.getElementById('delStock');
@@ -158,6 +173,7 @@ const settingsOverlayEl = document.getElementById('settingsOverlay');
 const closeSettingsBtnEl = document.getElementById('closeSettingsBtn');
 const autoResizeToggleEl = document.getElementById('autoResizeWindowToggle');
 const defaultPortfolioSelectEl = document.getElementById('defaultPortfolioSelect');
+const dynamicLogicSelectEl = document.getElementById('dynamicLogicSelect');
 const showKeyPointsToggleEl = document.getElementById('showKeyPointsToggle');
 const enableTrashToggleEl = document.getElementById('enableTrashToggle');
 const refreshOnOpenToggleEl = document.getElementById('refreshOnOpenToggle');
@@ -189,11 +205,18 @@ function storageGet(area, keys) {
 }
 
 function editingStock() {
+    // 动态仓视图：编辑对象为源股票（可能在其他组合中，不在活动组合镜像 stockList 内）
+    if (specialView && editSrc) return editSrc.stock;
     return stockList.find(s => s.url === editUrl);
 }
 
-// 保存并重渲染（启停/置顶/垃圾池/删除/保存/抓取共用）
+// 保存并重渲染（启停/置顶/垃圾池/删除/保存/抓取共用）。
+// 动态仓为虚拟视图：保存直接作用于源股票并写回其源组合，见 saveDynamicChanges
 function saveAndRender() {
+    if (specialView) {
+        saveDynamicChanges();
+        return;
+    }
     if (portfolios[activePortfolio]) portfolios[activePortfolio].stockList = stockList;
     chrome.storage.local.set({ stockList, portfolios }, () => {
         renderStockList();
@@ -202,10 +225,28 @@ function saveAndRender() {
     });
 }
 
+// 动态仓保存：动态仓不拥有股票，展示条目即源股票对象引用，直接将其挂载于各源组合的
+// portfolios 写回；活动组合镜像从源组合列表重建（不能用旧镜像覆盖，否则会丢失本次改动）
+function saveDynamicChanges() {
+    if (portfolios[activePortfolio]) stockList = portfolios[activePortfolio].stockList;
+    chrome.storage.local.set({ stockList, portfolios }, () => {
+        renderStockList();
+        chrome.runtime.sendMessage({ action: 'refresh' });
+        requestResizePopup();
+    });
+}
+
 function refreshCombos() {
-    // 无组合时仅隐藏标签（分页仍在同行），chips 容器由渲染函数清空
+    // 无组合时仅隐藏标签（分页仍在同行），chips 容器由渲染函数清空；
+    // 虚拟组合「动态仓」恒显示到最后；动态仓视图时常规 chip 均不置为活动（高亮仅在动态仓 chip）
     comboLabelEl.style.display = Object.keys(portfolios).length ? '' : 'none';
-    renderComboSwitches(portfolios, activePortfolio, comboSwitchesEl, { onSwitch: switchPortfolio, onDelete: deletePortfolio, onAdd: addPortfolio });
+    renderComboSwitches(portfolios, specialView ? '' : activePortfolio, comboSwitchesEl, {
+        onSwitch: switchPortfolio,
+        onDelete: deletePortfolio,
+        onAdd: addPortfolio,
+        onSwitchDynamic: switchToDynamic,
+        dynamicActive: specialView,
+    });
 }
 
 // ---------------- 数据落地（下沉至 background/landing.js + offscreen 隐藏页解析） ----------------
@@ -214,25 +255,92 @@ function refreshCombos() {
 // 本处仅保留 DATA_LANDED / DATA_LAND_ERROR 轻量通知用于「上次更新时间」角标。
 
 // ---------------- 列表渲染 ----------------
+// 动态仓展示条目：其他全部组合的股票引用（跨组合按生效地址去重，排除垃圾池条目）。
+// 各逻辑：
+//   top5-both          今日涨势最好/跌幅最大的各5支（先涨后跌，按正负严格取值，最多 10 支）
+//   import-top5-both   导入至今跌幅最大/涨幅最大的各5支（先跌后涨，按正负严格取值，最多 10 支）
+//   all                展示全部组合的全部股票（保持组合登记顺序）
+function buildDynamicItems() {
+    const seen = new Set();
+    const items = [];
+    Object.keys(portfolios).forEach(name => {
+        const sn = portfolios[name].selectorName || 'wc1';
+        (portfolios[name].stockList || []).forEach(stock => {
+            if (stock.inTrash) return; // 垃圾池条目不进入动态仓
+            const url = stripSign(effectiveStockUrl(stock, sn));
+            if (!url || seen.has(url)) return;
+            seen.add(url);
+            items.push({ stock, srcCombo: name });
+        });
+    });
+    if (dynamicLogic === DYNAMIC_LOGIC_TOP5_BOTH) {
+        return topBottomByPercent(items, d => numOrNull(d.stock.percent), 'gain');
+    }
+    if (dynamicLogic === DYNAMIC_LOGIC_IMPORT_TOP5_BOTH) {
+        // 导入以来涨跌幅为派生值（存储不落库）
+        return topBottomByPercent(items, d => calcImportPercent(d.stock.currentPrice, d.stock.importPrice), 'loss');
+    }
+    return items; // all 逻辑与未知值兜底：列出全部组合的全部股票
+}
+
+// 按涨跌幅取「两端各 5 支」：firstSide = 'gain' 涨幅端在前 | 'loss' 跌幅端在前。
+// 严格按正负取值（涨幅端仅 >0、跌幅端仅 <0，0 与缺数据不计入），不足 5 支按实际数量展示；
+// 负值/正值两组天然互斥，去重合并仅作兜底
+function topBottomByPercent(items, getVal, firstSide) {
+    const values = items
+        .map(d => ({ d, v: numOrNull(getVal(d)) }))
+        .filter(x => x.v !== null && x.v !== 0);
+    if (values.length === 0) return [];
+    const gainers = values.filter(x => x.v > 0).sort((a, b) => b.v - a.v).slice(0, 5).map(x => x.d);
+    const losers = values.filter(x => x.v < 0).sort((a, b) => a.v - b.v).slice(0, 5).map(x => x.d);
+    const merged = firstSide === 'loss' ? [...losers, ...gainers] : [...gainers, ...losers];
+    const seenByStock = new Set();
+    return merged.filter(d => {
+        if (seenByStock.has(d.stock)) return false;
+        seenByStock.add(d.stock);
+        return true;
+    });
+}
+
+// 动态仓展示逻辑归一化：非法/未知值回退默认（top5-both）
+function normalizeDynamicLogic(v) {
+    return KNOWN_DYNAMIC_LOGICS.includes(v) ? v : DYNAMIC_LOGIC_TOP5_BOTH;
+}
+
+// 动态仓视图中，展示股票对应的源组合名（展示对象即源股票引用）
+function srcComboOfStock(stock) {
+    const d = dynamicItems.find(it => it.stock === stock);
+    return d ? d.srcCombo : '';
+}
+
 function getViewList() {
+    // 动态仓视图：按全局设置的展示逻辑生成（源股票引用列表），表头排序在此基础上生效
+    if (specialView) {
+        dynamicItems = buildDynamicItems();
+        return sortList(dynamicItems.map(d => d.stock));
+    }
+    dynamicItems = [];
     const filtered = stockList.filter(s => currentView === 'trash' ? s.inTrash : !s.inTrash);
     const pinned = filtered.filter(s => s.pinned)
         .sort((a, b) => (a.pinOrder ?? 0) - (b.pinOrder ?? 0));
-    const rest = filtered.filter(s => !s.pinned);
-    if (currentSort !== 'default') {
-        const idx = currentSort.lastIndexOf('-');
-        const field = currentSort.slice(0, idx);
-        const dir = currentSort.slice(idx + 1) === 'asc' ? 1 : -1;
-        rest.sort((a, b) => {
-            const va = field === 'percent' ? numOrNull(a.percent) : calcImportPercent(a.currentPrice, a.importPrice);
-            const vb = field === 'percent' ? numOrNull(b.percent) : calcImportPercent(b.currentPrice, b.importPrice);
-            if (va == null && vb == null) return 0;
-            if (va == null) return 1;
-            if (vb == null) return -1;
-            return (va - vb) * dir;
-        });
-    }
+    const rest = sortList(filtered.filter(s => !s.pinned));
     return [...pinned, ...rest];
+}
+
+// 按表头排序钮排序（percent=今日涨跌幅 / importPercent=导入以来涨跌幅），default 保持原顺序
+function sortList(list) {
+    if (currentSort === 'default') return list;
+    const idx = currentSort.lastIndexOf('-');
+    const field = currentSort.slice(0, idx);
+    const dir = currentSort.slice(idx + 1) === 'asc' ? 1 : -1;
+    return [...list].sort((a, b) => {
+        const va = field === 'percent' ? numOrNull(a.percent) : calcImportPercent(a.currentPrice, a.importPrice);
+        const vb = field === 'percent' ? numOrNull(b.percent) : calcImportPercent(b.currentPrice, b.importPrice);
+        if (va == null && vb == null) return 0;
+        if (va == null) return 1;
+        if (vb == null) return -1;
+        return (va - vb) * dir;
+    });
 }
 
 function renderStockList() {
@@ -243,30 +351,15 @@ function renderStockList() {
     const pageItems = list.slice((currentPage - 1) * pageSize, currentPage * pageSize);
     stockTableEl.innerHTML = '';
     for (const stock of pageItems) {
+        const srcCombo = specialView ? srcComboOfStock(stock) : '';
         stockTableEl.appendChild(renderStock(stock, selectorName, {
             onEdit: () => openEdit(stock),
             onStop: () => { stock.stopRunning = !stock.stopRunning; saveAndRender(); },
-            onTogglePin: (s) => {
-                if (s.pinned) {
-                    // 取消置顶：移到数组首位 → 落在未置顶分组的第一位（紧随置顶分组之后）
-                    s.pinned = false;
-                    s.pinOrder = null;
-                    stockList.splice(stockList.indexOf(s), 1);
-                    stockList.unshift(s);
-                } else {
-                    // 置顶：新置顶项排第 1，其余置顶项顺序依次 +1。
-                    // 旧置顶按现有 pinOrder 相对序重编为 2..n+1（兼容旧版负数编号），新项固定为 1
-                    stockList.filter(x => x.pinned && x !== s)
-                        .sort((a, b) => (a.pinOrder ?? 0) - (b.pinOrder ?? 0))
-                        .forEach((x, i) => { x.pinOrder = i + 2; });
-                    s.pinned = true;
-                    s.pinOrder = 1;
-                }
-                saveAndRender();
-            },
-            // 仅列表视图显示切换组合按钮
-            onMoveToCombo: currentView === 'list' ? (stock, btn) => showMoveComboDropdown(stock, btn) : undefined,
-        }));
+            // 动态仓行不提供置顶功能（无 handler 时渲染层不画置顶按钮）
+            onTogglePin: !specialView ? (s) => togglePinStock(s) : undefined,
+            // 切换组合按钮：仅普通列表视图显示；动态仓为虚拟组合，不参与股票的切换组合
+            onMoveToCombo: (currentView === 'list' && !specialView) ? (stock, btn) => showMoveComboDropdown(stock, btn) : undefined,
+        }, srcCombo ? { sourceCombo: srcCombo } : undefined));
     }
     renderPagination(paginationBarEl, { currentPage, totalPages, total: list.length, pageSize }, {
         onPrev: () => { currentPage--; renderStockList(); },
@@ -281,15 +374,38 @@ function renderStockList() {
     renderSortToggles(currentSort, sortToggleEls);
 }
 
+// 置顶/取消置顶（仅普通列表视图使用；动态仓行不渲染置顶按钮）
+function togglePinStock(s) {
+    if (s.pinned) {
+        // 取消置顶：移到数组首位 → 落在未置顶分组的第一位（紧随置顶分组之后）
+        s.pinned = false;
+        s.pinOrder = null;
+        stockList.splice(stockList.indexOf(s), 1);
+        stockList.unshift(s);
+    } else {
+        // 置顶：新置顶项排第 1，其余置顶项顺序依次 +1。
+        // 旧置顶按现有 pinOrder 相对序重编为 2..n+1（兼容旧版负数编号），新项固定为 1
+        stockList.filter(x => x.pinned && x !== s)
+            .sort((a, b) => (a.pinOrder ?? 0) - (b.pinOrder ?? 0))
+            .forEach((x, i) => { x.pinOrder = i + 2; });
+        s.pinned = true;
+        s.pinOrder = 1;
+    }
+    saveAndRender();
+}
+
 // ---------------- 视图 / 组合 ----------------
 function updateViewToggleUI() {
+    // 标题恒展示当前视图名（动态仓为列表语义，仍显示「股票列表」）
     viewTitleEl.textContent = currentView === 'trash' ? '垃圾池' : '股票列表';
     viewListBtnEl.classList.toggle('active', currentView === 'list');
     viewTrashBtnEl.classList.toggle('active', currentView === 'trash');
 }
 
 function switchView(view) {
-    if (currentView === view) return;
+    if (currentView === view && !specialView) return;
+    // 切换 股票/垃圾池 视图即退出动态仓虚拟视图（动态仓恒为列表语义）
+    specialView = false;
     currentView = view;
     chrome.storage.local.set({ currentView: view });
     chrome.runtime.sendMessage({ action: 'setView', view }); // background 按新视图重排刷新任务
@@ -299,8 +415,39 @@ function switchView(view) {
     requestResizePopup();
 }
 
+// 进入虚拟组合「动态仓」视图：不改变 activePortfolio（调度仍按原组合），仅切换展示；
+// 动态仓展示其他全部组合的股票引用，不参与普通组合的增删/切换
+function switchToDynamic() {
+    if (specialView) return;
+    specialView = true;
+    // 动态仓恒为列表语义：从垃圾池视图切换时同步后台调度视图
+    if (currentView !== 'list') {
+        currentView = 'list';
+        chrome.storage.local.set({ currentView: 'list' });
+        chrome.runtime.sendMessage({ action: 'setView', view: 'list' });
+    }
+    currentPage = 1;
+    currentSort = 'default';
+    updateViewToggleUI();
+    refreshCombos();
+    renderStockList();
+    requestResizePopup();
+}
+
 function switchPortfolio(name) {
-    if (!portfolios[name] || name === activePortfolio) return;
+    if (!portfolios[name]) return;
+    // 动态仓视图下点击原活动组合 chip：退出动态视图即可，无需重切
+    if (name === activePortfolio) {
+        if (specialView) {
+            specialView = false;
+            updateViewToggleUI();
+            refreshCombos();
+            renderStockList();
+            requestResizePopup();
+        }
+        return;
+    }
+    specialView = false;
     activePortfolio = name;
     stockList = portfolios[name].stockList || [];
     selectorName = portfolios[name].selectorName || 'wc1';
@@ -309,15 +456,16 @@ function switchPortfolio(name) {
     chrome.storage.sync.set({ selectorName });
     currentPage = 1;
     currentSort = 'default';
+    updateViewToggleUI();
     refreshCombos();
     renderStockList();
     chrome.runtime.sendMessage({ action: 'refresh' });
     requestResizePopup();
 }
 
-// 命名保留字检查
+// 命名保留字检查（动态仓为虚拟自动组合，禁止建立同名真实组合）
 function isReservedPortfolioName(name) {
-    return DEFAULT_PORTFOLIOS.includes(name);
+    return DEFAULT_PORTFOLIOS.includes(name) || name === DYNAMIC_PORTFOLIO;
 }
 
 // 重名检查
@@ -339,6 +487,7 @@ function deletePortfolio(name) {
 function addPortfolio() {
     const name = promptComboName('新建组合（不超过4字）：');
     if (name === null) return;
+    if (name === DYNAMIC_PORTFOLIO) { alert(`「${DYNAMIC_PORTFOLIO}」为自动组合，请更换其他名称`); return; }
     if (isReservedPortfolioName(name)) { alert(`「${name}」为默认组合名称，请更换其他名称`); return; }
     if (isDuplicatePortfolioName(name)) { alert(`组合「${name}」已存在，请更换其他名称`); return; }
     portfolios[name] = { stockList: [], selectorName };
@@ -568,7 +717,7 @@ async function handleExport(sensitive) {
         ? '将导出全部数据（含小石 / AI 接口的 API Key；对话图片/文件不携带原始数据，以占位文本代替），请妥善保管，确定继续？'
         : '将导出默认数据（组合、要点、事件、设置、AI 对话与记忆；不含 API Key，对话图片/文件以 [用户上传图片：xx.png] 等占位文本代替），确定继续？')) return;
     const localKeys = ['stockList', 'portfolios', 'activePortfolio', 'currentView', 'keyPoints', 'events', 'aiChats', 'aiMemory'];
-    const syncKeys = ['refreshInterval', 'selectorName', 'pageSize', 'autoResizeWindow', 'defaultPortfolio', 'hideKeyPoints', 'enableTrash', 'refreshOnOpen', 'enableQuickImport', 'quickImportInStockWindow', 'enableAi', 'dataSource', 'cronJobs', 'aiMaxToolIterations', 'keepMonitoringOnClose', 'keepRefreshOnClose'];
+    const syncKeys = ['refreshInterval', 'selectorName', 'pageSize', 'autoResizeWindow', 'defaultPortfolio', 'hideKeyPoints', 'enableTrash', 'refreshOnOpen', 'enableQuickImport', 'quickImportInStockWindow', 'enableAi', 'dataSource', 'cronJobs', 'aiMaxToolIterations', 'keepMonitoringOnClose', 'keepRefreshOnClose', 'dynamicLogic'];
     if (sensitive) syncKeys.push('apiKey', 'aiProviders', 'aiActiveProviderId');
     const localData = await storageGet(chrome.storage.local, localKeys);
     const syncData = await storageGet(chrome.storage.sync, syncKeys);
@@ -604,6 +753,7 @@ async function handleExport(sensitive) {
             dataSource: syncData.dataSource,
             cronJobs: syncData.cronJobs || [],
             aiMaxToolIterations: syncData.aiMaxToolIterations,
+            dynamicLogic: normalizeDynamicLogic(syncData.dynamicLogic),
             ...(sensitive ? {
                 apiKey: syncData.apiKey,
                 aiProviders: syncData.aiProviders || [],
@@ -669,7 +819,10 @@ async function handleImport(file) {
     if (data.local && typeof data.local === 'object') {
         const localSet = {};
         if (Array.isArray(data.local.stockList)) localSet.stockList = data.local.stockList;
-        if (data.local.portfolios && typeof data.local.portfolios === 'object') localSet.portfolios = data.local.portfolios;
+        if (data.local.portfolios && typeof data.local.portfolios === 'object') {
+            localSet.portfolios = data.local.portfolios;
+            delete localSet.portfolios[DYNAMIC_PORTFOLIO]; // 动态仓为虚拟自动组合，不恢复历史备份中的同名真实条目
+        }
         if (typeof data.local.activePortfolio === 'string') localSet.activePortfolio = data.local.activePortfolio;
         if (typeof data.local.currentView === 'string') localSet.currentView = data.local.currentView;
         if (Array.isArray(data.local.keyPoints)) localSet.keyPoints = data.local.keyPoints;
@@ -700,6 +853,7 @@ async function handleImport(file) {
         if (['refresh', 'xiaoshi', 'adata'].includes(data.sync.dataSource)) syncSet.dataSource = data.sync.dataSource;
         if (Array.isArray(data.sync.cronJobs)) syncSet.cronJobs = data.sync.cronJobs;
         if (typeof data.sync.aiMaxToolIterations === 'number') syncSet.aiMaxToolIterations = Math.max(1, data.sync.aiMaxToolIterations);
+        if (KNOWN_DYNAMIC_LOGICS.includes(data.sync.dynamicLogic)) syncSet.dynamicLogic = data.sync.dynamicLogic;
         // 敏感数据（仅敏感备份含）：小石 Key / AI 接口配置
         if (typeof data.sync.apiKey === 'string') syncSet.apiKey = data.sync.apiKey;
         if (Array.isArray(data.sync.aiProviders)) syncSet.aiProviders = data.sync.aiProviders;
@@ -712,7 +866,7 @@ async function handleImport(file) {
     // 刷新当前页面状态
     await initState();
     // 重新读取 sync 设置到本地变量（导入写的 autoResizeWindow 等不会自动同步）
-    await new Promise(r => chrome.storage.sync.get(['autoResizeWindow', 'hideKeyPoints', 'enableTrash', 'refreshOnOpen', 'enableQuickImport', 'quickImportInStockWindow', 'enableAi', 'keepMonitoringOnClose', 'keepRefreshOnClose', 'defaultPortfolio', 'pageSize', 'selectorName', 'dataSource'], (result) => {
+    await new Promise(r => chrome.storage.sync.get(['autoResizeWindow', 'hideKeyPoints', 'enableTrash', 'refreshOnOpen', 'enableQuickImport', 'quickImportInStockWindow', 'enableAi', 'keepMonitoringOnClose', 'keepRefreshOnClose', 'defaultPortfolio', 'pageSize', 'selectorName', 'dataSource', 'dynamicLogic'], (result) => {
         autoResizeWindow = result.autoResizeWindow !== false;
         hideKeyPoints = !!result.hideKeyPoints;
         enableTrash = result.enableTrash === true;
@@ -725,6 +879,8 @@ async function handleImport(file) {
         if (result.pageSize) pageSize = result.pageSize;
         if (result.selectorName) { selectorName = result.selectorName; selectorEl.value = selectorName; }
         if (result.dataSource) dataSourceSelectEl.value = result.dataSource;
+        dynamicLogic = normalizeDynamicLogic(result.dynamicLogic);
+        dynamicLogicSelectEl.value = dynamicLogic;
         applyKeyPointsVisibility();
         applyTrashVisibility();
         applyAiVisibility();
@@ -740,10 +896,33 @@ async function handleImport(file) {
 }
 
 // ---------------- 编辑弹窗 ----------------
+// 动态仓视图编辑源股票时，在身份头显示「源组合」角标（保存/删除将作用于该组合中的源股票）
+function showEditSourceTag(combo) {
+    if (!editSourceTagEl) return;
+    editSourceTagEl.textContent = `源组合：${combo}`;
+    editSourceTagEl.title = `保存/删除等操作将直接作用于「${combo}」组合中的源股票`;
+    editSourceTagEl.style.display = '';
+}
+
+function hideEditSourceTag() {
+    if (!editSourceTagEl) return;
+    editSourceTagEl.style.display = 'none';
+    editSourceTagEl.textContent = '';
+}
+
 function openEdit(stock) {
     overlayEl.style.display = 'flex';
     lastMonitorEl.style.display = '';
     editUrl = stock.url;
+    if (specialView) {
+        // 动态仓视图：编辑对象为源股票（可能在其他组合中，不在活动组合镜像内）
+        editSrc = { srcCombo: srcComboOfStock(stock) || '', stock };
+        if (editSrc.srcCombo) showEditSourceTag(editSrc.srcCombo);
+        else hideEditSourceTag();
+    } else {
+        editSrc = null;
+        hideEditSourceTag();
+    }
     stockUrlGroupEl.style.display = 'none'; // 编辑页网址不可改，隐藏整组
     editForm.render(stock);
 }
@@ -752,6 +931,8 @@ function closeModal() {
     lastMonitorEl.style.display = 'block';
     overlayEl.style.display = 'none';
     stockUrlEl.disabled = false;
+    editSrc = null;
+    hideEditSourceTag();
 }
 
 // 启停单按钮视觉态：未运行 [▶ 开始监控]，运行中 [■ 停止监控]
@@ -797,8 +978,8 @@ async function initState() {
 
 // 首次初始化
 initState().then(() => {
-    // 加载全局设置（默认组合、自动伸缩、垃圾池开关、打开刷新、一键导入），应用默认组合后再做首次渲染
-    chrome.storage.sync.get(['defaultPortfolio', 'autoResizeWindow', 'hideKeyPoints', 'enableTrash', 'refreshOnOpen', 'enableQuickImport', 'quickImportInStockWindow', 'enableAi', 'keepMonitoringOnClose', 'keepRefreshOnClose'], (result) => {
+    // 加载全局设置（默认组合、自动伸缩、垃圾池开关、打开刷新、一键导入、动态仓逻辑），应用默认组合后再做首次渲染
+    chrome.storage.sync.get(['defaultPortfolio', 'autoResizeWindow', 'hideKeyPoints', 'enableTrash', 'refreshOnOpen', 'enableQuickImport', 'quickImportInStockWindow', 'enableAi', 'keepMonitoringOnClose', 'keepRefreshOnClose', 'dynamicLogic'], (result) => {
         autoResizeWindow = result.autoResizeWindow !== false;
         hideKeyPoints = !!result.hideKeyPoints;
         enableTrash = result.enableTrash === true; // 默认关闭
@@ -808,6 +989,7 @@ initState().then(() => {
         enableAi = result.enableAi !== false; // 默认开启
         keepMonitoringOnClose = !!result.keepMonitoringOnClose;
         keepRefreshOnClose = !!result.keepRefreshOnClose;
+        dynamicLogic = normalizeDynamicLogic(result.dynamicLogic);
         applyKeyPointsVisibility();
         applyTrashVisibility();
         applyAiVisibility();
@@ -978,6 +1160,7 @@ confirmQuickImportComboBtnEl.addEventListener('click', () => {
     let name;
     if (inputName) {
         if (!validComboName(inputName)) { alert('组合命名必须为1-4个字'); return; }
+        if (inputName === DYNAMIC_PORTFOLIO) { alert(`「${DYNAMIC_PORTFOLIO}」为自动组合，不能导入到该组合`); return; }
         name = inputName; // 与现有组合重名时自然导入到现有组合
     } else {
         name = quickImportComboSelectEl.value;
@@ -1037,9 +1220,12 @@ startStopBtn.addEventListener('click', () => {
 });
 
 addStockEl.addEventListener('click', () => {
+    if (specialView) { alert(`「${DYNAMIC_PORTFOLIO}」为自动组合，如需新增股票请先切换到具体组合`); return; }
     overlayEl.style.display = 'flex';
     lastMonitorEl.style.display = '';
     editUrl = undefined; // 须先清空：clear() 内 getStock() 依赖 editUrl，否则读到上一只股票
+    editSrc = null;
+    hideEditSourceTag();
     editForm.clear();
     editActionsTopEl.style.display = 'none';
     stockUrlGroupEl.style.display = ''; // 新增需填网址
@@ -1055,7 +1241,8 @@ saveStockBtnEl.addEventListener('click', () => {
     const iGe = importTargetPercentGeEl.value;
     let addedUrl = null;
     if (editUrl) {
-        const item = stockList.find(s => s.url === editUrl);
+        // 动态仓视图下编辑源股票（可能不在活动组合镜像 stockList 中）
+        const item = specialView ? (editSrc && editSrc.stock) : stockList.find(s => s.url === editUrl);
         if (!item) { alert('保存失败，请关闭重试'); return; }
         // 名称只读（抓取自动更新），保存不回写
         item.targetPercentLe = tLe;
@@ -1069,7 +1256,8 @@ saveStockBtnEl.addEventListener('click', () => {
     } else {
         const url = normalizeUrl(stripSign(rawUrl)); // 新建：先截掉 &sign= 再规范化
         if (!url) { alert('网址格式不正确'); return; }
-        if (stockList.some(s => s.url === url)) { alert('网址已存在'); return; }
+        const list = specialView ? (portfolios[activePortfolio] ? portfolios[activePortfolio].stockList : stockList) : stockList;
+        if (list.some(s => s.url === url)) { alert('网址已存在'); return; }
         stockList.push({
             url, name: '', code: '', prefix: '', // 名称留空，首次抓取自动回填
             startPrice: null, currentPrice: null, percent: null,
@@ -1091,6 +1279,20 @@ saveStockBtnEl.addEventListener('click', () => {
 
 delStockBtnEl.addEventListener('click', () => {
     if (!editUrl) return;
+    if (specialView) {
+        // 动态仓删除=删除源股票：从源组合的 stockList 中移除（同一股票跨组合仅引用一条）
+        if (!editSrc || !portfolios[editSrc.srcCombo]) return;
+        const list = portfolios[editSrc.srcCombo].stockList || [];
+        const idx = list.indexOf(editSrc.stock);
+        if (idx === -1) return;
+        list.splice(idx, 1);
+        editUrl = undefined;
+        editSrc = null;
+        hideEditSourceTag();
+        saveDynamicChanges();
+        closeModal();
+        return;
+    }
     const index = stockList.findIndex(item => item.url === editUrl);
     if (index === -1) return;
     stockList.splice(index, 1);
@@ -1099,7 +1301,8 @@ delStockBtnEl.addEventListener('click', () => {
 });
 
 trashToggleBtnEl.addEventListener('click', () => {
-    const item = stockList.find(s => s.url === editUrl);
+    // 动态仓视图：垃圾池操作作用于源股票
+    const item = specialView ? (editSrc && editSrc.stock) : stockList.find(s => s.url === editUrl);
     if (!item) return;
     item.inTrash = !item.inTrash;
     saveAndRender();
@@ -1252,11 +1455,13 @@ function openSettings() {
     });
     defaultPortfolioSelectEl.value = defaultPortfolio;
     // 数据获取方式 / API Key / cron 定时任务（每次打开读取最新，跨弹窗会话同步）
-    chrome.storage.sync.get(['dataSource', 'apiKey', 'cronJobs'], (result) => {
+    chrome.storage.sync.get(['dataSource', 'apiKey', 'cronJobs', 'dynamicLogic'], (result) => {
         dataSource = result.dataSource || 'adata';
         cronJobs = Array.isArray(result.cronJobs) ? result.cronJobs : [];
+        dynamicLogic = normalizeDynamicLogic(result.dynamicLogic);
         dataSourceSelectEl.value = dataSource;
         apiKeyInputEl.value = result.apiKey || '';
+        dynamicLogicSelectEl.value = dynamicLogic;
         updateApiKeyGroupVisibility();
         renderCronJobList();
     });
@@ -1355,7 +1560,10 @@ function closeSettings() {
 // 请求插件弹窗按当前活动股票数量调整高度
 function requestResizePopup() {
     if (!autoResizeWindow) return;
-    const count = stockList.filter(s => currentView === 'trash' ? s.inTrash : !s.inTrash).length;
+    // 动态仓视图按动态列表条目数伸缩
+    const count = specialView
+        ? dynamicItems.length
+        : stockList.filter(s => currentView === 'trash' ? s.inTrash : !s.inTrash).length;
     const rows = Math.min(count, pageSize);
     chrome.runtime.sendMessage({ action: 'resizePopupWindow', rows });
 }
@@ -1475,6 +1683,17 @@ dataSourceSelectEl.addEventListener('change', () => {
     updateApiKeyGroupVisibility();
 });
 
+// 动态仓展示逻辑：即选即存；动态仓视图打开时立即按新逻辑重算展示列表
+dynamicLogicSelectEl.addEventListener('change', () => {
+    dynamicLogic = dynamicLogicSelectEl.value;
+    chrome.storage.sync.set({ dynamicLogic });
+    if (specialView) {
+        currentPage = 1;
+        renderStockList();
+        requestResizePopup();
+    }
+});
+
 // API Key：即改即存（Key 仅存本地，仅在「导出包含 API Key 的敏感数据」时随备份导出）
 apiKeyInputEl.addEventListener('change', () => {
     chrome.storage.sync.set({ apiKey: apiKeyInputEl.value.trim() });
@@ -1537,6 +1756,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
 // 监控重排的 refresh 消息也已由 AI 侧发出，不重复发送）
 function syncPortfolioFromStorage(name) {
     if (!name || name === activePortfolio || !portfolios[name]) return;
+    specialView = false; // AI 切换真实组合时退出动态仓虚拟视图
     activePortfolio = name;
     stockList = portfolios[name].stockList || [];
     selectorName = portfolios[name].selectorName || 'wc1';

@@ -136,6 +136,29 @@ export function stripSign(url) {
     }
 }
 
+// 规范化用于「等价性比较」的 URL（不改变存储/刷新用的原始地址）：
+// 忽略 hostname 的 www. 前缀差异与问财签名参数 sign；雪球个股页 /S/ 的站内跟踪参数
+// （如 from=status_stock_match）与行情内容无关，一并忽略。
+// 用于插件调度生效地址 ↔ 页面实际加载后地址之间的匹配——雪球等站点可能把
+// https://xueqiu.com/S/... 重定向/规整为 https://www.xueqiu.com/S/...，
+// 纯字符串比较会失配导致标签页找不到（反复新开）与抓取落地匹配失败（数据不更新）。
+// 解析失败回退原值。
+export function normalizeCompareUrl(url) {
+    if (!url) return url;
+    try {
+        const u = new URL(String(url));
+        u.hostname = u.hostname.replace(/^www\./i, '');
+        if (u.hostname === 'xueqiu.com' && /^\/S\//.test(u.pathname)) {
+            u.search = ''; // 雪球 /S/ 页行情标识在 path 内，query 均为跟踪参数
+        } else {
+            u.searchParams.delete('sign');
+        }
+        return u.href;
+    } catch {
+        return url;
+    }
+}
+
 // 最新刷新时间戳(ms) → MM.dd HH:mm（不带年，如 08.04 09:30 表示 8月4日），无效返回 ''
 export function formatLastUpdate(ts) {
     const n = Number(ts);

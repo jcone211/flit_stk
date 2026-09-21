@@ -4,7 +4,7 @@
 // 写入一律「读 storage 最新 → 合并 → 写回」，不依赖内存快照，避免覆盖外部（AI 窗口/popup）写入。
 
 import {
-    stripSign, normalizeUrl, effectiveStockUrl, selectorKeyForUrl, cleanStockName,
+    normalizeCompareUrl, normalizeUrl, effectiveStockUrl, selectorKeyForUrl, cleanStockName,
 } from '../shared/utils.js';
 import { applyThresholds } from '../popup/notifications.js';
 
@@ -106,14 +106,16 @@ export async function landCapturedDocument(documentData) {
         ? portfolios[activePortfolio].stockList
         : (storage.stockList || []);
 
-    const strippedMsg = stripSign(messageUrl);
+    // 用等价性规范化比较：页面实际加载后的 URL 可能带 www 前缀/雪球站内跟踪参数，
+    // 与调度用生效地址纯字符串不等（见 shared/utils.js normalizeCompareUrl 说明）
+    const strippedMsg = normalizeCompareUrl(messageUrl);
     const msgWord = searchWordOf(messageUrl);
     // 搜索词兜底：精确匹配失效时按「消息 URL 的搜索参数与股票名称一致」匹配；
     // 地址同步（搜索页跳转后的实际详情页 URL）在解析成功后才生效，避免解析失败污染数据
     const redirectSync = [];
     const matchStock = (s, sn) => {
-        if (stripSign(s.url) === strippedMsg
-            || stripSign(effectiveStockUrl(s, sn)) === strippedMsg) return true;
+        if (normalizeCompareUrl(s.url) === strippedMsg
+            || normalizeCompareUrl(effectiveStockUrl(s, sn)) === strippedMsg) return true;
         if (msgWord && s.name === msgWord) {
             redirectSync.push([s, strippedMsg]);
             return true;

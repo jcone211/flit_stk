@@ -1,4 +1,4 @@
-import { stripSign, effectiveStockUrl, isKnownMarketPrefix, cleanStockName } from '../shared/utils.js';
+import { normalizeCompareUrl, effectiveStockUrl, isKnownMarketPrefix, cleanStockName } from '../shared/utils.js';
 import { nextCronTime, isTradingTime } from '../shared/cron.js';
 import { batchQuotes } from '../js/xiaoshi_realtime_quote.js';
 import { batchQuotes as adataBatchQuotes } from '../js/adata_realtime_quote.js';
@@ -124,7 +124,7 @@ function openPopupWindow() {
                     url: chrome.runtime.getURL('popup.html'),
                     type: 'popup',
                     width: 580,
-                    height: 520 + Math.max(rows - 2, 0) * 56,
+                    height: 524 + Math.max(rows - 2, 0) * 56,
                     left: currentWindow.width - 400,
                     top: 50
                 }, (newWindow) => {
@@ -526,7 +526,9 @@ function createStockWindowAndOpenTab(url, done) {
 function openOrRefreshTabInWindow(windowId, url) {
     // 查询该窗口下的所有标签页
     chrome.tabs.query({ windowId }, (tabs) => {
-        const target = tabs.find(t => stripSign(t.url) === stripSign(url));
+        // 用规范化比较匹配：雪球等站点可能把 https://xueqiu.com/S/... 规整为
+        // https://www.xueqiu.com/S/...，字符串完全相等会永远找不到已有标签而反复新开
+        const target = tabs.find(t => normalizeCompareUrl(t.url) === normalizeCompareUrl(url));
         dbg('窗口内刷新匹配:', url, '| 窗口标签', tabs.length, '个 →',
             target ? ('重载已有标签 ' + target.url) : '无匹配标签，新开');
         if (target) {
@@ -750,7 +752,7 @@ function refreshAllByTabs(done, token) {
             const p = portfolios[name];
             const sn = p.selectorName || 'wc1'; // 各组合独立的选择器
             (p.stockList || []).forEach(s => {
-                const url = stripSign(effectiveStockUrl(s, sn));
+                const url = normalizeCompareUrl(effectiveStockUrl(s, sn));
                 if (!url || seen.has(url)) return;
                 seen.add(url);
                 urls.push(url);

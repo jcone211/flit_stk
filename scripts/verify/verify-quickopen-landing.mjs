@@ -5,7 +5,21 @@
 // 复刻 background/landing.js 的顺序与匹配逻辑（URL/搜索词匹配，不依赖解析结果）。
 import assert from 'node:assert/strict';
 
-const stripSign = (u) => String(u || '').replace(/^https?:/, '').replace(/\/$/, '');
+// 等价性规范化比较（shared/utils.js normalizeCompareUrl 的复刻）：
+// 忽略 www. 前缀差与 sign 参数；雪球 /S/ 页 query 均为站内跟踪参数，一并忽略
+const normalizeCompareUrl = (u) => {
+    if (!u) return u;
+    try {
+        const url = new URL(String(u));
+        url.hostname = url.hostname.replace(/^www\./i, '');
+        if (url.hostname === 'xueqiu.com' && /^\/S\//.test(url.pathname)) {
+            url.search = '';
+        } else {
+            url.searchParams.delete('sign');
+        }
+        return url.href;
+    } catch { return u; }
+};
 const searchWordOf = (url) => {
     try { return new URL(url).searchParams.get('w') || new URL(url).searchParams.get('q') || ''; }
     catch { return ''; }
@@ -23,7 +37,7 @@ const portfolios = {
     },
 };
 
-async function land(documentData, { emitLanded, parseViaOffscreen }) {
+async function land(documentData, { emitLanded, parseViaOffscreen }, effOverride) {
     if (!documentData || !documentData.html) return false;
     const messageUrl = documentData.url;
     const key = messageUrl.includes('xueqiu.com') ? 'xq1' : 'wc1'; // selectorKeyForUrl 简化
@@ -33,11 +47,12 @@ async function land(documentData, { emitLanded, parseViaOffscreen }) {
     const activePortfolio = '持仓';
     const stockList = storage.portfolios[activePortfolio].stockList;
 
-    const strippedMsg = stripSign(messageUrl);
+    const eff = effOverride || effectiveStockUrl; // 用例可用雪球拼接地址覆盖
+    const strippedMsg = normalizeCompareUrl(messageUrl);
     const msgWord = searchWordOf(messageUrl);
     const redirectSync = [];
     const matchStock = (s, sn) => {
-        if (stripSign(s.url) === strippedMsg || stripSign(effectiveStockUrl(s, sn)) === strippedMsg) return true;
+        if (normalizeCompareUrl(s.url) === strippedMsg || normalizeCompareUrl(eff(s, sn)) === strippedMsg) return true;
         if (msgWord && s.name === msgWord) { redirectSync.push([s, strippedMsg]); return true; }
         return false;
     };
@@ -139,6 +154,29 @@ const errors = [];
     assert.equal(parseCount, 0, '非命中页面即使「解析会失败」也不触发解析');
     assert.equal(landedFlag, null, '非命中页面解析失败不应误报 DATA_LAND_ERROR');
     console.log('✓ 用例4：非组合股票页即使解析会失败 → 也不误报「数据更新失败」');
+}
+
+// 用例 5：雪球个股页 www/非 www 等价——调度地址存为 https://xueqiu.com/S/SZ002155 不带 www，
+// 页面实际加载后 URL 变成 https://www.xueqiu.com/S/SZ002155（或带 from 跟踪参数），
+// 纯字符串比较会失配导致数据静默不落地；规范化比较应命中并落地
+{
+    parseCount = 0;
+    let landedFlag = null;
+    const eff = (s, sn) => `https://xueqiu.com/S/SZ002155`; // effectiveStockUrl 的雪球拼接结果（不带 www）
+    const stock = { url: 'https://xueqiu.com/S/SZ002155', name: '湖南黄金', currentPrice: null, stopRunning: false };
+    portfolios.持仓.stockList[0] = stock;
+    const result = await land({
+        url: 'https://www.xueqiu.com/S/SZ002155?from=status_stock_match', // 实际页面地址带 www + 跟踪参数
+        html: '<html>...</html>',
+    }, {
+        emitLanded: (e) => { landedFlag = e; },
+        parseViaOffscreen: async () => { parseCount++; return { currentPrice: 12.34 }; },
+    }, eff);
+    assert.equal(result, true, 'www/非 www 等价地址应命中落地');
+    assert.equal(parseCount, 1, '命中页面应触发解析');
+    assert.equal(landedFlag, false, '解析成功应上报 DATA_LANDED');
+    assert.equal(stock.currentPrice, 12.34, '命中股票价格应被更新');
+    console.log('✓ 用例5：雪球 www/非 www + from 跟踪参数 → 规范化比较命中并落地');
 }
 
 if (errors.length) { console.error(errors); process.exit(1); }

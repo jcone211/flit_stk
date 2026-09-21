@@ -1,5 +1,5 @@
 import {
-    getDateTime, normalizeUrl, stripSign, numOrNull, cleanStockName,
+    getDateTime, normalizeUrl, stripSign, normalizeCompareUrl, numOrNull, cleanStockName,
     calcImportPercent, effectiveStockUrl, etfPrefixForCode
 } from '../shared/utils.js';
 import { validateCronExpr } from '../shared/cron.js';
@@ -267,7 +267,7 @@ function buildDynamicItems() {
         const sn = portfolios[name].selectorName || 'wc1';
         (portfolios[name].stockList || []).forEach(stock => {
             if (stock.inTrash) return; // 垃圾池条目不进入动态仓
-            const url = stripSign(effectiveStockUrl(stock, sn));
+            const url = normalizeCompareUrl(effectiveStockUrl(stock, sn));
             if (!url || seen.has(url)) return;
             seen.add(url);
             items.push({ stock, srcCombo: name });
@@ -1806,7 +1806,7 @@ function countAllStocks() {
         const p = portfolios[name];
         const sn = p.selectorName || 'wc1';
         (p.stockList || []).forEach(s => {
-            const url = stripSign(effectiveStockUrl(s, sn));
+            const url = normalizeCompareUrl(effectiveStockUrl(s, sn));
             if (url && !seen.has(url)) seen.add(url);
         });
     });

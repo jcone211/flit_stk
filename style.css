@@ -35,7 +35,8 @@ body {
 }
 
 .quick-open textarea {
-  width: 60%;
+  width: calc(60% - 16px);
+  margin-left: 4px;
 }
 
 .quick-open textarea::placeholder {

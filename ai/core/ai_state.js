@@ -191,6 +191,9 @@ export function pickStockView(s) {
         percent: s.percent ?? null,
         inTrash: !!s.inTrash,
         stopRunning: !!s.stopRunning,
+        // 首次导入时间（epoch 毫秒，存储字段为 createdAt）：只在导入/新增时写一次，
+        // 行情刷新与切换、移动组合都不改写；老数据没有该字段，直接给 null（不猜时间）
+        createAt: s.createdAt ?? null,
         lastUpdateAt: s.lastUpdateAt ?? null,
         // currentPrice 是哪一刻的价：epoch 毫秒模型读不出，给一份人可读时间，避免把旧价当现价
         数据时间: fmtDateTimeStr(s.lastUpdateAt),

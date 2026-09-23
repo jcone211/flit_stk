@@ -173,6 +173,8 @@ const eventAccuracyEl = document.getElementById('eventAccuracy');
 const openSettingsBtnEl = document.getElementById('openSettingsBtn');
 const settingsOverlayEl = document.getElementById('settingsOverlay');
 const closeSettingsBtnEl = document.getElementById('closeSettingsBtn');
+const settingsModelEl = document.getElementById('settingsModel');
+const advancedSettingsToggleEl = document.getElementById('advancedSettingsToggle');
 const autoResizeToggleEl = document.getElementById('autoResizeWindowToggle');
 const defaultPortfolioSelectEl = document.getElementById('defaultPortfolioSelect');
 const dynamicLogicSelectEl = document.getElementById('dynamicLogicSelect');
@@ -1674,6 +1676,7 @@ function openSettings() {
     enableAiToggleEl.checked = enableAi;
     keepMonitoringOnCloseToggleEl.checked = keepMonitoringOnClose;
     keepRefreshOnCloseToggleEl.checked = keepRefreshOnClose;
+    setAdvancedSettingsOpen(false); // 每次打开都收起高级项，只看常用设置
     settingsOverlayEl.style.display = 'flex';
 }
 
@@ -1762,6 +1765,13 @@ function closeSettings() {
     settingsOverlayEl.style.display = 'none';
 }
 
+// 高级设置展开/收起：只切 #settingsModel 的 class（DOM 常驻，各控件的回填与 change
+// 绑定照旧生效）。每次打开设置都回到收起态——面板默认只展示最常用的几项。
+function setAdvancedSettingsOpen(open) {
+    settingsModelEl.classList.toggle('advanced-collapsed', !open);
+    advancedSettingsToggleEl.textContent = open ? '收起高级设置 ▴' : '高级设置 ▾';
+}
+
 // 请求插件弹窗按当前活动股票数量调整高度
 function requestResizePopup() {
     if (!autoResizeWindow) return;
@@ -1835,6 +1845,10 @@ keyPointsOverlayEl.addEventListener('click', (e) => {
 // 全局设置事件绑定
 openSettingsBtnEl.addEventListener('click', openSettings);
 closeSettingsBtnEl.addEventListener('click', closeSettings);
+// 「高级设置」标题：点击在展开/收起间切换（当前折叠态 → 展开）
+advancedSettingsToggleEl.addEventListener('click', () => {
+    setAdvancedSettingsOpen(settingsModelEl.classList.contains('advanced-collapsed'));
+});
 settingsOverlayEl.addEventListener('click', (e) => {
     if (e.target === settingsOverlayEl) closeSettings();
 });

@@ -1859,6 +1859,29 @@ button:disabled {
   line-height: 1.5;
 }
 
+/* 全局设置分两段：最常用的项常驻，其余（cron / 后台行为 / 功能入口开关）默认折叠。
+   .advanced-collapsed 由 popup.js: setAdvancedSettingsOpen 切换，只切 class、DOM 常驻 */
+#settingsModel.advanced-collapsed .advanced-item {
+  display: none;
+}
+
+.settings-advanced-toggle {
+  margin-top: 16px;
+  padding-top: 10px;
+  border-top: 1px solid #eee;
+}
+
+.settings-advanced-toggle .toggle-label {
+  display: inline-block;
+  cursor: pointer;
+  font-size: 13px;
+  color: #666;
+}
+
+.settings-advanced-toggle .toggle-label:hover {
+  color: #333;
+}
+
 /* 全局设置里的组合下拉框 */
 .settings-select {
   width: 100%;

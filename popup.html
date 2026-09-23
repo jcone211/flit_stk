@@ -173,7 +173,7 @@
 
     <!-- 全局设置弹窗 -->
     <div class="overlay" id="settingsOverlay" style="display:none">
-        <div class="settings-model">
+        <div class="settings-model" id="settingsModel">
             <div class="close-btn" id="closeSettingsBtn" title="关闭">×</div>
             <h4>全局设置</h4>
             <!-- 顶部：数据获取方式 -->
@@ -197,13 +197,6 @@
                     <a class="api-key-link" href="https://www.shizixi.com/" target="_blank" rel="noopener"
                         title="去小石大数据获取 API Key">↗</a>
                 </div>
-            </div>
-            <!-- 定时全量刷新 -->
-            <div class="settings-item">
-                <span class="toggle-label">定时全量刷新（cron，最多 3 个）</span>
-                <div id="cronJobList" class="cron-job-list"></div>
-                <button type="button" id="addCronJobBtn" class="settings-btn">+ 添加定时任务</button>
-                <p class="settings-desc">默认开盘日每3分钟全量刷新一次（09:15-11:30、13:00-15:00），可自行编写 cron 或与 AI 对话直接修改</p>
             </div>
             <!-- 默认组合 -->
             <div class="settings-item">
@@ -241,57 +234,71 @@
                 </label>
                 <p class="settings-desc">取消勾选后，首页工具栏将不再显示 AI 分析入口</p>
             </div>
+            <!-- 高级设置：默认折叠，只展示最常用的设置项；点标题展开。
+                 仅切 #settingsModel 的 class，DOM 必须常驻——popup.js 启动即 getElementById
+                 取引用并在 openSettings 里回填、绑定 change，删节点会静默失效 -->
+            <div class="settings-item settings-advanced-toggle">
+                <span class="toggle-label" id="advancedSettingsToggle"
+                    title="定时全量刷新、后台行为、功能入口开关等">高级设置 ▾</span>
+            </div>
+            <!-- 定时全量刷新 -->
+            <div class="settings-item advanced-item">
+                <span class="toggle-label">定时全量刷新（cron，最多 3 个）</span>
+                <div id="cronJobList" class="cron-job-list"></div>
+                <button type="button" id="addCronJobBtn" class="settings-btn">+ 添加定时任务</button>
+                <p class="settings-desc">默认开盘日每3分钟全量刷新一次（09:15-11:30、13:00-15:00），可自行编写 cron 或与 AI 对话直接修改</p>
+            </div>
             <!-- 股票名称自动解析：开启后按本地代码表直取行情，不再逐页抓取 -->
-            <div class="settings-item">
+            <div class="settings-item advanced-item">
                 <label class="settings-toggle">
                     <input type="checkbox" id="autoResolveStockToggle" checked>
                     <span class="toggle-label">输入名称时自动匹配股票代码</span>
                 </label>
                 <p class="settings-desc">开启后「一键/添加股票/AI 添加」按本地代码表把名称解析成 6 位代码并直接取行情，不再逐个打开网页抓取（失败自动回退原方式）；快速打开按名称直开个股页。ETF/基金请用 6 位代码或雪球网址</p>
             </div>
-            <div class="settings-item">
+            <div class="settings-item advanced-item">
                 <label class="settings-toggle">
                     <input type="checkbox" id="enableQuickImportToggle" checked>
                     <span class="toggle-label">启用一键导入功能</span>
                 </label>
                 <p class="settings-desc">快速打开输入框有内容时显示「一键导入」按钮</p>
             </div>
-            <div class="settings-item">
+            <div class="settings-item advanced-item">
                 <label class="settings-toggle">
                     <input type="checkbox" id="showKeyPointsToggle" checked>
                     <span class="toggle-label">启用要点管理功能</span>
                 </label>
                 <p class="settings-desc">取消勾选后，首页工具栏将不再显示要点管理入口</p>
             </div>
-            <div class="settings-item">
+            <div class="settings-item advanced-item">
                 <label class="settings-toggle">
                     <input type="checkbox" id="enableTrashToggle" checked>
                     <span class="toggle-label">启用垃圾池功能</span>
                 </label>
                 <p class="settings-desc">关闭后隐藏「垃圾池」视图与「加入垃圾池」入口，已入垃圾池的股票暂不可见</p>
             </div>
-            <div class="settings-item">
+            <div class="settings-item advanced-item">
                 <label class="settings-toggle">
                     <input type="checkbox" id="keepMonitoringOnCloseToggle">
                     <span class="toggle-label">关闭插件后继续监控</span>
                 </label>
                 <p class="settings-desc">开始监控不随插件关闭停止</p>
             </div>
-            <div class="settings-item">
+            <div class="settings-item advanced-item">
                 <label class="settings-toggle">
                     <input type="checkbox" id="keepRefreshOnCloseToggle">
                     <span class="toggle-label">关闭插件后继续全量刷新</span>
                 </label>
                 <p class="settings-desc">定时全量刷新不随插件关闭停止</p>
             </div>
-            <div class="settings-item">
+            <div class="settings-item advanced-item">
                 <label class="settings-toggle">
                     <input type="checkbox" id="autoResizeWindowToggle">
                     <span class="toggle-label">切换组合时，浏览器窗口自动伸缩</span>
                 </label>
                 <p class="settings-desc">开启后，切换组合时插件弹窗将根据股票数量自动调整高度</p>
             </div>
-            <div class="settings-item">
+            <div class="settings-item advanced-item">
                 <label class="settings-toggle">
                     <input type="checkbox" id="quickImportInStockWindowToggle" checked>
                     <span class="toggle-label">快速打开和一键导入功能，页面打开逻辑不同</span>

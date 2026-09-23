@@ -1,6 +1,6 @@
 import {
     getDateTime, normalizeUrl, stripSign, normalizeCompareUrl, numOrNull, cleanStockName,
-    calcImportPercent, effectiveStockUrl, etfPrefixForCode
+    calcImportPercent, effectiveStockUrl, etfPrefixForCode, entryStockUrlFor
 } from '../shared/utils.js';
 import { validateCronExpr } from '../shared/cron.js';
 import { resolveStockName, resolveStockNames, stockPageUrl, resolveErrorText, codesOf } from '../shared/stock_lookup.js';
@@ -1040,13 +1040,15 @@ function splitQuickOpenInput() {
 }
 
 // 按快速打开逻辑构造单个搜索项的跳转地址：
-// ETF（159/51/58）问财不支持，直接开雪球个股页；其余跟随选择器（xq1 雪球搜索，否则问财搜索）
-function buildQuickOpenUrl(item) {
+// ETF（159/51/58）问财不支持，直接开雪球个股页；其余跟随选择器（xq1 雪球搜索，否则问财搜索）。
+// sn 缺省用当前组合的选择器；一键导入到别的组合时传该组合自己的选择器（各组合选择器独立）
+function buildQuickOpenUrl(item, sn) {
+    const sel = sn || selectorName;
     const etfPrefix = etfPrefixForCode(item);
     if (etfPrefix) {
         return `https://xueqiu.com/S/${etfPrefix}${item}`;
     }
-    return selectorName === 'xq1'
+    return sel === 'xq1'
         ? `https://xueqiu.com/k?q=${encodeURIComponent(item)}`
         : `https://www.iwencai.com/screener/result?w=${encodeURIComponent(item)}&querytype=stock`;
 }
@@ -1213,10 +1215,12 @@ function executeQuickImport(items, name) {
 // 页面方式导入（原有一键导入逻辑）：写入条目后逐个打开搜索页抓取
 function executeQuickImportByPage(toImport, name, target) {
     const now = Date.now();
+    // 目标组合自己的选择器：条目地址与打开地址都按它生成（各组合选择器独立）
+    const sn = (portfolios[name] && portfolios[name].selectorName) || selectorName || 'wc1';
     let added = 0;
     let skipped = 0;
     toImport.forEach(item => {
-        const url = normalizeUrl(buildQuickOpenUrl(item)); // 问财/雪球搜索页地址作为股票标识
+        const url = normalizeUrl(buildQuickOpenUrl(item, sn)); // 问财/雪球搜索页地址作为股票标识
         if (!url) return;
         if (target.some(s => s.name === item)) { skipped++; return; } // 组合内同名跳过
         target.push(newStockEntry({ url, name: item, createdAt: now })); // 名称先取输入词，抓取后回填
@@ -1236,7 +1240,7 @@ function executeQuickImportByPage(toImport, name, target) {
         // 页面打开方式：默认在最小化专属窗口（refreshOne 自带抓取放开窗口）；
         // 关闭「页面打开逻辑不同」后统一在普通 Chrome 页面打开（需放开抓取窗口）
         const openUrl = (item) => {
-            const url = buildQuickOpenUrl(item);
+            const url = buildQuickOpenUrl(item, sn);
             if (quickImportInStockWindow) {
                 chrome.runtime.sendMessage({ action: 'refreshOne', url });
             } else {
@@ -1256,17 +1260,20 @@ function executeQuickImportByPage(toImport, name, target) {
     });
 }
 
-// 自动模式导入：条目按解析结果写入（带代码/前缀/个股页地址），随后由 background 直取行情
-// 落地；未取到行情的代码才回退打开个股页抓取（保证条目最终有数据）。
+// 自动模式导入：条目按解析结果写入（带代码/前缀 + 按目标组合选择器生成的地址），随后由
+// background 直取行情落地；未取到行情的代码才回退打开页面抓取（保证条目最终有数据）。
 // 走到这里说明整批解析成功（items 与 toImport 一一对应）；重复项按名称/代码跳过。
 async function executeQuickImportAuto(items, name, target) {
+    // 目标组合自己的选择器：条目的存储 URL 按它生成（wc1 → 问财搜索页 / xq1 → 雪球个股页），
+    // 与刷新生效地址（effectiveStockUrl）同口径，避免「选择器=问财却打开雪球」
+    const sn = (portfolios[name] && portfolios[name].selectorName) || selectorName || 'wc1';
     let added = 0;
     let skipped = 0;
     const addedItems = [];
     items.forEach((item) => {
         if ((item.name && target.some(s => s.name === item.name))
             || (item.code && target.some(s => s.code === item.code))) { skipped++; return; }
-        const url = normalizeUrl(stockPageUrl(item));
+        const url = normalizeUrl(entryStockUrlFor(item, sn, stockPageUrl(item)));
         if (!url) { skipped++; return; }
         target.push(newStockEntry({ url, name: item.name, code: item.code, prefix: item.prefix }));
         addedItems.push(item);
@@ -1414,7 +1421,7 @@ async function handleAddByName(raw) {
     const r = await resolveStockName(input);
     if (r.degrade) { alert('本地股票代码表不可用，请改用「按网址」方式添加'); return; }
     if (!r.ok) { alert(resolveErrorText(r)); return; }
-    const url = normalizeUrl(stockPageUrl(r));
+    const url = normalizeUrl(entryStockUrlFor(r, (portfolios[activePortfolio] && portfolios[activePortfolio].selectorName) || selectorName || 'wc1', stockPageUrl(r)));
     if (!url) { alert('未能生成个股页地址，请改用「按网址」方式添加'); return; }
     if (stockList.some(s => (r.code && s.code === r.code) || s.url === url)) {
         alert(`「${r.name || r.code}」已在当前组合中`);

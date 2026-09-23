@@ -4,7 +4,7 @@
 // 写入一律「读 storage 最新 → 合并 → 写回」，不依赖内存快照，避免覆盖外部（AI 窗口/popup）写入。
 
 import {
-    normalizeCompareUrl, normalizeUrl, effectiveStockUrl, selectorKeyForUrl, cleanStockName,
+    normalizeCompareUrl, normalizeUrl, effectiveStockUrl, selectorKeyForUrl, cleanStockName, nameMatchesSearchWord,
 } from '../shared/utils.js';
 import { applyThresholds } from '../popup/notifications.js';
 
@@ -111,12 +111,14 @@ export async function landCapturedDocument(documentData) {
     const strippedMsg = normalizeCompareUrl(messageUrl);
     const msgWord = searchWordOf(messageUrl);
     // 搜索词兜底：精确匹配失效时按「消息 URL 的搜索参数与股票名称一致」匹配；
+    // 名称比较走 nameMatchesSearchWord（去 XD/XR/DR 基础名 + 截短包含兜底）——除权除息日
+    // 条目名会变成「XD滨化股」而地址里的搜索词是「滨化股份」，严格相等会整天匹配不上；
     // 地址同步（搜索页跳转后的实际详情页 URL）在解析成功后才生效，避免解析失败污染数据
     const redirectSync = [];
     const matchStock = (s, sn) => {
         if (normalizeCompareUrl(s.url) === strippedMsg
             || normalizeCompareUrl(effectiveStockUrl(s, sn)) === strippedMsg) return true;
-        if (msgWord && s.name === msgWord) {
+        if (msgWord && nameMatchesSearchWord(s.name, msgWord)) {
             redirectSync.push([s, strippedMsg]);
             return true;
         }

@@ -22,6 +22,7 @@ import fsSync from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { startMockBridge, SCHEMA_FULL, dailySource, minusWeekdays } from './mock-bridge.mjs';
+import { effectiveStockUrl, entryStockUrlFor, iwencaiSearchUrl, baseStockName, nameMatchesSearchWord } from '../../shared/utils.js';
 
 const REPO = path.resolve(import.meta.dirname, '..', '..');
 const ARGS = process.argv.slice(2);
@@ -1119,6 +1120,44 @@ await run('H7 find_stock：一次跨全部组合查股票/ETF（替代逐个 get
 // 恢复 store（不影响后续用例）
 store.local.portfolios = savedPortfolios;
 store.local.stockList = savedStockList;
+
+// ---------------------------------------------------------------- H8 生效地址 / 条目地址按选择器（选择器说了算）
+await run('H8 effectiveStockUrl / entryStockUrlFor：选择器决定刷新站点（wc1→问财，xq1→雪球，ETF 恒雪球）', async () => {
+    const hua = { name: '湖南黄金', code: '002155', prefix: 'SZ', url: 'https://xueqiu.com/S/SZ002155' };
+    check('H8', 'wc1 普通股票 → 问财搜索页（存储 URL 是雪球个股页也要换算，否则「选择器=问财却开雪球」）',
+        effectiveStockUrl(hua, 'wc1') === iwencaiSearchUrl('湖南黄金'), effectiveStockUrl(hua, 'wc1'));
+    check('H8', 'xq1 普通股票 → 雪球个股页', effectiveStockUrl(hua, 'xq1') === 'https://xueqiu.com/S/SZ002155', effectiveStockUrl(hua, 'xq1'));
+    const etf = { name: '科创50ETF华夏', code: '588000', prefix: 'SH', url: 'https://xueqiu.com/S/SH588000' };
+    check('H8', 'ETF 无视选择器恒雪球个股页（问财不支持 ETF）',
+        effectiveStockUrl(etf, 'wc1') === 'https://xueqiu.com/S/SH588000' && effectiveStockUrl(etf, 'xq1') === 'https://xueqiu.com/S/SH588000',
+        effectiveStockUrl(etf, 'wc1'));
+    // 名称带除权前缀（行情接口把当日除权股存成「XD滨化股」，600143 之外的实案：601678 当日
+    // 名称被源接口截短，剥前缀只能得到「滨化股」而非「滨化股份」）：问财关键词与落库搜索词
+    // 兜底匹配必须同口径（landing.js 也按 baseStockName 归一），否则除权日当天匹配不上
+    const xd = { name: 'XD滨化股', code: '601678', prefix: 'SH', url: 'https://xueqiu.com/S/SH601678' };
+    check('H8', 'wc1 去掉 XD/XR/DR 前缀拼问财关键词', effectiveStockUrl(xd, 'wc1') === iwencaiSearchUrl(baseStockName('XD滨化股')), effectiveStockUrl(xd, 'wc1'));
+    check('H8', 'baseStockName 归一：XD 前缀不影响与基础名一致的判定',
+        baseStockName('XD滨化股') === baseStockName('滨化股') && baseStockName('滨化股份') !== baseStockName('滨化股'),
+        baseStockName('XD滨化股'));
+    // 搜索词兜底匹配（landing.js 用）：源端名称被截短时靠包含关系兜底；短词（<3 字）不参与兜底
+    check('H8', 'nameMatchesSearchWord：XD + 截短名「XD滨化股」能匹配搜索词「滨化股份」',
+        nameMatchesSearchWord('XD滨化股', '滨化股份') === true, nameMatchesSearchWord('XD滨化股', '滨化股份'));
+    check('H8', 'nameMatchesSearchWord：无关名不误配、2 字短词不参与包含兜底',
+        nameMatchesSearchWord('贵州茅台', '中国平安') === false && nameMatchesSearchWord('平安银行', '平安') === false,
+        [nameMatchesSearchWord('贵州茅台', '中国平安'), nameMatchesSearchWord('平安银行', '平安')].join(','));
+    // 换算不出的三类一律回退存储 URL：裸网址条目、港股（问财结果页解析不支持）、api 选择器
+    const raw = { name: '', code: '', prefix: '', url: 'https://www.iwencai.com/screener/result?w=%E6%96%B0%E8%82%A1&querytype=stock' };
+    check('H8', '无名称无代码的裸网址条目回退存储 URL', effectiveStockUrl(raw, 'wc1') === raw.url, effectiveStockUrl(raw, 'wc1'));
+    const hk = { name: '腾讯控股', code: '00700', prefix: 'HK', url: 'https://xueqiu.com/S/00700' };
+    check('H8', '港股不改写为问财页', effectiveStockUrl(hk, 'wc1') === hk.url, effectiveStockUrl(hk, 'wc1'));
+    const bank = { name: '工商银行', code: '601398', prefix: 'SH', url: 'https://xueqiu.com/S/SH601398' };
+    check('H8', 'api 选择器不打开页面（回退存储 URL）', effectiveStockUrl(bank, 'api') === bank.url, effectiveStockUrl(bank, 'api'));
+    // 新增条目写入的地址必须与生效地址同口径（两层对齐），否则刷新站点仍会随选择器漂移
+    const entryWc1 = entryStockUrlFor({ name: '湖南黄金', code: '002155', prefix: 'SZ' }, 'wc1', 'https://xueqiu.com/S/SZ002155');
+    check('H8', 'entryStockUrlFor(wc1) 与生效地址一致（= 问财页）', entryWc1 === effectiveStockUrl(hua, 'wc1'), entryWc1);
+    const entryXq1 = entryStockUrlFor({ name: '湖南黄金', code: '002155', prefix: 'SZ' }, 'xq1', '');
+    check('H8', 'entryStockUrlFor(xq1) = 雪球个股页', entryXq1 === 'https://xueqiu.com/S/SZ002155', entryXq1);
+});
 
 
 // 端到端：拿真工具返回（桥接关闭、>7 天）跑一遍 guard 判定，复现 debug.txt 当时被误杀的那一轮

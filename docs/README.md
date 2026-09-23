@@ -27,7 +27,7 @@
 
 - `verify-free-first.mjs` —— AI 取数链路全量回归（`--offline-cases` / `--only=xxx` / `--bridge=real`）
 - `verify-stock-lookup.mjs` —— 股票名称/代码 → 标的解析口径（直接读真实的 `assets/stock_basic_cache.json`，38 项断言，0 外呼）
-- `verify-ai-auto-add.mjs` —— AI「按名称添加股票」自动模式真实路径（A1~A10，50 项断言，0 外呼；把扩展内资源映射成仓库文件，补 `verify-free-first` 桩打不开资源的那一段）
+- `verify-ai-auto-add.mjs` —— AI「按名称添加股票」自动模式真实路径（A1~A11，55 项断言，0 外呼；把扩展内资源映射成仓库文件，补 `verify-free-first` 桩打不开资源的那一段；A11 断言条目地址按目标组合自己的选择器生成）
 - `verify-memory.mjs` / `verify-quickimport-race.mjs` / `verify-quickopen-landing.mjs` —— 功能专项验证
 - `mock-bridge.mjs` —— 假 Agent 桥接（verify-free-first 依赖，不打真实接口）
 - `read-debug.mjs` —— DEBUG 日志读取器（默认读 `docs/archive/debug.txt`）

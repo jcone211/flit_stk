@@ -226,9 +226,11 @@ function isSupportedStockHost(hostname) {
         || hostname === 'iwencai.com' || hostname.endsWith('.iwencai.com');
 }
 
-// 构造搜索地址：普通股票→问财搜索页；ETF 代码（159/51/58 开头 6 位）→雪球个股页（问财不支持 ETF）；
-// 传入完整网址时仅放行雪球/问财（截掉 sign 后原样保留，避免再被包进问财搜索），其余网址返回 null
-export function stockSearchUrl(item) {
+// 构造搜索地址：普通股票→按选择器（wc1 问财搜索页 / xq1 雪球搜索页）；
+// ETF 代码（159/51/58 开头 6 位）→雪球个股页（问财不支持 ETF，不论选择器）；
+// 传入完整网址时仅放行雪球/问财（截掉 sign 后原样保留，避免再被包进问财搜索），其余网址返回 null；
+// selectorName 缺省按 wc1（问财）——与插件默认选择器一致
+export function stockSearchUrl(item, selectorName) {
     const raw = String(item || '').trim();
     if (!raw) return null;
     if (/^https?:\/\//i.test(raw)) {
@@ -240,6 +242,9 @@ export function stockSearchUrl(item) {
     if (/^(159\d{3}|5[18]\d{4})$/.test(raw)) {
         const p = raw.startsWith('159') ? 'SZ' : 'SH';
         return `https://xueqiu.com/S/${p}${raw}`;
+    }
+    if (selectorName === 'xq1') {
+        return normalizeUrl(`https://xueqiu.com/k?q=${encodeURIComponent(raw)}`);
     }
     return normalizeUrl(`https://www.iwencai.com/screener/result?w=${encodeURIComponent(raw)}&querytype=stock`);
 }

@@ -23,7 +23,7 @@ import { getMarketDaily as adataGetMarketDaily, getMarketEtfDaily as adataGetMar
 import { batchQuotes as xiaoshiBatchQuotes } from '../../js/xiaoshi_realtime_quote.js';
 import { batchQuotes as adataBatchQuotes, listMarketFull as adataListMarketFull } from '../../js/adata_realtime_quote.js';
 import { parseCronExpr, nextTradingCronTimes } from '../../shared/cron.js';
-import { cleanStockName, etfPrefixForCode } from '../../shared/utils.js';
+import { cleanStockName, etfPrefixForCode, entryStockUrlFor, normalizeUrl } from '../../shared/utils.js';
 import { resolveStockName, stockPageUrl, resolveErrorText, codesOf } from '../../shared/stock_lookup.js';
 import { bridgeRequest, bridgeHealth } from './bridge_client.js';
 
@@ -93,7 +93,7 @@ export const TOOL_DEFS = [
     { type: 'function', function: { name: 'create_event', description: '创建一条预测事件。事件内容(content)只填股票名称（如「百通能源」），禁止把分析/预测/操作文字写入 content；判断逻辑、时间与操作应体现为关联要点。关联要点(key_point_text)须优先从 get_key_points 已有的要点中选择（拿不准先用 get_key_points 查看现有要点再对应关联，不要臆造不存在的要点内容），现有要点与意图不完全匹配时才新建要点或留空。time 为 YYYY-MM-DD，缺省今天。若存在超过一周仍未归档的事件会一并提醒用户补充', parameters: { type: 'object', properties: { key_point_text: { type: 'string', description: '关联现有业已存在或本次新建的要点内容，可为空' }, content: { type: 'string', description: '事件内容，仅填股票名称' }, time: { type: 'string', description: '事件日期 YYYY-MM-DD' } }, required: ['content'] } } },
     { type: 'function', function: { name: 'update_event', description: '修改事件（按 id；已归档事件不可修改），可改关联要点/内容/日期/status（pending 待预测 / accurate 准确 / wrong 误判）。不能设置归档——归档只发生在手动点击或事件超 7 天且状态为准确/误判时自动进行，若刚改状态的事件因此被自动归档，结果会说明。当存在多条内容相同的事件时，默认修改其中 time 最早（最久远）的那条 id，并在回复中简略提醒用户还有其它日期存在相同内容事件', parameters: { type: 'object', properties: { id: { type: 'string', description: '事件 id（用 get_events 查询）' }, key_point_text: { type: 'string', description: '新的关联要点' }, content: { type: 'string', description: '新的事件内容' }, time: { type: 'string', description: '新的事件日期 YYYY-MM-DD' }, status: { type: 'string', description: '新状态：pending 待预测 / accurate 准确 / wrong 误判' } }, required: ['id'] } } },
     { type: 'function', function: { name: 'delete_event', description: '删除一条事件（按 id）', parameters: { type: 'object', properties: { id: { type: 'string', description: '事件 id（用 get_events 查询）' } }, required: ['id'] } } },
-    { type: 'function', function: { name: 'add_stock_to_portfolio', description: '按名称或雪球网址向指定组合批量添加股票（组合缺省「持仓」）。普通股票自动生成问财搜索页；传 159/51/58 开头 6 位 ETF 代码会生成雪球个股页；直接传雪球个股网址（如 https://xueqiu.com/S/SH510300）会原样保存并从雪球抓取。ETF 名称（含「ETF」字样）禁止按名称导入：请改用 6 位 ETF 代码（如 588000、510300）或雪球个股网址（先在 https://xueqiu.com 搜索该 ETF 并复制个股网址）。仅接受雪球/问财网址，其他网址会被拒绝。一次调用可添加多只。默认自动模式：普通股票名称按本地代码表解析成 6 位代码后直接取实时行情落地，不打开任何页面（解析不到的项不导入，返回 unresolved 说明原因，可改用代码/网址重试）', parameters: { type: 'object', properties: { names: { type: 'array', items: { type: 'string' }, description: '股票名称、ETF 代码或雪球个股网址数组，如 ["贵州茅台", "https://xueqiu.com/S/SH510300"]；ETF 名称请勿传入' }, portfolio: { type: 'string', description: '目标组合名，缺省「持仓」' }, refresh_via_page: { type: 'boolean', description: '可选：true 时强制沿用原有「逐个打开页面抓取」方式（默认自动模式按本地代码表解析后直取行情，不打开页面）' }, import_price: { anyOf: [{ type: 'number', description: '所有股票共用的买入价/初始价' }, { type: 'array', items: { type: 'number' }, description: '与 names 中非 ETF 项一一对应的逐股买入价（names 含 ETF 名称会被自动剔除，不参与导入），长度不足时缺失的股票不设价' }], description: '买入价/成交价/成本价（用户提供的初始价）：单只传数字；多只各自价格不同时传数组，按 names 中实际导入（非 ETF）的顺序一一对应。设置后作为该股票初始价固定写入，后续行情刷新抓取不会覆盖它；未提供时初始价留空，首次抓到行情才自动用最新价回填' } }, required: ['names'] } } },
+    { type: 'function', function: { name: 'add_stock_to_portfolio', description: '按名称或雪球网址向指定组合批量添加股票（组合缺省「持仓」）。普通股票生成的页面地址跟随目标组合自己的选择器：问财（wc1）→问财搜索页、雪球（xq1）→雪球个股页；传 159/51/58 开头 6 位 ETF 代码一律生成雪球个股页；直接传雪球个股网址（如 https://xueqiu.com/S/SH510300）会原样保存并从雪球抓取。ETF 名称（含「ETF」字样）禁止按名称导入：请改用 6 位 ETF 代码（如 588000、510300）或雪球个股网址（先在 https://xueqiu.com 搜索该 ETF 并复制个股网址）。仅接受雪球/问财网址，其他网址会被拒绝。一次调用可添加多只。默认自动模式：普通股票名称按本地代码表解析成 6 位代码后直接取实时行情落地，不打开任何页面（解析不到的项不导入，返回 unresolved 说明原因，可改用代码/网址重试）', parameters: { type: 'object', properties: { names: { type: 'array', items: { type: 'string' }, description: '股票名称、ETF 代码或雪球个股网址数组，如 ["贵州茅台", "https://xueqiu.com/S/SH510300"]；ETF 名称请勿传入' }, portfolio: { type: 'string', description: '目标组合名，缺省「持仓」' }, refresh_via_page: { type: 'boolean', description: '可选：true 时强制沿用原有「逐个打开页面抓取」方式（默认自动模式按本地代码表解析后直取行情，不打开页面）' }, import_price: { anyOf: [{ type: 'number', description: '所有股票共用的买入价/初始价' }, { type: 'array', items: { type: 'number' }, description: '与 names 中非 ETF 项一一对应的逐股买入价（names 含 ETF 名称会被自动剔除，不参与导入），长度不足时缺失的股票不设价' }], description: '买入价/成交价/成本价（用户提供的初始价）：单只传数字；多只各自价格不同时传数组，按 names 中实际导入（非 ETF）的顺序一一对应。设置后作为该股票初始价固定写入，后续行情刷新抓取不会覆盖它；未提供时初始价留空，首次抓到行情才自动用最新价回填' } }, required: ['names'] } } },
     { type: 'function', function: { name: 'move_stock_to_combo', description: '把股票从来源组合移动到目标组合（按名称匹配、忽略首尾空格；来源缺省当前活动组合，目标缺省「观察」）。用于记录「卖出」等调仓：卖出时应传 source_portfolio 为实际持有该股的组合（通常「持仓」）；若目标组合已存在同名股票，则仅从来源组合删除、不重复添加', parameters: { type: 'object', properties: { name: { type: 'string', description: '股票名称' }, target_portfolio: { type: 'string', description: '目标组合名，缺省「观察」' }, source_portfolio: { type: 'string', description: '来源组合名（卖出的实际持仓组合），缺省当前活动组合' } }, required: ['name'] } } },
     { type: 'function', function: { name: 'get_current_view', description: '读取当前列表视图（股票列表或垃圾池）', parameters: { type: 'object', properties: {}, required: [] } } },
     { type: 'function', function: { name: 'remove_stock', description: '从指定组合中删除股票（按名称匹配、忽略首尾空格；portfolio 缺省当前活动组合）。真删除不可恢复，若只想挪走请用 move_stock_to_combo 移到其他组合，或 move_stock_to_trash 进垃圾池', parameters: { type: 'object', properties: { name: { type: 'string', description: '股票名称' }, portfolio: { type: 'string', description: '目标组合名，缺省当前活动组合' } }, required: ['name'] } } },
@@ -501,6 +501,9 @@ export const toolExecutors = {
         if (!target) return { error: `组合「${portfolio}」不存在`, available: Object.keys(combos) };
         const mirror = (combos[activePortfolio] && combos[activePortfolio].stockList) || stockList || [];
         const list = target.stockList || (target.stockList = []);
+        // 目标组合自己的选择器：条目的存储 URL 按它生成（wc1 → 问财搜索页 / xq1 → 雪球个股页），
+        // 与刷新时的生效地址（effectiveStockUrl）同口径，避免「选择器=问财却打开雪球」
+        const targetSelector = target.selectorName || 'wc1';
         const added = [];
         const alreadyPresent = [];
         const skipped = [];
@@ -516,7 +519,7 @@ export const toolExecutors = {
         for (let i = 0; i < pending.length; i++) {
             const name = pending[i];
             const importPrice = priceArgFor(rawPrice, i);
-            let url = stockSearchUrl(name); // 网址/6 位代码/名称 → 地址（网址会做站点校验）
+            let url = stockSearchUrl(name, targetSelector); // 网址/6 位代码/名称 → 地址（网址会做站点校验）
             let code = '';
             let prefix = '';
             let stockName = cleanStockName(name);
@@ -525,10 +528,12 @@ export const toolExecutors = {
                 const r = await resolveStockName(name);
                 const pageUrl = r.ok ? stockPageUrl(r) : '';
                 if (r.ok && pageUrl) {
-                    url = pageUrl;
                     code = r.code || '';
                     prefix = r.prefix || '';
                     stockName = r.name || stockName;
+                    // 存储 URL 按目标组合选择器生成（wc1 → 问财搜索页 / xq1 → 雪球个股页），
+                    // 与 effectiveStockUrl 同口径；ETF 恒雪球；换算不出时回退雪球个股页
+                    url = normalizeUrl(entryStockUrlFor({ name: stockName, code, prefix }, targetSelector, pageUrl)) || pageUrl;
                 } else if (!r.ok && !r.degrade) {
                     // 名称有误/多候选/ETF 名称：不导入，交由模型核对或改用代码/网址
                     unresolved.push({ name, reason: resolveErrorText(r) });

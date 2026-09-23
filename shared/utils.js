@@ -96,20 +96,86 @@ export function etfPrefixForCode(code) {
     return '';
 }
 
-// 按选择器决定生效刷新地址：
-// ETF（159/51/58）不论选择器恒刷雪球个股页；
+// 问财搜索页地址（wc1 选择器）：关键词为空返回 ''，由调用方回退存储 URL
+export function iwencaiSearchUrl(keyword) {
+    const k = String(keyword == null ? '' : keyword).trim();
+    if (!k) return '';
+    return `https://www.iwencai.com/screener/result?w=${encodeURIComponent(k)}&querytype=stock`;
+}
+
+// 基础股票名称：去掉交易所除权除息临时前缀 XD/XR/DR。
+// 行情接口在除权除息当日会把名称存成「XD滨化股」这类形态（且可能已截短，无法靠还原得到
+// 「滨化股份」），与用户输入/历史地址里的基础名不一致。问财搜索关键词与落库的搜索词
+// 兜底匹配都按基础名归一，避免除权日当天搜不准、匹配不上
+export function baseStockName(name) {
+    return cleanStockName(name).replace(/^(?:XD|XR|DR)+/i, '');
+}
+
+// 搜索词兜底匹配的名字比较（background/landing.js 用）：
+// 基础名相等即命中；不等时按包含关系兜底——数据源的名称列会截短，debug.txt 实案里
+// 601678 被存成「XD滨化股」（本地代码表是「滨化股份」），严格比较整天失配；
+// 但「滨化股」是「滨化股份」的子串。限制较短一方至少 3 个字，避免「平安」这类短词
+// 把无关股票也匹进来（该路径仅在地址精确匹配失败后才走）
+export function nameMatchesSearchWord(name, word) {
+    const a = baseStockName(name);
+    const b = baseStockName(word);
+    if (!a || !b) return false;
+    if (a === b) return true;
+    const short = a.length <= b.length ? a : b;
+    if (short.length < 3) return false;
+    return a.includes(b) || b.includes(a);
+}
+
+// 问财搜索关键词：名称优先——问财页面跳转/规整后，落库靠「消息 URL 的搜索词 = 条目名称」
+// 兜底匹配（background/landing.js searchWordOf），关键词须与条目名称同口径；
+// 名称缺失时用 6 位代码（问财也认代码）
+function iwencaiKeywordOf(stock) {
+    const name = baseStockName(stock.name);
+    if (name) return name;
+    const code = String(stock.code || '').trim();
+    return /^\d{6}$/.test(code) ? code : '';
+}
+
+// 是否「问财可查」的 A 股条目：港股（HK）不改写（问财结果页解析不支持港股），
+// 无名称无代码的裸网址条目也无从改写，二者一律回退存储 URL
+function isIwencaiQueryable(stock) {
+    const prefix = String(stock.prefix || '').toUpperCase();
+    if (prefix && prefix !== 'SH' && prefix !== 'SZ' && prefix !== 'BJ') return false;
+    return !!iwencaiKeywordOf(stock);
+}
+
+// 按选择器决定生效刷新地址（「选择器说了算」）：
+// ETF（159/51/58）不论选择器恒刷雪球个股页（问财不支持 ETF 查询）；
 // 其余股票 xq1 且已知 prefix+code 时拼接雪球个股页（问财链接添加的也改刷雪球）；
-// 均不满足则回退存储 URL
+// wc1（问财）且为 A 股条目时拼问财搜索页——存储 URL 可能是雪球个股页（自动模式按
+// stockPageUrl 建条目），不换算就会出现「选择器=问财却打开雪球」；
+// 均不满足（api 选择器、港股、无名称无代码的裸网址条目）则回退存储 URL
 export function effectiveStockUrl(stock, selectorName) {
     if (!stock) return '';
     const etfPrefix = etfPrefixForCode(stock.code);
     if (etfPrefix) {
         return `https://xueqiu.com/S/${etfPrefix}${stock.code}`;
     }
-    if (selectorName === 'xq1' && stock.prefix && stock.code) {
-        return `https://xueqiu.com/S/${stock.prefix}${stock.code}`;
+    if (selectorName === 'xq1') {
+        return (stock.prefix && stock.code) ? `https://xueqiu.com/S/${stock.prefix}${stock.code}` : stock.url;
+    }
+    if (selectorName === 'wc1' && isIwencaiQueryable(stock)) {
+        const u = iwencaiSearchUrl(iwencaiKeywordOf(stock));
+        if (u) return u;
     }
     return stock.url;
+}
+
+// 新增/导入条目时应写入 storage 的地址：与 effectiveStockUrl 同口径，保证
+// 「存储 URL = 该组合未来的刷新目标」——两层对齐后刷新站点不会随选择器漂移；
+// 换算不出（港股/无代码网址条目）时回退 fallbackUrl（雪球个股页）。
+// item 传解析结果形状 { name, code, prefix }，selectorName 传目标组合自己的选择器
+export function entryStockUrlFor(item, selectorName, fallbackUrl) {
+    const stock = {
+        name: item && item.name, code: item && item.code, prefix: item && item.prefix,
+        url: fallbackUrl || '',
+    };
+    return effectiveStockUrl(stock, selectorName) || fallbackUrl || '';
 }
 
 // 由 url 域名映射选择器键：问财→wc1，雪球→xq1，否则 null

@@ -24,6 +24,18 @@ const searchWordOf = (url) => {
     try { return new URL(url).searchParams.get('w') || new URL(url).searchParams.get('q') || ''; }
     catch { return ''; }
 };
+// 基础名归一 / 搜索词名字匹配（shared/utils.js baseStockName + nameMatchesSearchWord 的复刻）：
+// 去交易所除权除息临时前缀 XD/XR/DR；不等时按包含关系兜底（数据源名称列会截短，较短一方至少 3 字）
+const baseStockName = (name) => String(name == null ? '' : name).replace(/\s+/g, '').replace(/^(?:XD|XR|DR)+/i, '');
+const nameMatchesSearchWord = (name, word) => {
+    const a = baseStockName(name);
+    const b = baseStockName(word);
+    if (!a || !b) return false;
+    if (a === b) return true;
+    const short = a.length <= b.length ? a : b;
+    if (short.length < 3) return false;
+    return a.includes(b) || b.includes(a);
+};
 const effectiveStockUrl = (s) => s.url;
 
 // —— 简化环境：一份组合（贵州茅台 url=A），一次 offscreen 解析计数 ——
@@ -53,7 +65,7 @@ async function land(documentData, { emitLanded, parseViaOffscreen }, effOverride
     const redirectSync = [];
     const matchStock = (s, sn) => {
         if (normalizeCompareUrl(s.url) === strippedMsg || normalizeCompareUrl(eff(s, sn)) === strippedMsg) return true;
-        if (msgWord && s.name === msgWord) { redirectSync.push([s, strippedMsg]); return true; }
+        if (msgWord && nameMatchesSearchWord(s.name, msgWord)) { redirectSync.push([s, strippedMsg]); return true; }
         return false;
     };
     const activeSn = storage.portfolios[activePortfolio].selectorName || 'wc1';
@@ -177,6 +189,32 @@ const errors = [];
     assert.equal(landedFlag, false, '解析成功应上报 DATA_LANDED');
     assert.equal(stock.currentPrice, 12.34, '命中股票价格应被更新');
     console.log('✓ 用例5：雪球 www/非 www + from 跟踪参数 → 规范化比较命中并落地');
+}
+
+// 用例 6：除权除息日条目名带 XD 前缀（行情接口把 601678 存成「XD滨化股」，且名称被源端截短，
+// 剥前缀只能得到「滨化股」而非「滨化股份」）而页面搜索词是用户当初输入的「滨化股份」——
+// 严格相等的名称比较会整天匹配不上、数据静默不落地；基础名归一 + 截短包含兜底后应命中，
+// 并把条目地址同步为实际详情页地址
+{
+    parseCount = 0;
+    let landedFlag = null;
+    const stock = {
+        url: 'https://www.iwencai.com/screener/result?w=%E6%BB%A8%E5%8C%96%E8%82%A1%E4%BB%BD&querytype=stock',
+        name: 'XD滨化股', code: '601678', prefix: 'SH', currentPrice: null, stopRunning: false,
+    };
+    portfolios.持仓.stockList[0] = stock;
+    const landedUrl = 'https://www.iwencai.com/unifiedwap/result?w=%E6%BB%A8%E5%8C%96%E8%82%A1%E4%BB%BD&querytype=stock';
+    const result = await land({ url: landedUrl, html: '<html>...</html>' }, {
+        emitLanded: (e) => { landedFlag = e; },
+        parseViaOffscreen: async () => { parseCount++; return { currentPrice: 5.95 }; },
+    });
+    assert.equal(result, true, 'XD 前缀条目应靠基础名归一命中并落地');
+    assert.equal(parseCount, 1, '命中页面应触发解析');
+    assert.equal(landedFlag, false, '解析成功应上报 DATA_LANDED');
+    assert.equal(stock.currentPrice, 5.95, '命中股票价格应被更新');
+    // 同步写入的是规范化后的地址（normalizeCompareUrl 会去掉 www.），比较时同口径
+    assert.equal(stock.url, normalizeCompareUrl(landedUrl), '命中后条目地址同步为实际详情页地址');
+    console.log('✓ 用例6：除权日「XD滨化股」条目 + 基础名搜索词「滨化股份」→ 归一后命中并落地');
 }
 
 if (errors.length) { console.error(errors); process.exit(1); }

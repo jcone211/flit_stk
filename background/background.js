@@ -432,32 +432,35 @@ function stopRefresh() {
 chrome.alarms.onAlarm.addListener((alarm) => {
     if (alarm.name === 'refreshTimer') {
         // 选择器为「调用 API 直取（不打开页面）」时，周期刷新走全局配置的 API 方式
-        // 批量获取行情，不排页面刷新 alarm；否则按页面刷新调度
-        chrome.storage.sync.get(['selectorName', 'dataSource'], ({ selectorName: sn, dataSource: ds }) => {
-            if (sn === 'api') {
-                const mode = ds || 'adata';
-                dbg('API 直取模式周期刷新:', mode);
-                if (mode === 'xiaoshi') {
-                    refreshAllByApi(batchQuotes, 'apiKey', null, true);
+        // 批量获取行情，不排页面刷新 alarm；否则按页面刷新调度。
+        // 选择器取「活动组合自己的」（与排程/全量刷新同源）；dataSource 仍是全局设置
+        readActiveScope(({ selectorName: sn }) => {
+            chrome.storage.sync.get(['dataSource'], ({ dataSource: ds }) => {
+                if (sn === 'api') {
+                    const mode = ds || 'adata';
+                    dbg('API 直取模式周期刷新:', mode);
+                    if (mode === 'xiaoshi') {
+                        refreshAllByApi(batchQuotes, 'apiKey', null, true);
+                    } else {
+                        refreshAllByApi(adataBatchQuotes, null, null, true);
+                    }
                 } else {
-                    refreshAllByApi(adataBatchQuotes, null, null, true);
+                    scheduleStockAlarms();
                 }
-            } else {
-                scheduleStockAlarms();
-            }
+            });
         });
     } else if (alarm.name.startsWith(CRON_ALARM_PREFIX)) {
         // cron 定时器到点：按最新 sync 配置处理（与股票 alarm 反查 storage 一致）
         handleCronAlarm(alarm.name.slice(CRON_ALARM_PREFIX.length));
     } else if (alarm.name.startsWith(STOCK_ALARM_PREFIX)) {
         const url = alarm.name.slice(STOCK_ALARM_PREFIX.length);
-        // 直接从 storage 读最新列表/视图/选择器，避免 service worker 冷启动时状态缺失；
-        // alarm 名里是生效地址（xq1 下可能是拼接的雪球链接），须按生效地址反查股票
-        chrome.storage.local.get(['stockList', 'currentView'], ({ stockList, currentView: view }) => {
-            chrome.storage.sync.get(['selectorName'], ({ selectorName }) => {
-                const v = view || 'list';
+        // 直接从 storage 读最新视图/活动组合作用域，避免 service worker 冷启动时状态缺失；
+        // alarm 名里是生效地址（wc1 是问财搜索页、xq1 是拼接的雪球链接），须按同一口径反查股票
+        chrome.storage.local.get(['currentView'], ({ currentView: view }) => {
+            const v = view || 'list';
+            readActiveScope(({ selectorName: sn, stockList }) => {
                 const stillActive = (stockList || []).some(item =>
-                    effectiveStockUrl(item, selectorName) === url
+                    effectiveStockUrl(item, sn) === url
                     && !item.stopRunning
                     && (v === 'trash' ? item.inTrash : !item.inTrash));
                 if (!stillActive) return;
@@ -467,16 +470,32 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     }
 });
 
+// 读「活动组合的作用域」＝该组合自己的选择器 + 它自己的股票列表。
+// 各组合选择器独立（portfolios[name].selectorName），监控排程、alarm 反查、周期刷新判定
+// 都必须用这一份：旧版读 sync 全局 selectorName，与全量刷新（refreshAllByTabs）和
+// 抓取落地匹配（landing.js）的「按组合取选择器」不同源，会让同一组合在两条路径上跑向不同站点
+function readActiveScope(cb) {
+    chrome.storage.local.get(['portfolios', 'activePortfolio', 'stockList'], (local) => {
+        const name = local.activePortfolio || '持仓';
+        const p = (local.portfolios || {})[name];
+        cb({
+            portfolio: name,
+            selectorName: (p && p.selectorName) || 'wc1',
+            stockList: (p && Array.isArray(p.stockList)) ? p.stockList : (local.stockList || []),
+        });
+    });
+}
+
 // 为当前视图下的每只股票排一个一次性 alarm，随机延迟错开反风控；
 // alarm 由浏览器进程托管，不随 service worker 回收而丢失，股票数量不受限
 function scheduleStockAlarms() {
-    chrome.storage.local.get(['stockList', 'currentView'], ({ stockList, currentView: view }) => {
-        chrome.storage.sync.get(['selectorName'], ({ selectorName }) => {
-            const v = view || 'list';
-            // 刷新地址按选择器生效：xq1 下已知代码的股票改刷拼接的雪球链接
+    chrome.storage.local.get(['currentView'], ({ currentView: view }) => {
+        const v = view || 'list';
+        readActiveScope(({ selectorName: sn, stockList }) => {
+            // 刷新地址按选择器生效：wc1 → 问财搜索页，xq1 → 拼接的雪球个股页（ETF 恒雪球）
             const urls = (stockList || [])
                 .filter(item => !item.stopRunning && (v === 'trash' ? item.inTrash : !item.inTrash))
-                .map(item => effectiveStockUrl(item, selectorName));
+                .map(item => effectiveStockUrl(item, sn));
             dbg('排程刷新:', v, '视图下共', urls.length, '只', urls);
             let delay = 0;
             urls.forEach(url => {

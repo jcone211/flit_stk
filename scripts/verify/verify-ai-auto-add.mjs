@@ -5,11 +5,12 @@
 //       本脚本专门把扩展内资源打通，验证自动模式的真实路径：
 //         add_stock_to_portfolio → shared/stock_lookup.js 解析名称→代码 → background quoteCodes 直取行情
 // 用法：node scripts/verify/verify-ai-auto-add.mjs
-// 覆盖：A1 名称批量（带 code/prefix/雪球个股页地址，且 0 次页面打开）
+// 覆盖：A1 名称批量（带 code/prefix + 按目标组合选择器生成的地址，且 0 次页面打开）
 //       A2 ETF 按 6 位代码；A3 名称解析不到（不建条目）；A4 多候选；A5 混合 ETF 名称剔除
 //       A6 refresh_via_page=true 强制页面方式；A7 行情取不到时代码回退打开页面
 //       A8 传入 import_price 时行情落地不覆盖初始价
 //       A9 返回值带 items 落地明细（T2）；A10 已在组合（加仓）→ ok:true + alreadyPresent
+//       A11 条目地址跟随「目标组合自己的选择器」（wc1→问财搜索页 / xq1→雪球搜索页，ETF 恒雪球）
 // 说明：fetch 只放行 file://（扩展内资源映射到仓库文件），其余一律拒绝 → 0 次外呼。
 //       代码表「读取失败 → 回退页面方式」的降级分支不在此脚本覆盖：
 //       本脚本把扩展内资源打通，而 verify-free-first.mjs 的桩打不开该资源（H1~H4 即
@@ -18,6 +19,7 @@
 import fsSync from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { iwencaiSearchUrl } from '../../shared/utils.js';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -175,7 +177,8 @@ await run('A1 普通股票名称 → 本地解析代码 + 直取行情落地（0
     const [a, b] = list();
     check('A1', '贵州茅台 → 600519.SH', !!a && a.code === '600519' && a.prefix === 'SH', brief(a));
     check('A1', '中国稀土 → 000831.SZ', !!b && b.code === '000831' && b.prefix === 'SZ', brief(b));
-    check('A1', '存储 URL 用雪球个股页', !!a && a.url === 'https://xueqiu.com/S/SH600519' && !!b && b.url === 'https://xueqiu.com/S/SZ000831',
+    check('A1', '存储 URL 按目标组合选择器生成（组合 wc1 → 问财搜索页，不写雪球个股页）',
+        !!a && a.url === iwencaiSearchUrl('贵州茅台') && !!b && b.url === iwencaiSearchUrl('中国稀土'),
         brief([a && a.url, b && b.url]));
     check('A1', '按代码向 background 取行情（quoteCodes）', quotedCodes.join(',') === '600519,000831', quotedCodes.join(','));
     check('A1', '现价/涨跌幅已落地', !!a && a.currentPrice === 1500.5 && a.percent === 1.2 && !!b && b.currentPrice === 32.1, brief([a, b]));
@@ -248,9 +251,10 @@ await run('A7 免费行情不可用 → 条目保留 + 回退打开页面', asyn
     check('A7', '仍返回 ok（不丢数据）', r.ok === true, brief(r));
     const s = list()[0];
     check('A7', '已解析代码并落库', !!s && s.code === '600519', brief(s));
+    check('A7', '条目地址仍按目标组合选择器生成（wc1 → 问财搜索页）', !!s && s.url === iwencaiSearchUrl('贵州茅台'), s && s.url);
     check('A7', 'hint 说明将打开页面抓取', /将打开页面抓取/.test(r.hint || ''), r.hint);
     await sleep(2600);
-    check('A7', '按雪球个股页地址回退抓取', refreshOneUrls.length === 1 && refreshOneUrls[0] === 'https://xueqiu.com/S/SH600519', brief(refreshOneUrls));
+    check('A7', '按条目地址（同生效地址）回退抓取', refreshOneUrls.length === 1 && refreshOneUrls[0] === s.url, brief(refreshOneUrls));
 });
 
 // ---------------------------------------------------------------- A8 传入初始价
@@ -288,6 +292,31 @@ await run('A10 已在组合 → ok:true + alreadyPresent（不新增、不覆盖
     check('A10', '原初始价不被本次传入价覆盖', list()[0].importPrice === 1400, list()[0].importPrice);
     check('A10', '未再取行情', quotedCodes.length === 0, brief(quotedCodes));
     check('A10', 'hint 说明「已在组合中、不新增」', /已在组合/.test(r.hint || ''), r.hint);
+});
+
+// ---------------------------------------------------------------- A11 条目地址跟随「目标组合自己的选择器」
+// 各组合选择器独立（portfolios[name].selectorName）：全局 sync.selectorName 故意设成相反的值，
+// 断言用的是组合那一份，防止退回「读全局选择器」而让刷新站点与组合设置漂移
+await run('A11 条目地址按目标组合选择器生成（wc1 → 问财搜索页；xq1 → 雪球个股页；ETF 恒雪球）', async () => {
+    reset();
+    store.sync.selectorName = 'xq1'; // 全局与组合相反：用错来源就会写到雪球
+    await toolExecutors.add_stock_to_portfolio({ names: ['贵州茅台', '159915'], portfolio: '持仓' });
+    const [maotai, etf] = list();
+    check('A11', '组合 wc1 → 普通股票条目地址为问财搜索页', !!maotai && maotai.url === iwencaiSearchUrl('贵州茅台'), maotai && maotai.url);
+    check('A11', 'ETF 无视选择器恒雪球个股页（问财不支持 ETF）',
+        !!etf && etf.url === 'https://xueqiu.com/S/SZ159915', etf && etf.url);
+    // 反向：xq1 组合 + 全局 wc1
+    reset();
+    store.local.portfolios = { 观察: { selectorName: 'xq1', stockList: [] } };
+    store.local.stockList = store.local.portfolios.观察.stockList;
+    store.sync.selectorName = 'wc1';
+    await toolExecutors.add_stock_to_portfolio({ names: ['贵州茅台', '159915'], portfolio: '观察' });
+    const [maotai2, etf2] = store.local.portfolios.观察.stockList;
+    check('A11', '组合 xq1 → 名称已解析出代码时给雪球个股页（与旧口径一致，个股页比搜索页更精确）',
+        !!maotai2 && maotai2.url === 'https://xueqiu.com/S/SH600519', maotai2 && maotai2.url);
+    check('A11', 'ETF 在 xq1 下仍为雪球个股页', !!etf2 && etf2.url === 'https://xueqiu.com/S/SZ159915', etf2 && etf2.url);
+    // 收尾：全局选择器回到脚本初始值，避免影响后续用例
+    store.sync.selectorName = 'xq1';
 });
 
 

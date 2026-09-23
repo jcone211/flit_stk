@@ -26,9 +26,19 @@
 验证脚本与工具统一放在 [`scripts/verify/`](../scripts/verify/)（原散落在 docs/ 下）：
 
 - `verify-free-first.mjs` —— AI 取数链路全量回归（`--offline-cases` / `--only=xxx` / `--bridge=real`）
+- `verify-stock-lookup.mjs` —— 股票名称/代码 → 标的解析口径（直接读真实的 `assets/stock_basic_cache.json`，38 项断言，0 外呼）
+- `verify-ai-auto-add.mjs` —— AI「按名称添加股票」自动模式真实路径（A1~A8，40 项断言，0 外呼；把扩展内资源映射成仓库文件，补 `verify-free-first` 桩打不开资源的那一段）
 - `verify-memory.mjs` / `verify-quickimport-race.mjs` / `verify-quickopen-landing.mjs` —— 功能专项验证
 - `mock-bridge.mjs` —— 假 Agent 桥接（verify-free-first 依赖，不打真实接口）
 - `read-debug.mjs` —— DEBUG 日志读取器（默认读 `docs/archive/debug.txt`）
+
+「输入名称时自动匹配股票代码」（自动模式）这条链路按能力分三段验证，改动任一段都要跑对应脚本：
+
+| 环节 | 脚本 | 覆盖 |
+| --- | --- | --- |
+| 解析口径 | `verify-stock-lookup.mjs` | 精确 / 唯一模糊 / 多候选 / 查不到 / ETF(基金) 名称拒收 / 基金代码推前缀 / 代码表读取失败降级 |
+| 自动路径 | `verify-ai-auto-add.mjs` | 名称 → 6 位代码 → 批量直取行情并落地、`import_price` 不被行情覆盖、取数失败才回退打开个股页 |
+| 降级路径 | `verify-free-first.mjs --only=H` | 扩展内资源读不到时 H1~H4 回退原有「打开页面抓取」方式，条目仍能落地 |
 
 ## 维护约定（新增文档时遵守）
 

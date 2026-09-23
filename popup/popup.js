@@ -3,6 +3,7 @@ import {
     calcImportPercent, effectiveStockUrl, etfPrefixForCode
 } from '../shared/utils.js';
 import { validateCronExpr } from '../shared/cron.js';
+import { resolveStockName, resolveStockNames, stockPageUrl, resolveErrorText, codesOf } from '../shared/stock_lookup.js';
 import { renderStock, renderPagination, renderSortToggles, renderComboSwitches } from './render.js';
 import { createEditForm } from './editform.js';
 
@@ -69,6 +70,7 @@ let enableTrash = false; // 启用垃圾池功能（默认关闭）
 let refreshOnOpen = true; // 打开插件时全部更新（默认开启，不弹窗）
 let enableQuickImport = true; // 启用快速打开一键导入（默认开启）
 let quickImportInStockWindow = true; // 一键导入在最小化专属窗口打开（默认开启）；关闭则统一普通页面打开
+let autoResolveStock = true; // 输入名称时自动匹配股票代码（默认开启）：按本地代码表解析后直取行情，不再逐页抓取
 let dataSource = 'refresh'; // 数据获取方式：'refresh' 刷新页面获取 | 'api' 调用 API 直取（未实现）
 let cronJobs = []; // 定时全量刷新：[{ id, expr, enabled }]，最多 3 个
 let enableAi = true; // 启用 AI 分析功能（默认开启，控制首页 AI 入口显隐）
@@ -179,6 +181,9 @@ const enableTrashToggleEl = document.getElementById('enableTrashToggle');
 const refreshOnOpenToggleEl = document.getElementById('refreshOnOpenToggle');
 const enableQuickImportToggleEl = document.getElementById('enableQuickImportToggle');
 const quickImportInStockWindowToggleEl = document.getElementById('quickImportInStockWindowToggle');
+const autoResolveStockToggleEl = document.getElementById('autoResolveStockToggle');
+const stockUrlModeSwitchEl = document.getElementById('stockUrlModeSwitch');
+const stockUrlLabelEl = document.getElementById('stockUrlLabel');
 const dataSourceSelectEl = document.getElementById('dataSourceSelect');
 const apiKeyInputEl = document.getElementById('apiKeyInput');
 const apiKeyGroupEl = document.getElementById('apiKeyGroup');
@@ -717,7 +722,7 @@ async function handleExport(sensitive) {
         ? '将导出全部数据（含小石 / AI 接口的 API Key；对话图片/文件不携带原始数据，以占位文本代替），请妥善保管，确定继续？'
         : '将导出默认数据（组合、要点、事件、设置、AI 对话与记忆；不含 API Key，对话图片/文件以 [用户上传图片：xx.png] 等占位文本代替），确定继续？')) return;
     const localKeys = ['stockList', 'portfolios', 'activePortfolio', 'currentView', 'keyPoints', 'events', 'aiChats', 'aiMemory'];
-    const syncKeys = ['refreshInterval', 'selectorName', 'pageSize', 'autoResizeWindow', 'defaultPortfolio', 'hideKeyPoints', 'enableTrash', 'refreshOnOpen', 'enableQuickImport', 'quickImportInStockWindow', 'enableAi', 'dataSource', 'cronJobs', 'aiMaxToolIterations', 'keepMonitoringOnClose', 'keepRefreshOnClose', 'dynamicLogic'];
+    const syncKeys = ['refreshInterval', 'selectorName', 'pageSize', 'autoResizeWindow', 'defaultPortfolio', 'hideKeyPoints', 'enableTrash', 'refreshOnOpen', 'enableQuickImport', 'quickImportInStockWindow', 'autoResolveStock', 'enableAi', 'dataSource', 'cronJobs', 'aiMaxToolIterations', 'keepMonitoringOnClose', 'keepRefreshOnClose', 'dynamicLogic'];
     if (sensitive) syncKeys.push('apiKey', 'aiProviders', 'aiActiveProviderId');
     const localData = await storageGet(chrome.storage.local, localKeys);
     const syncData = await storageGet(chrome.storage.sync, syncKeys);
@@ -747,6 +752,7 @@ async function handleExport(sensitive) {
             refreshOnOpen: syncData.refreshOnOpen,
             enableQuickImport: syncData.enableQuickImport,
             quickImportInStockWindow: syncData.quickImportInStockWindow,
+            autoResolveStock: syncData.autoResolveStock,
             enableAi: syncData.enableAi,
             keepMonitoringOnClose: syncData.keepMonitoringOnClose,
             keepRefreshOnClose: syncData.keepRefreshOnClose,
@@ -847,6 +853,7 @@ async function handleImport(file) {
         if (typeof data.sync.refreshOnOpen === 'boolean') syncSet.refreshOnOpen = data.sync.refreshOnOpen;
         if (typeof data.sync.enableQuickImport === 'boolean') syncSet.enableQuickImport = data.sync.enableQuickImport;
         if (typeof data.sync.quickImportInStockWindow === 'boolean') syncSet.quickImportInStockWindow = data.sync.quickImportInStockWindow;
+        if (typeof data.sync.autoResolveStock === 'boolean') syncSet.autoResolveStock = data.sync.autoResolveStock;
         if (typeof data.sync.enableAi === 'boolean') syncSet.enableAi = data.sync.enableAi;
         if (typeof data.sync.keepMonitoringOnClose === 'boolean') syncSet.keepMonitoringOnClose = data.sync.keepMonitoringOnClose;
         if (typeof data.sync.keepRefreshOnClose === 'boolean') syncSet.keepRefreshOnClose = data.sync.keepRefreshOnClose;
@@ -866,13 +873,14 @@ async function handleImport(file) {
     // 刷新当前页面状态
     await initState();
     // 重新读取 sync 设置到本地变量（导入写的 autoResizeWindow 等不会自动同步）
-    await new Promise(r => chrome.storage.sync.get(['autoResizeWindow', 'hideKeyPoints', 'enableTrash', 'refreshOnOpen', 'enableQuickImport', 'quickImportInStockWindow', 'enableAi', 'keepMonitoringOnClose', 'keepRefreshOnClose', 'defaultPortfolio', 'pageSize', 'selectorName', 'dataSource', 'dynamicLogic'], (result) => {
+    await new Promise(r => chrome.storage.sync.get(['autoResizeWindow', 'hideKeyPoints', 'enableTrash', 'refreshOnOpen', 'enableQuickImport', 'quickImportInStockWindow', 'autoResolveStock', 'enableAi', 'keepMonitoringOnClose', 'keepRefreshOnClose', 'defaultPortfolio', 'pageSize', 'selectorName', 'dataSource', 'dynamicLogic'], (result) => {
         autoResizeWindow = result.autoResizeWindow !== false;
         hideKeyPoints = !!result.hideKeyPoints;
         enableTrash = result.enableTrash === true;
         refreshOnOpen = result.refreshOnOpen !== false;
         enableQuickImport = result.enableQuickImport !== false;
         quickImportInStockWindow = result.quickImportInStockWindow !== false;
+        autoResolveStock = result.autoResolveStock !== false; // 默认开启
         enableAi = result.enableAi !== false;
         keepMonitoringOnClose = !!result.keepMonitoringOnClose;
         keepRefreshOnClose = !!result.keepRefreshOnClose;
@@ -979,13 +987,15 @@ async function initState() {
 // 首次初始化
 initState().then(() => {
     // 加载全局设置（默认组合、自动伸缩、垃圾池开关、打开刷新、一键导入、动态仓逻辑），应用默认组合后再做首次渲染
-    chrome.storage.sync.get(['defaultPortfolio', 'autoResizeWindow', 'hideKeyPoints', 'enableTrash', 'refreshOnOpen', 'enableQuickImport', 'quickImportInStockWindow', 'enableAi', 'keepMonitoringOnClose', 'keepRefreshOnClose', 'dynamicLogic'], (result) => {
+    chrome.storage.sync.get(['defaultPortfolio', 'autoResizeWindow', 'hideKeyPoints', 'enableTrash', 'refreshOnOpen', 'enableQuickImport', 'quickImportInStockWindow', 'autoResolveStock', 'enableAi', 'keepMonitoringOnClose', 'keepRefreshOnClose', 'dynamicLogic'], (result) => {
         autoResizeWindow = result.autoResizeWindow !== false;
         hideKeyPoints = !!result.hideKeyPoints;
         enableTrash = result.enableTrash === true; // 默认关闭
         refreshOnOpen = result.refreshOnOpen !== false; // 默认开启
         enableQuickImport = result.enableQuickImport !== false; // 默认开启
         quickImportInStockWindow = result.quickImportInStockWindow !== false; // 默认开启
+        autoResolveStock = result.autoResolveStock !== false; // 默认开启
+        applyStockUrlModeVisibility(); // 自动模式关闭时新增弹窗隐藏「按名称/代码」切换
         enableAi = result.enableAi !== false; // 默认开启
         keepMonitoringOnClose = !!result.keepMonitoringOnClose;
         keepRefreshOnClose = !!result.keepRefreshOnClose;
@@ -1039,6 +1049,88 @@ function buildQuickOpenUrl(item) {
         : `https://www.iwencai.com/screener/result?w=${encodeURIComponent(item)}&querytype=stock`;
 }
 
+// ---------------- 自动模式：名称/代码 → 本地解析 → 直取行情 ----------------
+// 解析走本地代码表（shared/stock_lookup.js，随扩展打包的全量 A 股代码表），
+// 取行情与落地由 background 的 quoteCodes 完成（免费接口优先，落地口径与页面刷新一致），
+// 全程不需要打开任何页面；解析失败/不可用时一律回退原有页面方式（不报错、不阻塞）。
+// 注：快速打开（Enter）只直开个股页、不写库，与原有约定一致。
+
+// 向 background 请求一批代码的行情并落地（Promise 化）
+function quoteCodesViaBackground(codes) {
+    return new Promise((resolve) => {
+        if (!codes || codes.length === 0) { resolve({ ok: true, requested: 0, missing: [] }); return; }
+        chrome.runtime.sendMessage({ action: 'quoteCodes', codes }, (resp) => {
+            if (chrome.runtime.lastError || !resp) {
+                resolve({
+                    ok: false,
+                    missing: codes,
+                    error: (chrome.runtime.lastError && chrome.runtime.lastError.message) || '后台无响应',
+                });
+                return;
+            }
+            resolve(resp);
+        });
+    });
+}
+
+// 解析失败文案：整批中止时逐项列出，方便用户一次改完
+function formatResolveErrors(errors) {
+    return (errors || []).map(r => resolveErrorText(r)).join('\n');
+}
+
+// 新建股票条目模板（新增/一键导入共用，避免两处字段口径漂移）
+function newStockEntry(fields) {
+    return {
+        url: fields.url,
+        name: fields.name || '',
+        code: fields.code || '',
+        prefix: fields.prefix || '',
+        startPrice: null, currentPrice: null, percent: null,
+        importPrice: numOrNull(fields.importPrice),
+        targetPercentLe: fields.targetPercentLe || '',
+        targetPercentGe: fields.targetPercentGe || '',
+        importTargetPercentLe: fields.importTargetPercentLe || '',
+        importTargetPercentGe: fields.importTargetPercentGe || '',
+        stopRunning: false, notifiedDaily: false, notifiedImport: false,
+        inTrash: false, pinned: false, pinOrder: null,
+        createdAt: fields.createdAt || Date.now(),
+    };
+}
+
+// 未取到行情的条目回退页面方式：沿用「页面打开逻辑不同」开关（专属窗口 / 普通页面）
+function openStockPageFallback(url) {
+    if (!url) return;
+    if (quickImportInStockWindow) {
+        chrome.runtime.sendMessage({ action: 'refreshOne', url });
+    } else {
+        chrome.runtime.sendMessage({ action: 'armCapture' });
+        chrome.tabs.create({ url });
+    }
+}
+
+// 导入结果提示：自动模式全部取到行情时不打开任何页面
+function buildImportSummary(added, skipped, name, missingCount) {
+    const parts = [`已导入 ${added} 支股票到组合「${name}」`];
+    if (skipped > 0) parts.push(`跳过 ${skipped} 支重复`);
+    if (missingCount > 0) parts.push(`${missingCount} 支未取到行情，已回退打开网页抓取`);
+    return parts.join('，');
+}
+
+// 自动模式下的快速打开：解析后直开雪球个股页；解析失败回退原搜索页地址。
+// 与快速打开原有约定一致：只打开页面，不放开抓取窗口、不触发数据落地
+async function openQuickOpenPages(items) {
+    const urls = [];
+    for (const item of items) {
+        const r = await resolveStockName(item);
+        urls.push((r.ok && stockPageUrl(r)) || buildQuickOpenUrl(item));
+    }
+    let delay = 0;
+    urls.forEach((url) => {
+        delay += 1500 + Math.random() * 700;
+        setTimeout(() => chrome.tabs.create({ url }), delay);
+    });
+}
+
 quickOpenEl.addEventListener('keydown', (event) => {
     if (event.key === 'Enter' && !event.shiftKey && quickOpenEl.value) {
         event.preventDefault();
@@ -1047,6 +1139,8 @@ quickOpenEl.addEventListener('keydown', (event) => {
         // 快速打开仅负责打开网页，不放开抓取窗口、不触发数据落地：
         // 只有「全量刷新 / 开始监控 / 新增·一键导入的 refreshOne」才更新数据，
         // 避免浏览页面被误回填，或解析失败误报「数据更新失败」
+        // 自动模式：名称/代码解析后直开个股页（失败回退原搜索页），同样不写库
+        if (autoResolveStock) { openQuickOpenPages(items); return; }
 
         // 逐个延迟打开，避免一次性打开过多页面（1.5-2.2s 随机间隔）
         let delay = 0;
@@ -1092,30 +1186,38 @@ function closeQuickImportComboModal() {
     pendingImportItems = [];
 }
 
-// 执行导入：写入目标组合（不存在则新建），按名称去重，随后逐个打开页面
+// 执行导入：写入目标组合（不存在则新建），按名称去重，随后取行情/打开页面
+// 自动模式（默认）：先整批解析名称→代码，全部成功才写入条目并直取行情；
+//                   解析不可用（降级）时静默回退原有页面方式，单项有误则整批中止不写入
 function executeQuickImport(items, name) {
     if (!portfolios[name]) {
         portfolios[name] = { stockList: [], selectorName };
     }
     const target = portfolios[name].stockList;
+    // 名称去空白：粘贴的股票名可能带全角/半角空格（如「柳  工」），URL 搜索词与落库名称保持一致
+    const toImport = items.map(cleanStockName).filter(Boolean);
+    if (!autoResolveStock) { executeQuickImportByPage(toImport, name, target); return; }
+    resolveStockNames(toImport).then((res) => {
+        if (res.ok) { executeQuickImportAuto(res.items, name, target); return; }
+        if (res.degrade) {
+            console.warn('[thswc] 本地代码表不可用，回退页面方式导入:', res.error);
+            executeQuickImportByPage(toImport, name, target);
+            return;
+        }
+        alert(`${formatResolveErrors(res.errors)}\n本次未导入任何股票`);
+    });
+}
+
+// 页面方式导入（原有一键导入逻辑）：写入条目后逐个打开搜索页抓取
+function executeQuickImportByPage(toImport, name, target) {
     const now = Date.now();
     let added = 0;
     let skipped = 0;
-    // 名称去空白：粘贴的股票名可能带全角/半角空格（如「柳  工」），URL 搜索词与落库名称保持一致
-    const toImport = items.map(cleanStockName).filter(Boolean);
     toImport.forEach(item => {
         const url = normalizeUrl(buildQuickOpenUrl(item)); // 问财/雪球搜索页地址作为股票标识
         if (!url) return;
         if (target.some(s => s.name === item)) { skipped++; return; } // 组合内同名跳过
-        target.push({
-            url, name: item, code: '', prefix: '', // 名称先取输入词，抓取后回填
-            startPrice: null, currentPrice: null, percent: null,
-            importPrice: null,
-            targetPercentLe: '', targetPercentGe: '',
-            importTargetPercentLe: '', importTargetPercentGe: '',
-            stopRunning: false, notifiedDaily: false, notifiedImport: false,
-            inTrash: false, pinned: false, pinOrder: null, createdAt: now,
-        });
+        target.push(newStockEntry({ url, name: item, createdAt: now })); // 名称先取输入词，抓取后回填
         added++;
     });
     if (added === 0) { alert(`组合「${name}」中已存在全部输入项（按名称匹配），已跳过`); return; }
@@ -1149,6 +1251,45 @@ function executeQuickImport(items, name) {
         quickOpenEl.value = '';
         updateQuickImportVisibility();
         alert(`已导入 ${added} 支股票到组合「${name}」${skipped > 0 ? `，跳过 ${skipped} 支重复` : ''}，页面将逐个打开`);
+    });
+}
+
+// 自动模式导入：条目按解析结果写入（带代码/前缀/个股页地址），随后由 background 直取行情
+// 落地；未取到行情的代码才回退打开个股页抓取（保证条目最终有数据）。
+// 走到这里说明整批解析成功（items 与 toImport 一一对应）；重复项按名称/代码跳过。
+async function executeQuickImportAuto(items, name, target) {
+    let added = 0;
+    let skipped = 0;
+    const addedItems = [];
+    items.forEach((item) => {
+        if ((item.name && target.some(s => s.name === item.name))
+            || (item.code && target.some(s => s.code === item.code))) { skipped++; return; }
+        const url = normalizeUrl(stockPageUrl(item));
+        if (!url) { skipped++; return; }
+        target.push(newStockEntry({ url, name: item.name, code: item.code, prefix: item.prefix }));
+        addedItems.push(item);
+        added++;
+    });
+    const codes = codesOf(addedItems); // 去重后的 6 位代码（批量行情取数入参）
+    if (added === 0) { alert(`组合「${name}」中已存在全部输入项（按名称/代码匹配），已跳过`); return; }
+    // 关键：导入目标即当前活动组合时，模块级 stockList（镜像）与 portfolios[activePortfolio].stockList
+    // 是两份独立数组（getStatus 反序列化各一份）。只写 portfolios 会让 storage 里的镜像缺失新增项，
+    // 随后 background 落地其它股票时会把旧镜像写回组合，覆盖删除新导入的行（竞态）。
+    if (name === activePortfolio) {
+        stockList = target; // 镜像与组合列表指向同一数组，随下面 set 一并持久化
+    }
+    chrome.storage.local.set({ portfolios, stockList }, async () => {
+        switchPortfolio(name); // 切到导入的组合，便于查看
+        quickOpenEl.value = '';
+        updateQuickImportVisibility();
+        // 直取行情落地（不打开任何页面）；未取到行情的代码才回退打开个股页抓取
+        const r = await quoteCodesViaBackground(codes);
+        const missing = ((r && r.missing) || []).filter(c => codes.includes(c));
+        missing.forEach(code => {
+            const entry = target.find(s => s.code === code);
+            if (entry) openStockPageFallback(entry.url);
+        });
+        alert(buildImportSummary(added, skipped, name, missing.length));
     });
 }
 
@@ -1228,12 +1369,75 @@ addStockEl.addEventListener('click', () => {
     hideEditSourceTag();
     editForm.clear();
     editActionsTopEl.style.display = 'none';
-    stockUrlGroupEl.style.display = ''; // 新增需填网址
+    stockUrlGroupEl.style.display = ''; // 新增需填网址（或名称/代码）
     stockUrlEl.disabled = false;
+    applyStockUrlMode('name'); // 每次新增默认回到「按名称/代码」
+    applyStockUrlModeVisibility(); // 自动模式关闭时只保留「按网址」
 });
+
+// ---------------- 新增股票：按名称/代码 ↔ 按网址 ----------------
+// 自动模式（默认开启）下默认「按名称/代码」：填名称或 6 位代码，本地代码表解析后直取行情、
+// 不打开页面；选「按网址」或关闭自动模式时，完全沿用原有按网址新增流程。
+function stockUrlMode() {
+    const el = stockUrlModeSwitchEl && stockUrlModeSwitchEl.querySelector('input[name="stockUrlMode"]:checked');
+    return el ? el.value : 'url'; // DOM 缺失时按网址（保守回退）
+}
+
+// 切换新增方式：同步标签/占位符并清空输入（两种方式的输入内容不通用）
+function applyStockUrlMode(mode) {
+    const byName = mode !== 'url';
+    if (stockUrlLabelEl) {
+        stockUrlLabelEl.innerHTML = byName
+            ? '股票名称或代码&nbsp;<span class="warn">*</span>'
+            : '网址&nbsp;<span class="warn">*</span>';
+    }
+    stockUrlEl.placeholder = byName ? '如 贵州茅台 或 600519' : '网址';
+    stockUrlEl.value = '';
+}
+
+// 自动模式关闭时隐藏方式切换，整组回到按网址
+function applyStockUrlModeVisibility() {
+    if (!stockUrlModeSwitchEl) return;
+    stockUrlModeSwitchEl.style.display = autoResolveStock ? '' : 'none';
+}
+
+if (stockUrlModeSwitchEl) {
+    stockUrlModeSwitchEl.addEventListener('change', () => applyStockUrlMode(stockUrlMode()));
+}
+
+// 新增（按名称/代码）：解析成功才建条目，随后直取行情落地；未取到行情回退打开个股页抓取。
+// 解析失败不建条目（提示「请重新输入」），避免生成一条永远没数据的空行
+async function handleAddByName(raw) {
+    const input = cleanStockName(raw);
+    const r = await resolveStockName(input);
+    if (r.degrade) { alert('本地股票代码表不可用，请改用「按网址」方式添加'); return; }
+    if (!r.ok) { alert(resolveErrorText(r)); return; }
+    const url = normalizeUrl(stockPageUrl(r));
+    if (!url) { alert('未能生成个股页地址，请改用「按网址」方式添加'); return; }
+    if (stockList.some(s => (r.code && s.code === r.code) || s.url === url)) {
+        alert(`「${r.name || r.code}」已在当前组合中`);
+        return;
+    }
+    stockList.push(newStockEntry({
+        url, name: r.name, code: r.code, prefix: r.prefix,
+        importPrice: importPriceInputEl.value,
+        targetPercentLe: targetPercentLeEl.value, targetPercentGe: targetPercentGeEl.value,
+        importTargetPercentLe: importTargetPercentLeEl.value, importTargetPercentGe: importTargetPercentGeEl.value,
+    }));
+    saveAndRender();
+    closeModal();
+    // 行情落地：background 直取（免费接口优先）；未取到则回退打开个股页抓取回填
+    const q = await quoteCodesViaBackground([r.code]);
+    if (!q || !q.ok || (q.missing || []).includes(r.code)) openStockPageFallback(url);
+}
 
 saveStockBtnEl.addEventListener('click', () => {
     const rawUrl = stockUrlEl.value;
+    // 新增（非编辑）且为「按名称/代码」方式：本地解析 + 直取行情（不打开页面）
+    if (!editUrl && autoResolveStock && stockUrlMode() === 'name') {
+        handleAddByName(rawUrl);
+        return;
+    }
     if (!rawUrl) { alert('请输入网址'); return; }
     const tLe = targetPercentLeEl.value;
     const tGe = targetPercentGeEl.value;
@@ -1445,6 +1649,7 @@ function openSettings() {
     refreshOnOpenToggleEl.checked = refreshOnOpen;
     enableQuickImportToggleEl.checked = enableQuickImport;
     quickImportInStockWindowToggleEl.checked = quickImportInStockWindow;
+    autoResolveStockToggleEl.checked = autoResolveStock;
     // 填充默认组合下拉框（始终有活动组合可选）
     defaultPortfolioSelectEl.innerHTML = '';
     Object.keys(portfolios).forEach(name => {
@@ -1674,6 +1879,13 @@ enableQuickImportToggleEl.addEventListener('change', () => {
 quickImportInStockWindowToggleEl.addEventListener('change', () => {
     quickImportInStockWindow = quickImportInStockWindowToggleEl.checked;
     chrome.storage.sync.set({ quickImportInStockWindow });
+});
+
+// 「输入名称时自动匹配股票代码」默认开启：按本地代码表解析名称→代码后直取行情；
+// 关闭后完全沿用原有页面方式（逐页打开抓取），两种方式落地口径一致
+autoResolveStockToggleEl.addEventListener('change', () => {
+    autoResolveStock = autoResolveStockToggleEl.checked;
+    chrome.storage.sync.set({ autoResolveStock });
 });
 
 // 数据获取方式：refresh 页面刷新 / api 批量行情接口

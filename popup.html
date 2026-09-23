@@ -241,6 +241,14 @@
                 </label>
                 <p class="settings-desc">取消勾选后，首页工具栏将不再显示 AI 分析入口</p>
             </div>
+            <!-- 股票名称自动解析：开启后按本地代码表直取行情，不再逐页抓取 -->
+            <div class="settings-item">
+                <label class="settings-toggle">
+                    <input type="checkbox" id="autoResolveStockToggle" checked>
+                    <span class="toggle-label">输入名称时自动匹配股票代码</span>
+                </label>
+                <p class="settings-desc">开启后「一键/添加股票/AI 添加」按本地代码表把名称解析成 6 位代码并直接取行情，不再逐个打开网页抓取（失败自动回退原方式）；快速打开按名称直开个股页。ETF/基金请用 6 位代码或雪球网址</p>
+            </div>
             <div class="settings-item">
                 <label class="settings-toggle">
                     <input type="checkbox" id="enableQuickImportToggle" checked>
@@ -393,8 +401,13 @@
                 </div>
                 <form>
                     <div id="stockUrlGroup">
-                        <label for="stockUrl">网址&nbsp;<span class="warn">*</span></label>
-                        <input type="text" id="stockUrl" placeholder="网址">
+                        <!-- 新增方式：按名称/代码（走本地代码表解析）或按网址（原方式） -->
+                        <div class="url-mode-switch" id="stockUrlModeSwitch">
+                            <label><input type="radio" name="stockUrlMode" value="name" checked> 按名称/代码</label>
+                            <label><input type="radio" name="stockUrlMode" value="url"> 按网址</label>
+                        </div>
+                        <label for="stockUrl" id="stockUrlLabel">股票名称或代码&nbsp;<span class="warn">*</span></label>
+                        <input type="text" id="stockUrl" placeholder="如 贵州茅台 或 600519">
                     </div>
                     <div class="detail-section alert-section">
                         <div class="alert-head">

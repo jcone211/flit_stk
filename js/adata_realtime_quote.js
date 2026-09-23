@@ -20,7 +20,8 @@
 
 // 股票代码前缀 -> 交易所 (对应 code_utils.py 的 exchange_suffix)
 const EXCHANGE_SUFFIX = {
-  '00': 'SZ', '20': 'SZ', '30': 'SZ', '15': 'SZ',
+  // '15' 为深市 ETF（159 等），'16' 为深市 LOF/分级基金，二者同属深交所
+  '00': 'SZ', '20': 'SZ', '30': 'SZ', '15': 'SZ', '16': 'SZ',
   '43': 'BJ', '83': 'BJ', '87': 'BJ', '92': 'BJ',
   '60': 'SH', '68': 'SH', '90': 'SH',
   // 沪市基金：51/58 为 ETF（与 shared/utils.js etfPrefixForCode 对齐），56 为 ETF 新段，50 为 LOF/封基

@@ -360,6 +360,11 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         // 避免误解析/误报「数据更新失败」（见 popup.js 快速打开 Enter 处理）
         allowCapturedUntil = Date.now() + ALLOW_CAPTURE_WINDOW_MS;
         sendResponse({ status: 'ok' });
+    } else if (request.action === 'quoteCodes') {
+        // 自动模式：按代码直取免费行情并落地（不打开页面），结果回给调用方。
+        // 未取到行情的代码由调用方回退页面抓取（refreshOne），故本动作只降级、不报错
+        fetchAndLandQuotes(request.codes || []).then(r => sendResponse(r));
+        return true; // 异步 sendResponse
     } else if (request.action === 'syncCronJobs') {
         // cron 配置变更（增删/启停/表达式修改）后重排全部一次性 alarm
         scheduleCronAlarms();
@@ -839,6 +844,71 @@ function refreshAllByApi(quoteFn, keyName, done, filter, token = null) {
                     console.error('[thswc:bg] API 行情获取失败:', err);
                     done && done(0);
                 });
+        });
+    });
+}
+
+// 按代码直取一批行情并落地（自动模式共用：一键导入 / 添加股票 / AI 添加）。
+// 取数优先免费接口（adata：新浪/腾讯，无需 Key）；仅当用户在设置里选了「小石大数据」
+// 并配置了 Key 时，才对免费渠道没取到的代码用小石补一次（不无条件烧额度）。
+// 落地统一走 landApiQuotes（匹配 → 写库 → 阈值通知），与页面刷新的落地口径一致。
+// 返回 { ok, requested, received, landed, missing[], error }；调用方据 missing 回退
+// 「打开页面抓取」，故任何失败只降级、不抛错。
+function fetchAndLandQuotes(codes) {
+    const uniq = [];
+    const seen = new Set();
+    (Array.isArray(codes) ? codes : []).forEach(c => {
+        const code = String(c || '').trim();
+        if (!/^\d{6}$/.test(code) || seen.has(code)) return;
+        seen.add(code);
+        uniq.push(code);
+    });
+    if (uniq.length === 0) {
+        return Promise.resolve({ ok: true, requested: 0, received: 0, landed: false, missing: [] });
+    }
+    return new Promise((resolve) => {
+        chrome.storage.sync.get(['dataSource', 'apiKey'], async (sync) => {
+            const xiaoshiKey = sync.dataSource === 'xiaoshi' ? String(sync.apiKey || '') : '';
+            const missing = new Set(uniq);
+            const items = [];
+            let error = null;
+            try {
+                const r = await adataBatchQuotes(uniq);
+                (r.items || []).forEach(it => {
+                    items.push(it);
+                    missing.delete(String(it.code || '').trim());
+                });
+            } catch (err) {
+                error = (err && err.message) || String(err);
+                dbg('自动模式免费行情取数失败:', error);
+            }
+            if (missing.size > 0 && xiaoshiKey) {
+                try {
+                    const r2 = await batchQuotes([...missing], { apiKey: xiaoshiKey });
+                    (r2.items || []).forEach(it => {
+                        items.push(it);
+                        missing.delete(String(it.code || '').trim());
+                    });
+                } catch (err) {
+                    error = error || (err && err.message) || String(err);
+                }
+            }
+            let landed = false;
+            if (items.length > 0) {
+                try {
+                    landed = await landApiQuotes(items);
+                } catch (err) {
+                    console.error('[thswc:bg] 自动模式行情落地失败:', err);
+                }
+            }
+            resolve({
+                ok: items.length > 0,
+                requested: uniq.length,
+                received: items.length,
+                landed,
+                missing: [...missing],
+                error,
+            });
         });
     });
 }

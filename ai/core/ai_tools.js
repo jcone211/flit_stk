@@ -24,6 +24,7 @@ import { batchQuotes as xiaoshiBatchQuotes } from '../../js/xiaoshi_realtime_quo
 import { batchQuotes as adataBatchQuotes, listMarketFull as adataListMarketFull } from '../../js/adata_realtime_quote.js';
 import { parseCronExpr, nextTradingCronTimes } from '../../shared/cron.js';
 import { cleanStockName, etfPrefixForCode } from '../../shared/utils.js';
+import { resolveStockName, stockPageUrl, resolveErrorText, codesOf } from '../../shared/stock_lookup.js';
 import { bridgeRequest, bridgeHealth } from './bridge_client.js';
 
 // add_stock_to_portfolio 跨调用共享的页面打开时序计数器
@@ -57,7 +58,7 @@ export const TOOL_DEFS = [
     { type: 'function', function: { name: 'create_event', description: '创建一条预测事件。事件内容(content)只填股票名称（如「百通能源」），禁止把分析/预测/操作文字写入 content；判断逻辑、时间与操作应体现为关联要点。关联要点(key_point_text)须优先从 get_key_points 已有的要点中选择（拿不准先用 get_key_points 查看现有要点再对应关联，不要臆造不存在的要点内容），现有要点与意图不完全匹配时才新建要点或留空。time 为 YYYY-MM-DD，缺省今天。若存在超过一周仍未归档的事件会一并提醒用户补充', parameters: { type: 'object', properties: { key_point_text: { type: 'string', description: '关联现有业已存在或本次新建的要点内容，可为空' }, content: { type: 'string', description: '事件内容，仅填股票名称' }, time: { type: 'string', description: '事件日期 YYYY-MM-DD' } }, required: ['content'] } } },
     { type: 'function', function: { name: 'update_event', description: '修改事件（按 id；已归档事件不可修改），可改关联要点/内容/日期/status（pending 待预测 / accurate 准确 / wrong 误判）。不能设置归档——归档只发生在手动点击或事件超 7 天且状态为准确/误判时自动进行，若刚改状态的事件因此被自动归档，结果会说明。当存在多条内容相同的事件时，默认修改其中 time 最早（最久远）的那条 id，并在回复中简略提醒用户还有其它日期存在相同内容事件', parameters: { type: 'object', properties: { id: { type: 'string', description: '事件 id（用 get_events 查询）' }, key_point_text: { type: 'string', description: '新的关联要点' }, content: { type: 'string', description: '新的事件内容' }, time: { type: 'string', description: '新的事件日期 YYYY-MM-DD' }, status: { type: 'string', description: '新状态：pending 待预测 / accurate 准确 / wrong 误判' } }, required: ['id'] } } },
     { type: 'function', function: { name: 'delete_event', description: '删除一条事件（按 id）', parameters: { type: 'object', properties: { id: { type: 'string', description: '事件 id（用 get_events 查询）' } }, required: ['id'] } } },
-    { type: 'function', function: { name: 'add_stock_to_portfolio', description: '按名称或雪球网址向指定组合批量添加股票（组合缺省「持仓」）。普通股票自动生成问财搜索页；传 159/51/58 开头 6 位 ETF 代码会生成雪球个股页；直接传雪球个股网址（如 https://xueqiu.com/S/SH510300）会原样保存并从雪球抓取。ETF 名称（含「ETF」字样）禁止按名称导入：先在 https://xueqiu.com 搜索该 ETF 并复制个股网址，再把雪球网址传入本工具或手动新增。仅接受雪球/问财网址，其他网址会被拒绝。一次调用可添加多只', parameters: { type: 'object', properties: { names: { type: 'array', items: { type: 'string' }, description: '股票名称、ETF 代码或雪球个股网址数组，如 ["贵州茅台", "https://xueqiu.com/S/SH510300"]；ETF 名称请勿传入' }, portfolio: { type: 'string', description: '目标组合名，缺省「持仓」' }, import_price: { anyOf: [{ type: 'number', description: '所有股票共用的买入价/初始价' }, { type: 'array', items: { type: 'number' }, description: '与 names 中非 ETF 项一一对应的逐股买入价（names 含 ETF 名称会被自动剔除，不参与导入），长度不足时缺失的股票不设价' }], description: '买入价/成交价/成本价（用户提供的初始价）：单只传数字；多只各自价格不同时传数组，按 names 中实际导入（非 ETF）的顺序一一对应。设置后作为该股票初始价固定写入，后续行情刷新抓取不会覆盖它；未提供时初始价留空，首次抓到行情才自动用最新价回填' } }, required: ['names'] } } },
+    { type: 'function', function: { name: 'add_stock_to_portfolio', description: '按名称或雪球网址向指定组合批量添加股票（组合缺省「持仓」）。普通股票自动生成问财搜索页；传 159/51/58 开头 6 位 ETF 代码会生成雪球个股页；直接传雪球个股网址（如 https://xueqiu.com/S/SH510300）会原样保存并从雪球抓取。ETF 名称（含「ETF」字样）禁止按名称导入：请改用 6 位 ETF 代码（如 588000、510300）或雪球个股网址（先在 https://xueqiu.com 搜索该 ETF 并复制个股网址）。仅接受雪球/问财网址，其他网址会被拒绝。一次调用可添加多只。默认自动模式：普通股票名称按本地代码表解析成 6 位代码后直接取实时行情落地，不打开任何页面（解析不到的项不导入，返回 unresolved 说明原因，可改用代码/网址重试）', parameters: { type: 'object', properties: { names: { type: 'array', items: { type: 'string' }, description: '股票名称、ETF 代码或雪球个股网址数组，如 ["贵州茅台", "https://xueqiu.com/S/SH510300"]；ETF 名称请勿传入' }, portfolio: { type: 'string', description: '目标组合名，缺省「持仓」' }, refresh_via_page: { type: 'boolean', description: '可选：true 时强制沿用原有「逐个打开页面抓取」方式（默认自动模式按本地代码表解析后直取行情，不打开页面）' }, import_price: { anyOf: [{ type: 'number', description: '所有股票共用的买入价/初始价' }, { type: 'array', items: { type: 'number' }, description: '与 names 中非 ETF 项一一对应的逐股买入价（names 含 ETF 名称会被自动剔除，不参与导入），长度不足时缺失的股票不设价' }], description: '买入价/成交价/成本价（用户提供的初始价）：单只传数字；多只各自价格不同时传数组，按 names 中实际导入（非 ETF）的顺序一一对应。设置后作为该股票初始价固定写入，后续行情刷新抓取不会覆盖它；未提供时初始价留空，首次抓到行情才自动用最新价回填' } }, required: ['names'] } } },
     { type: 'function', function: { name: 'move_stock_to_combo', description: '把股票从来源组合移动到目标组合（按名称匹配、忽略首尾空格；来源缺省当前活动组合，目标缺省「观察」）。用于记录「卖出」等调仓：卖出时应传 source_portfolio 为实际持有该股的组合（通常「持仓」）；若目标组合已存在同名股票，则仅从来源组合删除、不重复添加', parameters: { type: 'object', properties: { name: { type: 'string', description: '股票名称' }, target_portfolio: { type: 'string', description: '目标组合名，缺省「观察」' }, source_portfolio: { type: 'string', description: '来源组合名（卖出的实际持仓组合），缺省当前活动组合' } }, required: ['name'] } } },
     { type: 'function', function: { name: 'get_current_view', description: '读取当前列表视图（股票列表或垃圾池）', parameters: { type: 'object', properties: {}, required: [] } } },
     { type: 'function', function: { name: 'remove_stock', description: '从指定组合中删除股票（按名称匹配、忽略首尾空格；portfolio 缺省当前活动组合）。真删除不可恢复，若只想挪走请用 move_stock_to_combo 移到其他组合，或 move_stock_to_trash 进垃圾池', parameters: { type: 'object', properties: { name: { type: 'string', description: '股票名称' }, portfolio: { type: 'string', description: '目标组合名，缺省当前活动组合' } }, required: ['name'] } } },
@@ -96,7 +97,7 @@ export const TOOL_GROUPS = {
     bridge: ['get_workspace_context', 'discover_database_schema', 'query_local_database', 'save_workspace_database_config', 'record_workspace_memory', 'run_workspace_process', 'bridge_health'],
 };
 export const TOOL_GROUP_RULES = {
-    portfolio: '组合和股票工具：需要组合名时先读取组合结构，按用户指定组合操作。用户说买入或卖出股票时，必须先向 flit/买入卖出.md 追加交易记录，再尝试导入或从组合移除；无论单只/多只股票中有一只或多只导入失败、ETF 被排除、股票已被手动移除、或组合操作失败，都不能跳过记录。每条至少记录操作日期和股票名称；买入价格、成交金额只有用户提供时才记录，未提供的字段不要猜测或写占位值。用户提供了买入价/成交价/成本价时，把该价格作为 import_price 传给 add_stock_to_portfolio，作为该股票初始价；多只股票价格不同时，import_price 传与 names 一一对应的数组（如 names=[A,B]、import_price=[5.7,6.67]），不要只传一个数导致其他股票初始价错误。初始价一旦设置，之后行情刷新抓取不会覆盖（插件只在初始价为空时才用最新价自动回填）。追加写入，不得覆盖历史记录。买入/导入 ETF 时禁止把 ETF 名称生成问财地址、也禁止把 ETF 名称直接传给 add_stock_to_portfolio（名称含「ETF」会被工具拦截）；ETF 必须使用雪球个股网址——应自行打开 https://xueqiu.com 搜索相关 ETF，复制其个股网址（如 https://xueqiu.com/S/SH588000），把该雪球网址作为 names 传给 add_stock_to_portfolio 直接新增（工具会原样保存并从雪球页面抓取），或在插件中手动新增；绝不能用问财搜索页代替。删除股票用 remove_stock（真删除不可恢复）；把股票移入垃圾池用 move_stock_to_trash（可在插件垃圾池视图恢复）；单纯调整组合归属用 move_stock_to_combo。不要用「移出→重新添加」的方式修正初始价（会丢数据并在目标组合留残留）。',
+    portfolio: '组合和股票工具：需要组合名时先读取组合结构，按用户指定组合操作。用户说买入或卖出股票时，必须先向 flit/买入卖出.md 追加交易记录，再尝试导入或从组合移除；无论单只/多只股票中有一只或多只导入失败、ETF 被排除、股票已被手动移除、或组合操作失败，都不能跳过记录。每条至少记录操作日期和股票名称；买入价格、成交金额只有用户提供时才记录，未提供的字段不要猜测或写占位值。用户提供了买入价/成交价/成本价时，把该价格作为 import_price 传给 add_stock_to_portfolio，作为该股票初始价；多只股票价格不同时，import_price 传与 names 一一对应的数组（如 names=[A,B]、import_price=[5.7,6.67]），不要只传一个数导致其他股票初始价错误。初始价一旦设置，之后行情刷新抓取不会覆盖（插件只在初始价为空时才用最新价自动回填）。追加写入，不得覆盖历史记录。买入/导入 ETF 时禁止把 ETF 名称生成问财地址、也禁止把 ETF 名称直接传给 add_stock_to_portfolio（名称含「ETF」会被工具拦截）；ETF 必须用 6 位 ETF 代码或雪球个股网址——已知代码直接传代码（如 588000、510300），不知道代码时自行打开 https://xueqiu.com 搜索相关 ETF 复制个股网址（如 https://xueqiu.com/S/SH588000），把代码或该雪球网址作为 names 传给 add_stock_to_portfolio 直接新增（工具会取实时行情落地），或在插件中手动新增；绝不能用问财搜索页代替。删除股票用 remove_stock（真删除不可恢复）；把股票移入垃圾池用 move_stock_to_trash（可在插件垃圾池视图恢复）；单纯调整组合归属用 move_stock_to_combo。不要用「移出→重新添加」的方式修正初始价（会丢数据并在目标组合留残留）。',
     market: '行情工具：实时行情批量用 get_portfolio_quotes（一次返回组合全部股票）；多只股票日线用 read_stocks_kline（一次返回多只派生指标摘要），仅单只需要看原始 OHLCV 时才用 read_stock_kline。取数侧已做免费优先（本地数据库→新浪/腾讯实时、东财/同花顺日线→小石兜底）；日 K 按跨度分两档：≤7 个交易日不依赖桥接（没库就直接走免费，照样出数据），>7 个交易日为保护免费渠道只读本地库。工具返回 error 时照原样转述原因并给可行替代（改查 7 天内 / 改查实时现价 / 启用 Agent 桥接），不要重复调用同一工具。按名称查询就传 name/names，代码由工具解析，禁止自己猜代码。你不需要特意指定渠道；ETF 不在本地库内，由免费接口负责。若工具报「工作目录不存在可用数据库」，照原样转述给用户，不要改用其他工具硬凑 K 线（实时现价仍可查）。结论里要标数据日期：末行带 intraday 的是当日实时未收盘价（可称现价），不带的是已收盘日线（只能称"某日收盘"）；量能能不能当整日用看 实时拼接.量能说明。\n[上下文口径] tool 原始返回不跨轮保留（下一轮只剩一行「哪个工具成功/失败」的记录）；后面还要用这份数据就在本轮调 retain_tool_data 登记成隐藏便签，不必抄进正文。没登记又没写进正文的数据就是没了，只能重新调用（再花一次免费额度）。\n[强制取数] 输出任何行情数值（价格、涨跌幅、成交量、成交额、OHLCV、K 线表格、现价、收盘）前，本轮必须已经成功调用过行情工具（get_stock_quote / get_portfolio_quotes / read_stock_kline / read_stocks_kline）拿到真实数据；数据只能来自本轮工具返回或已登记且仍有效的跨轮便签。「≤7 个交易日不依赖本地库/桥接」只是说免费渠道能出数，绝不等于可以不调工具直接回答。用户改天数或换股票（例如 30 日改 7 日），必须重新调用取数工具，凭上一轮失败信息或记忆补写即视为编造。\n[禁止编造] 绝对禁止凭空编造行情数据。没有通过工具实际获取到真实数据前，不得输出价格数字、涨跌幅、跌停/涨停判定。宁可说「我没有查到」也不准编造。',
     events: '要点/事件工具：先读取已有要点；事件 content 只写股票名称。',
     settings: '设置工具：仅 Cron 可修改；修改前校验表达式，成功后立即生效。',
@@ -380,7 +381,7 @@ export const toolExecutors = {
         const pending = etfNames.length > 0 ? names.filter(n => !isEtfName(n)) : names;
         if (pending.length === 0) {
             return {
-                error: `检测到 ETF「${etfNames.join('、')}」，已阻止按名称自动导入。问财不支持 ETF：请打开 https://xueqiu.com 搜索该 ETF 并复制个股网址，再把雪球网址（如 https://xueqiu.com/S/SH588000）传给本工具直接新增，或在插件中手动新增该网址。`,
+                error: ETF_BY_NAME_ERROR(etfNames.join('、')),
                 manual_required: true,
                 excluded: etfNames,
             };
@@ -397,16 +398,50 @@ export const toolExecutors = {
         const rejected = [];
         const backfilled = [];
         const excluded = [...etfNames];
+        // 自动模式（默认开启，插件设置同口径；refresh_via_page=true 可强制页面方式）：
+        // 先用本地代码表把名称解析成「规范名 + 6 位代码 + 交易所前缀」，随后按代码直取行情
+        // 落地、不打开页面。解析不到代码的项不导入，在结果 unresolved 里列明原因。
+        const autoMode = args.refresh_via_page === true ? false : await autoResolveEnabled();
+        const unresolved = [];
         // 逐只处理：import_price 传数组时与 names 一一对应，数组越界/缺失视为未提供
         for (let i = 0; i < pending.length; i++) {
             const name = pending[i];
             const importPrice = priceArgFor(rawPrice, i);
-            const url = stockSearchUrl(name);
+            let url = stockSearchUrl(name); // 网址/6 位代码/名称 → 地址（网址会做站点校验）
+            let code = '';
+            let prefix = '';
+            let stockName = cleanStockName(name);
+            if (autoMode && !/^https?:\/\//i.test(name)) {
+                // 名称或 6 位代码：本地解析（代码直通、名称精确/唯一包含命中）
+                const r = await resolveStockName(name);
+                const pageUrl = r.ok ? stockPageUrl(r) : '';
+                if (r.ok && pageUrl) {
+                    url = pageUrl;
+                    code = r.code || '';
+                    prefix = r.prefix || '';
+                    stockName = r.name || stockName;
+                } else if (!r.ok && !r.degrade) {
+                    // 名称有误/多候选/ETF 名称：不导入，交由模型核对或改用代码/网址
+                    unresolved.push({ name, reason: resolveErrorText(r) });
+                    continue;
+                }
+            } else {
+                // 网址方式：雪球个股页可提取 6 位代码时顺带补齐 code/prefix，用于直取行情
+                const c = codeFromStockUrl(url);
+                if (c) {
+                    const r = await resolveStockName(c);
+                    code = c;
+                    if (r.ok) {
+                        prefix = r.prefix || '';
+                        stockName = r.name || stockName;
+                    }
+                }
+            }
             if (!url) {
-                rejected.push({ name, reason: '只支持普通股票名称、ETF 代码（159/51/58 开头 6 位）或雪球/问财网址，其他网址不支持' });
+                rejected.push({ name, reason: '只支持普通股票名称、6 位代码（含 ETF/LOF）或雪球/问财网址，其他网址不支持' });
                 continue;
             }
-            const exist = list.find(s => String(s.url || '') === url);
+            const exist = list.find(s => String(s.url || '') === url || (code && String(s.code || '') === code));
             if (exist) {
                 // 已存在股票名称去空白：修复历史落库时残留的中间空格
                 exist.name = cleanStockName(exist.name);
@@ -421,8 +456,8 @@ export const toolExecutors = {
                 continue;
             }
             list.push({
-                // 名称先用输入词落库（与插件快速导入一致），抓取成功后由 background 回填覆盖
-                url, name: cleanStockName(name), code: '', prefix: '',
+                // 名称先用解析结果/输入词落库（与插件快速导入一致），行情落地后会覆盖为接口规范名
+                url, name: stockName, code, prefix,
                 startPrice: null, currentPrice: null, percent: null,
                 importPrice,
                 targetPercentLe: null, targetPercentGe: null,
@@ -430,11 +465,19 @@ export const toolExecutors = {
                 stopRunning: false, notifiedDaily: false, notifiedImport: false,
                 inTrash: false, pinned: false, pinOrder: null, createdAt: Date.now(),
             });
-            added.push({ name, url });
+            added.push({ name: stockName, url, code });
         }
         if (added.length === 0) {
-            if (excluded.length > 0 && rejected.length === 0 && skipped.length === 0) {
-                return { error: `检测到 ETF「${excluded.join('、')}」，已阻止按名称自动导入（需用雪球网址）`, manual_required: true, excluded };
+            if (excluded.length > 0 && rejected.length === 0 && skipped.length === 0 && unresolved.length === 0) {
+                return { error: ETF_BY_NAME_ERROR(excluded.join('、')), manual_required: true, excluded };
+            }
+            if (unresolved.length > 0 && rejected.length === 0 && skipped.length === 0) {
+                // 名称解析不到代码：不建可疑条目，把原因交回模型（可改用 6 位代码或雪球网址）
+                return {
+                    error: `按名称未解析到股票代码：${unresolved.map(u => `${u.name}（${u.reason}）`).join('；')}`,
+                    unresolved,
+                    excluded: etfNames,
+                };
             }
             if (rejected.length > 0) {
                 return { error: `没有可导入的股票：${rejected.map(r => r.name).join('、')}（${rejected[0].reason}）`, rejected };
@@ -450,23 +493,32 @@ export const toolExecutors = {
             return { error: '没有可导入的股票' };
         }
         await storageSet(chrome.storage.local, { portfolios: combos, stockList: mirror });
-        // 为每只股票安排延迟+抖动的页面打开（后台执行，不阻塞返回）
+        // 落地方式：自动模式按代码直取行情（不打开页面），未取到行情的代码才回退页面抓取；
+        // refresh_via_page=true / 代码表不可用 / 无 6 位代码的网址项，按原有页面方式逐个打开
+        const codes = codesOf(added); // 去重后的 6 位代码（批量行情取数入参）
+        const missingCodes = (autoMode && codes.length > 0) ? await fetchQuotesByCodes(codes) : codes;
+        const pageTargets = autoMode ? added.filter(a => !a.code || missingCodes.includes(a.code)) : added;
+        // 为需要页面抓取的股票安排延迟+抖动的页面打开（后台执行，不阻塞返回）
         const now = Date.now();
-        if (nextRefreshOneAt < now) nextRefreshOneAt = now;
-        added.forEach(({ name, url }) => {
-            nextRefreshOneAt += 1500 + Math.random() * 700;
-            const scheduledTime = nextRefreshOneAt;
-            setTimeout(() => {
-                try { chrome.runtime.sendMessage({ action: 'refreshOne', url }); } catch { }
-            }, scheduledTime - now);
-        });
+        if (pageTargets.length > 0) {
+            if (nextRefreshOneAt < now) nextRefreshOneAt = now;
+            pageTargets.forEach(({ url }) => {
+                nextRefreshOneAt += 1500 + Math.random() * 700;
+                const scheduledTime = nextRefreshOneAt;
+                setTimeout(() => {
+                    try { chrome.runtime.sendMessage({ action: 'refreshOne', url }); } catch { }
+                }, scheduledTime - now);
+            });
+        }
         const hintParts = [`已保存 ${added.length} 支到「${portfolio}」`];
         if (skipped.length > 0) hintParts.push(`${skipped.length} 支已在组合中`);
-        if (excluded.length > 0) hintParts.push(`${excluded.length} 支 ETF 已排除（请用雪球网址或手动新增）`);
+        if (excluded.length > 0) hintParts.push(`${excluded.length} 支 ETF 已排除（请用 6 位代码或雪球网址）`);
+        if (unresolved.length > 0) hintParts.push(`${unresolved.length} 项名称未解析到代码（${unresolved.map(u => u.name).join('、')}，可改用 6 位代码或雪球个股网址）`);
         if (rejected.length > 0) hintParts.push(`${rejected.length} 项不支持（${rejected.map(r => r.name).join('、')}）`);
         if (rawPrice != null) hintParts.push(`初始价已按传入价设置（行情刷新不会覆盖）`);
-        hintParts.push(`页面将逐个打开抓取`);
-        return { ok: true, names: added.map(a => a.name), portfolio, hint: hintParts.join('，'), rejected, excluded: etfNames };
+        if (autoMode && pageTargets.length === 0) hintParts.push('行情已按代码直接取回，未打开页面');
+        else if (pageTargets.length > 0) hintParts.push(`${pageTargets.length} 支将打开页面抓取`);
+        return { ok: true, names: added.map(a => a.name), portfolio, hint: hintParts.join('，'), rejected, excluded: etfNames, unresolved };
     },
     async move_stock_to_combo(args) {
         const name = String(args.name || '').trim();
@@ -1105,6 +1157,40 @@ async function searchCodeInDatabase(name) {
     if (!rows.length) return null;
     const best = rows.find(r => String(r.name).trim() === kw) || rows[0];
     return { code: String(best[codeCol]).toUpperCase(), name: best.name || kw, table: plan.basicTable };
+}
+
+// ETF 名称拦截文案（add_stock_to_portfolio 两处共用同一口径）：ETF 只能按 6 位代码或雪球网址导入
+const ETF_BY_NAME_ERROR = (names) => `检测到 ETF「${names}」，无法按名称导入（本地代码表不含基金条目）。请改用 6 位 ETF 代码（如 588000、510300）或雪球个股网址（如 https://xueqiu.com/S/SH588000）：先用代码/网址调用本工具即可，或在插件中手动新增。`;
+
+// 从雪球个股页网址里取 6 位代码（仅 /S/<前缀><代码> 形式能可靠提取；问财搜索页取不到）
+function codeFromStockUrl(url) {
+    const m = String(url || '').match(/xueqiu\.com\/S\/(?:[A-Za-z]{2})?(\d{6})/);
+    return m ? m[1] : '';
+}
+
+// 插件设置「输入名称时自动匹配股票代码」（sync.autoResolveStock，默认开启）：
+// AI 添加股票与插件同口径——开启时按本地代码表解析后直接取行情、不打开页面
+async function autoResolveEnabled() {
+    try {
+        const { autoResolveStock } = await storageGet(chrome.storage.sync, 'autoResolveStock');
+        return autoResolveStock !== false;
+    } catch {
+        return true; // 读不到设置按默认开启
+    }
+}
+
+// 经 background 按代码直取行情并落地（与插件自动模式共用通道），返回未取到行情的代码。
+// 后台无响应/异常时原样返回全部代码 → 调用方回退「打开页面抓取」，不丢数据
+async function fetchQuotesByCodes(codes) {
+    try {
+        const r = await new Promise((resolve) => {
+            chrome.runtime.sendMessage({ action: 'quoteCodes', codes }, (resp) => resolve(resp || null));
+        });
+        if (!r || !Array.isArray(r.missing)) return codes;
+        return r.missing;
+    } catch {
+        return codes;
+    }
 }
 
 async function resolveStockCode(args) {

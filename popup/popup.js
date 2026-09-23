@@ -998,6 +998,8 @@ initState().then(() => {
         quickImportInStockWindow = result.quickImportInStockWindow !== false; // 默认开启
         autoResolveStock = result.autoResolveStock !== false; // 默认开启
         applyStockUrlModeVisibility(); // 自动模式关闭时新增弹窗隐藏「按名称/代码」切换
+        // 初始化标签/占位符/悬停提示：自动模式关闭时新增必然是「按网址」，文案须同口径
+        applyStockUrlMode(autoResolveStock ? stockUrlMode() : 'url');
         enableAi = result.enableAi !== false; // 默认开启
         keepMonitoringOnClose = !!result.keepMonitoringOnClose;
         keepRefreshOnClose = !!result.keepRefreshOnClose;
@@ -1039,11 +1041,22 @@ function splitQuickOpenInput() {
     return quickOpenEl.value.split(/[\s,，、；;|\/*]+/).filter(item => item && !/^-+$/.test(item));
 }
 
+// 当前活动组合的选择器（各组合选择器独立，popup 顶部的下拉框即当前组合的选择器）。
+// 新增/导入/快速打开都按它决定打开哪个站点：wc1 → 问财，xq1 → 雪球
+function activeSelectorName() {
+    return (portfolios[activePortfolio] && portfolios[activePortfolio].selectorName) || selectorName || 'wc1';
+}
+
+// 指定组合的选择器（一键导入到非活动组合时用；缺省回退活动组合的选择器）
+function selectorOfPortfolio(name) {
+    return (portfolios[name] && portfolios[name].selectorName) || activeSelectorName();
+}
+
 // 按快速打开逻辑构造单个搜索项的跳转地址：
 // ETF（159/51/58）问财不支持，直接开雪球个股页；其余跟随选择器（xq1 雪球搜索，否则问财搜索）。
 // sn 缺省用当前组合的选择器；一键导入到别的组合时传该组合自己的选择器（各组合选择器独立）
 function buildQuickOpenUrl(item, sn) {
-    const sel = sn || selectorName;
+    const sel = sn || activeSelectorName();
     const etfPrefix = etfPrefixForCode(item);
     if (etfPrefix) {
         return `https://xueqiu.com/S/${etfPrefix}${item}`;
@@ -1120,13 +1133,15 @@ function buildImportSummary(added, skipped, name, missingCount) {
     return parts.join('，');
 }
 
-// 自动模式下的快速打开：解析后直开雪球个股页；解析失败回退原搜索页地址。
+// 自动模式下的快速打开：解析后按当前组合的选择器开页（wc1 → 问财搜索页 / xq1 → 雪球个股页，
+// ETF 恒雪球）；解析失败回退原搜索页地址。
 // 与快速打开原有约定一致：只打开页面，不放开抓取窗口、不触发数据落地
 async function openQuickOpenPages(items) {
+    const sn = activeSelectorName();
     const urls = [];
     for (const item of items) {
         const r = await resolveStockName(item);
-        urls.push((r.ok && stockPageUrl(r)) || buildQuickOpenUrl(item));
+        urls.push((r.ok && normalizeUrl(entryStockUrlFor(r, sn, stockPageUrl(r)))) || buildQuickOpenUrl(item, sn));
     }
     let delay = 0;
     urls.forEach((url) => {
@@ -1143,7 +1158,8 @@ quickOpenEl.addEventListener('keydown', (event) => {
         // 快速打开仅负责打开网页，不放开抓取窗口、不触发数据落地：
         // 只有「全量刷新 / 开始监控 / 新增·一键导入的 refreshOne」才更新数据，
         // 避免浏览页面被误回填，或解析失败误报「数据更新失败」
-        // 自动模式：名称/代码解析后直开个股页（失败回退原搜索页），同样不写库
+        // 自动模式：名称/代码解析后按活动组合的选择器打开（wc1 → 问财搜索页 / xq1 → 雪球个股页，
+        // ETF 恒雪球；解析失败回退同口径搜索页），同样不写库
         if (autoResolveStock) { openQuickOpenPages(items); return; }
 
         // 逐个延迟打开，避免一次性打开过多页面（1.5-2.2s 随机间隔）
@@ -1151,7 +1167,7 @@ quickOpenEl.addEventListener('keydown', (event) => {
         items.forEach((item) => {
             delay += 1500 + Math.random() * 700;
             setTimeout(() => {
-                chrome.tabs.create({ url: buildQuickOpenUrl(item) });
+                chrome.tabs.create({ url: buildQuickOpenUrl(item, activeSelectorName()) });
             }, delay);
         });
     }
@@ -1216,7 +1232,7 @@ function executeQuickImport(items, name) {
 function executeQuickImportByPage(toImport, name, target) {
     const now = Date.now();
     // 目标组合自己的选择器：条目地址与打开地址都按它生成（各组合选择器独立）
-    const sn = (portfolios[name] && portfolios[name].selectorName) || selectorName || 'wc1';
+    const sn = selectorOfPortfolio(name);
     let added = 0;
     let skipped = 0;
     toImport.forEach(item => {
@@ -1266,7 +1282,7 @@ function executeQuickImportByPage(toImport, name, target) {
 async function executeQuickImportAuto(items, name, target) {
     // 目标组合自己的选择器：条目的存储 URL 按它生成（wc1 → 问财搜索页 / xq1 → 雪球个股页），
     // 与刷新生效地址（effectiveStockUrl）同口径，避免「选择器=问财却打开雪球」
-    const sn = (portfolios[name] && portfolios[name].selectorName) || selectorName || 'wc1';
+    const sn = selectorOfPortfolio(name);
     let added = 0;
     let skipped = 0;
     const addedItems = [];
@@ -1380,7 +1396,7 @@ addStockEl.addEventListener('click', () => {
     editActionsTopEl.style.display = 'none';
     stockUrlGroupEl.style.display = ''; // 新增需填网址（或名称/代码）
     stockUrlEl.disabled = false;
-    applyStockUrlMode('name'); // 每次新增默认回到「按名称/代码」
+    applyStockUrlMode(autoResolveStock ? 'name' : 'url'); // 新增默认「按名称/代码」；自动模式关闭时只剩按网址
     applyStockUrlModeVisibility(); // 自动模式关闭时只保留「按网址」
 });
 
@@ -1392,7 +1408,15 @@ function stockUrlMode() {
     return el ? el.value : 'url'; // DOM 缺失时按网址（保守回退）
 }
 
-// 切换新增方式：同步标签/占位符并清空输入（两种方式的输入内容不通用）
+// 按网址方式的示例地址：跟随当前组合的选择器（xq1 → 雪球个股页，否则问财搜索页），
+// 与刷新/快速打开打开的站点同口径，避免示例指向用户当前并不使用的站点
+function stockUrlExample() {
+    return activeSelectorName() === 'xq1'
+        ? 'https://xueqiu.com/S/SH600519'
+        : 'https://www.iwencai.com/screener/result?w=贵州茅台';
+}
+
+// 切换新增方式：同步标签/占位符/悬停提示并清空输入（两种方式的输入内容不通用）
 function applyStockUrlMode(mode) {
     const byName = mode !== 'url';
     if (stockUrlLabelEl) {
@@ -1400,7 +1424,11 @@ function applyStockUrlMode(mode) {
             ? '股票名称或代码&nbsp;<span class="warn">*</span>'
             : '网址&nbsp;<span class="warn">*</span>';
     }
-    stockUrlEl.placeholder = byName ? '如 贵州茅台 或 600519' : '网址';
+    stockUrlEl.placeholder = byName ? '如 贵州茅台 或 600519' : '问财或雪球股票详情页';
+    // 悬停提示：按网址方式只接受问财/雪球个股页，给出可直接照抄的示例
+    stockUrlEl.title = byName
+        ? '填名称或 6 位代码，自动匹配股票代码（如 贵州茅台 或 600519）'
+        : `问财或雪球股票详情页，例如 ${stockUrlExample()}`;
     stockUrlEl.value = '';
 }
 
@@ -1421,7 +1449,7 @@ async function handleAddByName(raw) {
     const r = await resolveStockName(input);
     if (r.degrade) { alert('本地股票代码表不可用，请改用「按网址」方式添加'); return; }
     if (!r.ok) { alert(resolveErrorText(r)); return; }
-    const url = normalizeUrl(entryStockUrlFor(r, (portfolios[activePortfolio] && portfolios[activePortfolio].selectorName) || selectorName || 'wc1', stockPageUrl(r)));
+    const url = normalizeUrl(entryStockUrlFor(r, activeSelectorName(), stockPageUrl(r)));
     if (!url) { alert('未能生成个股页地址，请改用「按网址」方式添加'); return; }
     if (stockList.some(s => (r.code && s.code === r.code) || s.url === url)) {
         alert(`「${r.name || r.code}」已在当前组合中`);

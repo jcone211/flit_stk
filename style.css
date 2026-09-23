@@ -1107,20 +1107,58 @@ button:disabled {
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
 }
 
-/* 新增股票：名称/网址 输入方式切换（单选，紧凑一行） */
+/* 新增股票：名称/网址 输入方式切换（单选，分段控件样式，整宽两段、单行不换行）。
+   注：label 内部文字是 flex 匿名项，不加 nowrap 会被压缩成竖排（弹窗里显示为「按名/称代/码」三行） */
 .url-mode-switch {
   display: flex;
-  gap: 12px;
-  margin-bottom: 6px;
+  width: 100%;
+  box-sizing: border-box;
+  gap: 2px;
+  margin-bottom: 8px;
+  padding: 2px;
+  background: #e8ebee;
+  border-radius: 10px;
   font-size: 12px;
-  color: #606770;
+  color: #8a919a;
 }
 
 .url-mode-switch label {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 4px;
+  flex: 1 1 0;
+  min-width: 0;
+  height: 24px;
+  margin-bottom: 0;
+  padding: 0 6px;
+  border-radius: 8px;
+  font-weight: 400;
+  line-height: 24px;
+  white-space: nowrap;
   cursor: pointer;
+  transition:
+    background-color 0.2s ease,
+    color 0.2s ease;
+}
+
+.url-mode-switch label:hover {
+  color: #2e7d32;
+}
+
+/* 选中态高亮（:has 选中单选框；扩展只在现代 Chrome 运行，无需回退分支） */
+.url-mode-switch label:has(input:checked) {
+  background: #fff;
+  color: #2e7d32;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
+}
+
+.url-mode-switch input[type="radio"] {
+  flex: 0 0 auto;
+  width: 13px;
+  height: 13px;
+  margin: 0;
+  accent-color: #2e7d32;
 }
 
 /* 间距由 .alert-section 的 gap 统一提供，组自身不再带外边距 */

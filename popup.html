@@ -408,12 +408,15 @@
                 </div>
                 <form>
                     <div id="stockUrlGroup">
-                        <!-- 新增方式：按名称/代码（走本地代码表解析）或按网址（原方式） -->
-                        <div class="url-mode-switch" id="stockUrlModeSwitch">
-                            <label><input type="radio" name="stockUrlMode" value="name" checked> 按名称/代码</label>
-                            <label><input type="radio" name="stockUrlMode" value="url"> 按网址</label>
+                        <!-- 新增方式：默认按名称/代码（走本地代码表解析），右侧分段按钮切到「按网址」（原方式）。
+                             分段样式与下方「股价提醒」的当日/导入以来一致（同 .alert-dim-switch 观感） -->
+                        <div class="url-input-head">
+                            <label id="stockUrlLabel" for="stockUrl">股票名称或代码 <span class="warn">*</span></label>
+                            <div class="url-mode-switch" id="stockUrlModeSwitch">
+                                <button type="button" id="stockUrlModeNameBtn" class="active">按名称/代码</button>
+                                <button type="button" id="stockUrlModeUrlBtn">按网址</button>
+                            </div>
                         </div>
-                        <label for="stockUrl" id="stockUrlLabel">股票名称或代码&nbsp;<span class="warn">*</span></label>
                         <input type="text" id="stockUrl" placeholder="如 贵州茅台 或 600519">
                     </div>
                     <div class="detail-section alert-section">

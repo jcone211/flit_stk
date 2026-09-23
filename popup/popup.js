@@ -185,6 +185,8 @@ const enableQuickImportToggleEl = document.getElementById('enableQuickImportTogg
 const quickImportInStockWindowToggleEl = document.getElementById('quickImportInStockWindowToggle');
 const autoResolveStockToggleEl = document.getElementById('autoResolveStockToggle');
 const stockUrlModeSwitchEl = document.getElementById('stockUrlModeSwitch');
+const stockUrlModeNameBtnEl = document.getElementById('stockUrlModeNameBtn');
+const stockUrlModeUrlBtnEl = document.getElementById('stockUrlModeUrlBtn');
 const stockUrlLabelEl = document.getElementById('stockUrlLabel');
 const dataSourceSelectEl = document.getElementById('dataSourceSelect');
 const apiKeyInputEl = document.getElementById('apiKeyInput');
@@ -1404,8 +1406,8 @@ addStockEl.addEventListener('click', () => {
 // 自动模式（默认开启）下默认「按名称/代码」：填名称或 6 位代码，本地代码表解析后直取行情、
 // 不打开页面；选「按网址」或关闭自动模式时，完全沿用原有按网址新增流程。
 function stockUrlMode() {
-    const el = stockUrlModeSwitchEl && stockUrlModeSwitchEl.querySelector('input[name="stockUrlMode"]:checked');
-    return el ? el.value : 'url'; // DOM 缺失时按网址（保守回退）
+    // 分段按钮：右侧「按网址」为选中态 → url，否则按名称/代码
+    return (stockUrlModeUrlBtnEl && stockUrlModeUrlBtnEl.classList.contains('active')) ? 'url' : 'name';
 }
 
 // 按网址方式的示例地址：跟随当前组合的选择器（xq1 → 雪球个股页，否则问财搜索页），
@@ -1417,8 +1419,16 @@ function stockUrlExample() {
 }
 
 // 切换新增方式：同步标签/占位符/悬停提示并清空输入（两种方式的输入内容不通用）
+// 当前输入方式是否「按网址」（分段按钮：按网址段选中 = 按网址）
+function urlModeIsUrl() {
+    return stockUrlMode() === 'url';
+}
+
 function applyStockUrlMode(mode) {
     const byName = mode !== 'url';
+    // 分段按钮选中态与当前方式保持一致（点按钮/程序切换都走到这里）
+    if (stockUrlModeNameBtnEl) stockUrlModeNameBtnEl.classList.toggle('active', byName);
+    if (stockUrlModeUrlBtnEl) stockUrlModeUrlBtnEl.classList.toggle('active', !byName);
     if (stockUrlLabelEl) {
         stockUrlLabelEl.innerHTML = byName
             ? '股票名称或代码&nbsp;<span class="warn">*</span>'
@@ -1438,8 +1448,11 @@ function applyStockUrlModeVisibility() {
     stockUrlModeSwitchEl.style.display = autoResolveStock ? '' : 'none';
 }
 
-if (stockUrlModeSwitchEl) {
-    stockUrlModeSwitchEl.addEventListener('change', () => applyStockUrlMode(stockUrlMode()));
+if (stockUrlModeNameBtnEl) {
+    stockUrlModeNameBtnEl.addEventListener('click', () => applyStockUrlMode('name'));
+}
+if (stockUrlModeUrlBtnEl) {
+    stockUrlModeUrlBtnEl.addEventListener('click', () => applyStockUrlMode('url'));
 }
 
 // 新增（按名称/代码）：解析成功才建条目，随后直取行情落地；未取到行情回退打开个股页抓取。

@@ -102,7 +102,10 @@ export const state = {
     lastRequestSnapshot: null,
     pendingImages: [],
     lastFailUi: null,
-    activeToolGroups: new Set(),
+    // T4：portfolio / workspace 两组默认常驻——记账、查组合、读写 flit/ 文件都是高频动作，
+    // 让模型为它们各花一轮 load_tool_group 纯属浪费往返（docs/archive/debug.txt 头部两轮）；
+    // bridge 由桥接开关动态增删（ai_settings/ai.js），market、events 等仍按需加载
+    activeToolGroups: new Set(['portfolio', 'workspace']),
     // 本轮（一次用户提问内含若干 function-calling 轮）的工具原始返回缓存，以及待落库的「跨轮数据便签」；
     // 两者都由 ai.js 逐轮重置/排空，retain_tool_data 只读写这两个字段
     turnToolResults: [],

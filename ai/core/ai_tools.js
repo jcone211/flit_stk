@@ -30,6 +30,9 @@ import { bridgeRequest, bridgeHealth } from './bridge_client.js';
 // add_stock_to_portfolio 跨调用共享的页面打开时序计数器
 let nextRefreshOneAt = 0;
 
+// read_file 整读返回的字符上限（超出即截断并提示改用 start_line/end_line 分段；行区间读取不受此限）
+const READ_FILE_CHARS = 20000;
+
 // 把工具参数里的买入价/初始价转成数字：空或非法返回 null，负数视为无效。
 // 批量添加多只时 import_price 可传数组与 names 一一对应；数组越界按「未提供」处理（不设价）
 function parsePriceArg(v) {
@@ -42,12 +45,44 @@ function priceArgFor(rawPrice, i) {
     return parsePriceArg(want);
 }
 
+// add_stock_to_portfolio 落地后回填「每只股票现在长什么样」：行情字段以 storage 为准
+// （background 落库写的是同一份数据），标识/初始价以本次写入的内存条目为准，
+// 免得模型为了确认结果再调一次 get_stock_list 自查（docs/archive/debug.txt 的 15 次调用里有一次就干这个）。
+async function landedItems(portfolio, added, localList) {
+    let remoteList = null;
+    try {
+        const { portfolios } = await storageGet(chrome.storage.local, 'portfolios');
+        remoteList = (portfolios && portfolios[portfolio] && portfolios[portfolio].stockList) || null;
+    } catch { remoteList = null; }
+    const matchIn = (arr, a) => (arr || []).find(x => (a.url && String(x.url || '') === a.url)
+        || (a.code && String(x.code || '') === String(a.code))) || null;
+    return added.map(a => {
+        const local = matchIn(localList, a);
+        const remote = matchIn(remoteList, a) || local;
+        const owner = local || remote || {};
+        return {
+            name: (remote && remote.name) || (local && local.name) || a.name,
+            code: owner.code ? (owner.prefix ? owner.prefix + ':' + owner.code : String(owner.code)) : (a.code || ''),
+            url: (local && local.url) || (remote && remote.url) || a.url,
+            importPrice: (local && local.importPrice != null) ? local.importPrice
+                : ((remote && remote.importPrice != null) ? remote.importPrice : null),
+            currentPrice: (remote && remote.currentPrice != null) ? remote.currentPrice
+                : ((local && local.currentPrice != null) ? local.currentPrice : null),
+            percent: (remote && remote.percent != null) ? remote.percent
+                : ((local && local.percent != null) ? local.percent : null),
+            数据时间: fmtDateTimeStr((remote && remote.lastUpdateAt) || (local && local.lastUpdateAt) || 0),
+        };
+    });
+}
+
 function isEtfName(name) {
     return /ETF|交易型开放式|指数基金/i.test(String(name || ''));
 }
 
 export const TOOL_DEFS = [
-    { type: 'function', function: { name: 'get_stock_list', description: '读取股票列表：不传 portfolio 读当前活动组合；传组合名读指定组合（组合名可用 get_portfolios 查询）', parameters: { type: 'object', properties: { portfolio: { type: 'string', description: '组合名，如「持仓」「观察」；缺省为当前活动组合' } }, required: [] } } },
+    { type: 'function', function: { name: 'get_stock_list', description: '读取股票列表：不传 portfolio 读当前活动组合；传组合名读指定组合（组合名可用 get_portfolios 查询）。只想找「某只股票在哪、代码是什么」请用 find_stock 一次跨全部组合查，不要逐个组合扫', parameters: { type: 'object', properties: { portfolio: { type: 'string', description: '组合名，如「持仓」「观察」；缺省为当前活动组合' } }, required: [] } } },
+    { type: 'function', function: { name: 'find_stock', description: '跨全部组合查找一只股票/ETF：按名称、6 位代码或雪球个股网址，一次返回它在哪些组合、代码、初始价与现价、是否停止监控/在垃圾池。判断「是否已持有」「加仓前的原成本」「这个 ETF 的代码是多少」「在哪只组合」一律先用它，不要逐个 get_stock_list 扫组合', parameters: { type: 'object', properties: { keyword: { type: 'string', description: '股票名称（如「湖南黄金」）、6 位代码（如 588000）或雪球个股网址' } }, required: ['keyword'] } } },
+
     { type: 'function', function: { name: 'get_portfolios', description: '读取全部持仓组合结构（各组合名称与股票数量）及当前活动组合', parameters: { type: 'object', properties: {}, required: [] } } },
     { type: 'function', function: { name: 'switch_portfolio', description: '切换当前活动组合（影响插件弹窗显示与定时监控范围），先校验组合是否存在', parameters: { type: 'object', properties: { name: { type: 'string', description: '目标组合名' } }, required: ['name'] } } },
     { type: 'function', function: { name: 'get_key_points', description: '读取交易要点列表（要点内容与权重）', parameters: { type: 'object', properties: {}, required: [] } } },
@@ -69,7 +104,7 @@ export const TOOL_DEFS = [
     { type: 'function', function: { name: 'refresh_all', description: '触发扩展全量刷新全部组合股票（按全局设置的数据获取方式执行）', parameters: { type: 'object', properties: {}, required: [] } } },
     { type: 'function', function: { name: 'list_workspaces', description: '列出已授权的全部工作目录（主目录与附加目录）及其权限状态', parameters: { type: 'object', properties: {}, required: [] } } },
     { type: 'function', function: { name: 'list_dir', description: '列出工作目录（或子目录）内容。root 缺省为主目录，可传附加目录名；软链接条目无法访问（浏览器安全限制）', parameters: { type: 'object', properties: { path: { type: 'string', description: '相对所选目录的路径，空为根目录' }, root: { type: 'string', description: '工作目录名，可用 list_workspaces 查询；缺省为主目录' } }, required: [] } } },
-    { type: 'function', function: { name: 'read_file', description: '读取工作目录中的文本文件内容，支持 Markdown、JSON、JavaScript、CSS、TXT、CSV 等文本文件；路径相对当前工作区；内容过长时会截断', parameters: { type: 'object', properties: { path: { type: 'string' }, root: { type: 'string' } }, required: ['path'] } } },
+    { type: 'function', function: { name: 'read_file', description: '读取工作目录中的文本文件内容，支持 Markdown、JSON、JavaScript、CSS、TXT、CSV 等文本文件；路径相对当前工作区；内容过长会截断，此时用 start_line/end_line 分段读取（返回里给 totalLines 行数）', parameters: { type: 'object', properties: { path: { type: 'string' }, root: { type: 'string' }, start_line: { type: 'integer', minimum: 1, description: '起始行（含），1 起计；缺省从头读' }, end_line: { type: 'integer', minimum: 1, description: '结束行（含）；缺省读到末尾' } }, required: ['path'] } } },
     { type: 'function', function: { name: 'read_parquet', description: '读取工作目录中的 Parquet 数据文件，返回列名、总行数和限定数量的行。适合查看回测/备份用的 parquet 文件；path 必须是相对授权工作目录的路径，root 缺省为主目录。默认最多返回 100 行，可用 columns 选择列。本工具不参与股票 K 线取数；查询股票 K 线请走 read_stock_kline / read_stocks_kline（它们只读本地数据库）。', parameters: { type: 'object', properties: { path: { type: 'string', description: '相对工作目录的 .parquet 文件路径' }, root: { type: 'string', description: '工作目录名，缺省为主目录' }, columns: { type: 'array', items: { type: 'string' }, description: '要读取的列名；缺省读取全部列' }, row_start: { type: 'integer', minimum: 0, description: '起始行，缺省 0' }, limit: { type: 'integer', minimum: 1, maximum: 500, description: '最多返回行数，缺省 100，最大 500' } }, required: ['path'] } } },
     { type: 'function', function: { name: 'read_stock_kline', description: '获取单只股票近 N 个交易日日线（开/高/低/收/量/额/涨跌幅）。取数顺序：本地日线库 → 免费东财/同花顺 → 小石（仅缺 1~2 根时兜底）。≤7 个交易日不依赖 Agent 桥接，没库也能取；>7 个交易日只读本地库（保护免费渠道），库不可用时工具会返回「缺前置条件」的原因，照原样转述给用户即可，不要重试或换工具硬凑。ETF/指数不在本地库，自动走免费同花顺 ETF 日线（只有未复权价）。盘中（含午休）自动把当日未收盘 bar 拼到末行（标 intraday/as_of/quote_source）。name 与 code 二选一：按名称查询就传 name，代码解析由工具负责，不要自己猜代码。返回含 数据表 / 本地库诊断 / 数据日期 / 最新已收盘交易日 / 实时拼接 / 接口调用。', parameters: { type: 'object', properties: { name: { type: 'string', description: '股票名称，如「德明利」；与 code 二选一（代码由工具解析，不要自己猜）' }, code: { type: 'string', description: '股票代码：6 位数字（如 001309）或带市场后缀（如 001309.SZ），不要使用 SH:600519 等冒号前缀形式；与 name 二选一' }, days: { type: 'integer', minimum: 1, maximum: 60, description: '近 N 个交易日（盘中含拼接的当日实时 bar，共 N 根），缺省 30。≤7 天不依赖本地库；>7 天只读本地库，不启用免费/小石补齐' }, root: { type: 'string', description: '工作目录名，缺省为主目录（parquet 数据目录的根，如含 data/a_share_daily 的目录）' } }, required: [] } } },
     { type: 'function', function: { name: 'read_stocks_kline', description: '批量获取多只股票近 N 个交易日日线的派生指标摘要（收盘/涨跌幅/MA5・10・20/距 20 日高点回撤/量比/连续下跌/缩量/振幅/换手/近 5 日收盘），多只股票必须优先用本工具（一次取回整批）。detail=true 才附带原始 OHLCV 行。取数顺序与 7 天闸门同 read_stock_kline：≤7 天没库也能走免费，>7 天只读本地库、库不可用就照原样转述工具给的「缺前置条件」原因。ETF/指数不在本地库，自动走免费同花顺 ETF 日线。names 与 codes 可混用：按名称查询就传 names，代码解析由工具负责，不要自己猜代码。返回含 数据表 / 本地库诊断 / 数据日期 / 最新已收盘交易日 / 实时拼接 / 接口调用；末行 intraday=true 才可当现价，否则现价另调 get_stock_quote / get_portfolio_quotes。', parameters: { type: 'object', properties: { names: { type: 'array', items: { type: 'string' }, description: '股票名称数组，最多 12 只' }, codes: { type: 'array', items: { type: 'string' }, description: '股票代码数组（6 位或带 .SZ/.SH 后缀），可与 names 混用' }, days: { type: 'integer', minimum: 1, maximum: 60, description: '近 N 个交易日，缺省 18。≤7 天不依赖本地库；>7 天只读本地库，不启用免费/小石补齐' }, detail: { type: 'boolean', description: 'true 时返回原始 K 线行，缺省 false 只返回摘要' }, max_rows: { type: 'integer', minimum: 1, maximum: 18, description: 'detail=true 时每只最多返回行数，缺省 5' }, root: { type: 'string', description: '工作目录名，缺省为主目录' } }, required: [] } } },
@@ -88,7 +123,7 @@ export const TOOL_DEFS = [
 ];
 
 export const TOOL_GROUPS = {
-    portfolio: ['get_stock_list', 'get_portfolios', 'switch_portfolio', 'add_stock_to_portfolio', 'move_stock_to_combo', 'remove_stock', 'move_stock_to_trash', 'get_current_view'],
+    portfolio: ['get_stock_list', 'find_stock', 'get_portfolios', 'switch_portfolio', 'add_stock_to_portfolio', 'move_stock_to_combo', 'remove_stock', 'move_stock_to_trash', 'get_current_view'],
     market: ['get_stock_quote', 'get_portfolio_quotes', 'refresh_all', 'read_stock_kline', 'read_stocks_kline'],
     events: ['get_key_points', 'create_key_point', 'update_key_point', 'delete_key_point', 'get_events', 'create_event', 'update_event', 'delete_event'],
     settings: ['get_settings', 'update_cron'],
@@ -97,11 +132,11 @@ export const TOOL_GROUPS = {
     bridge: ['get_workspace_context', 'discover_database_schema', 'query_local_database', 'save_workspace_database_config', 'record_workspace_memory', 'run_workspace_process', 'bridge_health'],
 };
 export const TOOL_GROUP_RULES = {
-    portfolio: '组合和股票工具：需要组合名时先读取组合结构，按用户指定组合操作。用户说买入或卖出股票时，必须先向 flit/买入卖出.md 追加交易记录，再尝试导入或从组合移除；无论单只/多只股票中有一只或多只导入失败、ETF 被排除、股票已被手动移除、或组合操作失败，都不能跳过记录。每条至少记录操作日期和股票名称；买入价格、成交金额只有用户提供时才记录，未提供的字段不要猜测或写占位值。用户提供了买入价/成交价/成本价时，把该价格作为 import_price 传给 add_stock_to_portfolio，作为该股票初始价；多只股票价格不同时，import_price 传与 names 一一对应的数组（如 names=[A,B]、import_price=[5.7,6.67]），不要只传一个数导致其他股票初始价错误。初始价一旦设置，之后行情刷新抓取不会覆盖（插件只在初始价为空时才用最新价自动回填）。追加写入，不得覆盖历史记录。买入/导入 ETF 时禁止把 ETF 名称生成问财地址、也禁止把 ETF 名称直接传给 add_stock_to_portfolio（名称含「ETF」会被工具拦截）；ETF 必须用 6 位 ETF 代码或雪球个股网址——已知代码直接传代码（如 588000、510300），不知道代码时自行打开 https://xueqiu.com 搜索相关 ETF 复制个股网址（如 https://xueqiu.com/S/SH588000），把代码或该雪球网址作为 names 传给 add_stock_to_portfolio 直接新增（工具会取实时行情落地），或在插件中手动新增；绝不能用问财搜索页代替。删除股票用 remove_stock（真删除不可恢复）；把股票移入垃圾池用 move_stock_to_trash（可在插件垃圾池视图恢复）；单纯调整组合归属用 move_stock_to_combo。不要用「移出→重新添加」的方式修正初始价（会丢数据并在目标组合留残留）。',
+    portfolio: '组合和股票工具：需要组合名时先读取组合结构。用户说买入或卖出股票时，先向 flit/买入卖出.md 追加交易记录，再导入或从组合移除；部分项失败也要记录，不得因操作失败跳过。每条至少写操作日期与股票名称；买入价格、成交金额只有用户提供时才写，未提供的字段不要猜测或写占位值。查一只股票在哪、代码是什么、现在成本多少，一律用 find_stock 一次跨全部组合查（不要逐个 get_stock_list 扫组合）。用户给了买入价/成本价就作为 import_price 传给 add_stock_to_portfolio，多只价格不同时传与 names 一一对应的数组（如 names=[A,B]、import_price=[5.7,6.67]）；初始价一经写入不会被行情刷新覆盖。add_stock_to_portfolio 只新增不覆盖：目标组合里已有该股票时返回 alreadyPresent 与 items 明细（不新增第二条、不改原初始价），照常记账即可，不要重复导入，也不要用「移出→重新添加」改初始价（会丢数据并在组合里留残留）。股票已在别的组合就改用 move_stock_to_combo 调归属。ETF/基金（名称含 ETF/LOF）不能按名称导入——本地代码表不含基金条目，按名称必被拒，也禁止改用问财搜索页；拿 ETF 代码的优先级：① 先用 find_stock 按名称查（其他组合里通常已有该 ETF 的 6 位代码与雪球地址）② 用户给了 6 位代码就直接传代码 ③ 都拿不到就问用户要 6 位代码或雪球个股网址（如 https://xueqiu.com/S/SH588000）。你没有浏览网页的能力，不得声称自己打开过雪球搜索。删除股票用 remove_stock（真删除不可恢复）；把股票移入垃圾池用 move_stock_to_trash（可在垃圾池视图恢复）。',
     market: '行情工具：实时行情批量用 get_portfolio_quotes（一次返回组合全部股票）；多只股票日线用 read_stocks_kline（一次返回多只派生指标摘要），仅单只需要看原始 OHLCV 时才用 read_stock_kline。取数侧已做免费优先（本地数据库→新浪/腾讯实时、东财/同花顺日线→小石兜底）；日 K 按跨度分两档：≤7 个交易日不依赖桥接（没库就直接走免费，照样出数据），>7 个交易日为保护免费渠道只读本地库。工具返回 error 时照原样转述原因并给可行替代（改查 7 天内 / 改查实时现价 / 启用 Agent 桥接），不要重复调用同一工具。按名称查询就传 name/names，代码由工具解析，禁止自己猜代码。你不需要特意指定渠道；ETF 不在本地库内，由免费接口负责。若工具报「工作目录不存在可用数据库」，照原样转述给用户，不要改用其他工具硬凑 K 线（实时现价仍可查）。结论里要标数据日期：末行带 intraday 的是当日实时未收盘价（可称现价），不带的是已收盘日线（只能称"某日收盘"）；量能能不能当整日用看 实时拼接.量能说明。\n[上下文口径] tool 原始返回不跨轮保留（下一轮只剩一行「哪个工具成功/失败」的记录）；后面还要用这份数据就在本轮调 retain_tool_data 登记成隐藏便签，不必抄进正文。没登记又没写进正文的数据就是没了，只能重新调用（再花一次免费额度）。\n[强制取数] 输出任何行情数值（价格、涨跌幅、成交量、成交额、OHLCV、K 线表格、现价、收盘）前，本轮必须已经成功调用过行情工具（get_stock_quote / get_portfolio_quotes / read_stock_kline / read_stocks_kline）拿到真实数据；数据只能来自本轮工具返回或已登记且仍有效的跨轮便签。「≤7 个交易日不依赖本地库/桥接」只是说免费渠道能出数，绝不等于可以不调工具直接回答。用户改天数或换股票（例如 30 日改 7 日），必须重新调用取数工具，凭上一轮失败信息或记忆补写即视为编造。\n[禁止编造] 绝对禁止凭空编造行情数据。没有通过工具实际获取到真实数据前，不得输出价格数字、涨跌幅、跌停/涨停判定。宁可说「我没有查到」也不准编造。',
     events: '要点/事件工具：先读取已有要点；事件 content 只写股票名称。',
     settings: '设置工具：仅 Cron 可修改；修改前校验表达式，成功后立即生效。',
-    workspace: '工作区工具：root 用目录名定位，只访问用户已授权目录；Agent 可直接维护当前工作目录下的 flit/ 文件。',
+    workspace: '工作区工具：root 用目录名定位，只访问用户已授权目录；Agent 可直接维护当前工作目录下的 flit/ 文件。固定路径不必 list_dir 找文件名：交易记录 flit/买入卖出.md、工作区记忆 flit/memory.md、数据源配置 flit/config.json。纯买卖记账类任务不要调 get_workspace_context、也不要读 memory/FACT.md 这类大文件（只有取数/查库/策略分析才需要）。',
     memory: '记忆工具：仅保存用户明确要求长期记住的偏好。',
     bridge: `桥接工具：优先使用结构化工作区上下文和数据库 schema 查询；Agent 只能写 flit/，但可读取和执行工作目录其他目录中的已有脚本。低 Token 固定链路：先调用 get_workspace_context；若返回 config 或 memory，先使用其中的 verified_connection、database 和 workflows，不要重复读取旧文档；有匹配 workflow 时先 read_file 该流程，按其表结构和基础 SQL 执行，除非查询失败或流程明确要求，否则跳过 discover_database_schema。只有 config/memory/workflow 都不足时，才用 list_dir/read_file 搜索其他配置和脚本。发现错误时将修正经验记录到 flit/memory.md。数据库查询任务只有在“数据查询成功、连接配置已验证并保存（若原先不存在）、可复用流程已封装（若值得复用）、memory.md 已登记入口”后才算完成；不得只返回数据就结束。连接验证成功后必须调用 save_workspace_database_config 保存完整配置，该工具会同时创建 flit/.gitignore 并忽略 config.json。workflow 必须使用通用、可复用标题和文件名，不得绑定具体股票名称或本次日期，例如“查询股票近 N 个交易日行情”；内容必须包含适用条件、已验证连接/数据源名称（不得包含密码）、相关表及关键字段、历史表与当日快照的优先级和去重规则、可替换参数、可直接执行的基础 SQL，以及何时需要重新 discover_database_schema。若本次已验证出值得复用的正确执行流程，先创建 flit/workflow/ 下该流程，再调用 record_workspace_memory；memory.md 必须遵循固定格式，最上方先写“## 数据库连接状态”，明确 verified/unverified/unknown，随后只记录不含凭据的 workflow 入口、用途和触发条件；不要把完整过程、失败尝试或 SQL 结果重复写入记忆。桥接服务未启动时，bridge_health 会返回 pwsh 启动命令（含 start_note 说明首次启用需跑 install）；此时必须停止工具调用，只把命令和“请用户执行后重试”告知用户，绝对禁止通过 run_workspace_process 或其他工具启动 flit_bridge。
 [桥接不通时无级可降] bridge 报 config_invalid / bridge_unreachable / query_failed 时，表示数据源配置未落到 bridge 能读取的位置或桥接不在运行。**不要** docker inspect 查容器标签、不要搜 bridge 源码找 label key、不要推测 bridge 内部发现逻辑——这些是你没有源码权或权威文档的信息。正确做法：
@@ -114,7 +149,7 @@ export const TOOL_GROUP_RULES = {
 export const TOOL_BY_NAME = new Map(TOOL_DEFS.map(def => [def.function.name, def]));
 
 export const TOOL_GROUP_SUMMARY = {
-    portfolio: '组合/股票列表增删改查、切换活动组合与视图',
+    portfolio: '组合/股票列表增删改查、跨组合查找股票、切换活动组合与视图',
     market: '实时行情与日线取数（一律优先批量）',
     events: '交易要点与预测事件维护',
     settings: '全局设置（仅 Cron 可改）',
@@ -127,10 +162,18 @@ export const TOOL_GROUP_DEF = {
     type: 'function',
     function: {
         name: 'load_tool_group',
-        description: '按需加载一组工具定义',
+        description: '按需加载工具组定义（一次可传多组，如 ["portfolio","workspace"]，比逐组加载省一轮）',
         parameters: {
             type: 'object',
-            properties: { group: { type: 'string', enum: Object.keys(TOOL_GROUPS) } },
+            properties: {
+                group: {
+                    anyOf: [
+                        { type: 'string', enum: Object.keys(TOOL_GROUPS) },
+                        { type: 'array', items: { type: 'string', enum: Object.keys(TOOL_GROUPS) } },
+                    ],
+                    description: '工具组名；也可传数组一次加载多组（如 ["portfolio","workspace"]）',
+                },
+            },
             required: ['group'],
         },
     },
@@ -198,6 +241,71 @@ export const toolExecutors = {
         }
         return summarizeList(p.stockList || [], pickStockView);
     },
+    // T1：跨全部组合查找（含垃圾池条目）。一次答完「在哪只组合 / 代码是什么 / 原成本多少 / 是否停监控」，
+    // 取代「逐个 get_stock_list 扫组合」的搜索行为（docs/archive/debug.txt 里就有 3 次这类调用）。
+    async find_stock(args) {
+        const keyword = String((args && (args.keyword || args.name || args.code)) || '').trim();
+        if (!keyword) return { error: '请提供 keyword：股票名称、6 位代码或雪球个股网址' };
+        const { portfolios, activePortfolio, stockList } = await storageGet(chrome.storage.local, ['portfolios', 'activePortfolio', 'stockList']);
+        const combos = portfolios || {};
+        // 活动组合的镜像（stockList）在老数据里可能没有对应组合条目，兜底成可搜索的一列
+        if (!combos[activePortfolio] && Array.isArray(stockList)) combos[activePortfolio || '(活动组合)'] = { stockList };
+        // 关键词归一：名称去空白并剥掉 XD/XR/DR/ST/N 前缀（插件把当日除权股存成「XD滨化股」，用户只会说「滨化股份」）；
+        // 代码只比数字：用户可能给 588000 / SH:588000 / 588000.SH / 雪球个股网址
+        const normName = (s) => cleanStockName(String(s || '')).replace(/^(?:\*?ST|XD|XR|DR|N)+/i, '');
+        const kwName = normName(keyword);
+        const kwCode = codeFromStockUrl(keyword) || (keyword.match(/(\d{4,6})/) || [])[1] || '';
+        const hit = (s) => {
+            const code = String(s.code || '');
+            if (kwCode && code && (code === kwCode || code.endsWith(kwCode))) return true;
+            const name = normName(s.name);
+            if (!name || !kwName) return false;
+            return name === kwName || name.includes(kwName) || kwName.includes(name);
+        };
+        const groups = new Map();
+        for (const [pname, p] of Object.entries(combos)) {
+            for (const s of (p.stockList || [])) {
+                if (!hit(s)) continue;
+                const key = s.code ? 'c:' + s.code : 'n:' + normName(s.name);
+                let g = groups.get(key);
+                if (!g) {
+                    g = {
+                        name: s.name || '(待抓取)',
+                        code: s.code ? ((s.prefix || '') ? s.prefix + ':' + s.code : String(s.code)) : '',
+                        portfolios: [],
+                    };
+                    groups.set(key, g);
+                }
+                // 现价/数据时间取最新一次更新的那条（跨组合同一只股票时间戳可能不同）
+                if (s.lastUpdateAt && (!g.at || s.lastUpdateAt > g.at)) {
+                    g.at = s.lastUpdateAt;
+                    g.currentPrice = s.currentPrice ?? null;
+                    g.percent = s.percent ?? null;
+                    g.数据时间 = fmtDateTimeStr(s.lastUpdateAt);
+                }
+                g.inTrash = !!g.inTrash || !!s.inTrash;
+                g.stopRunning = !!g.stopRunning || !!s.stopRunning;
+                g.portfolios.push({
+                    portfolio: pname,
+                    active: pname === activePortfolio,
+                    importPrice: s.importPrice ?? null,
+                    currentPrice: s.currentPrice ?? null,
+                    stopRunning: !!s.stopRunning,
+                    inTrash: !!s.inTrash,
+                });
+            }
+        }
+        const items = [...groups.values()].sort((a, b) => b.portfolios.length - a.portfolios.length).slice(0, 20);
+        for (const it of items) delete it.at;
+        if (items.length === 0) {
+            return {
+                ok: true, keyword, total: 0, items: [],
+                hint: '全部组合里都没有这只股票：新增/导入请用 add_stock_to_portfolio（ETF 只能传 6 位代码或雪球个股网址）',
+            };
+        }
+        return { ok: true, keyword, total: items.length, items };
+    },
+
     async get_portfolios() {
         const { portfolios, activePortfolio } = await storageGet(chrome.storage.local, ['portfolios', 'activePortfolio']);
         const names = Object.keys(portfolios || {});
@@ -394,6 +502,7 @@ export const toolExecutors = {
         const mirror = (combos[activePortfolio] && combos[activePortfolio].stockList) || stockList || [];
         const list = target.stockList || (target.stockList = []);
         const added = [];
+        const alreadyPresent = [];
         const skipped = [];
         const rejected = [];
         const backfilled = [];
@@ -453,6 +562,13 @@ export const toolExecutors = {
                     backfilled.push({ name, price: importPrice });
                 }
                 skipped.push(name);
+                // 已在组合（含加仓场景）：把现有条目的真实状态回给模型，避免它再调 get_stock_list 自查
+                alreadyPresent.push({
+                    name: exist.name || name,
+                    code: code || exist.code || '',
+                    importPrice: exist.importPrice ?? null,
+                    currentPrice: exist.currentPrice ?? null,
+                });
                 continue;
             }
             list.push({
@@ -487,9 +603,16 @@ export const toolExecutors = {
                 await storageSet(chrome.storage.local, { portfolios: combos, stockList: mirror });
                 chrome.runtime.sendMessage({ action: 'refresh' });
                 const hint = backfilled.map(b => `${b.name}=${b.price}`).join('、');
-                return { ok: true, names: backfilled.map(b => b.name), portfolio, hint: `${hint} 初始价已补齐（行情刷新不会覆盖）`, backfilled };
+                return { ok: true, names: backfilled.map(b => b.name), portfolio, hint: `${hint} 初始价已补齐（行情刷新不会覆盖）`, backfilled, alreadyPresent };
             }
-            if (skipped.length > 0) return { error: `全部已在组合「${portfolio}」中：${skipped.join('、')}` };
+            if (skipped.length > 0) {
+                // T2：已持有/加仓不是失败——回 ok + alreadyPresent（含现有条目的代码与初始价），
+                // 模型据此只记账、不再重复导入，也不会把它当成错误去重试或自查
+                return {
+                    ok: true, added: [], alreadyPresent, portfolio,
+                    hint: `未新增：${skipped.join('、')} 已在组合「${portfolio}」中（不新增第二条记录，原初始价保持不变）`,
+                };
+            }
             return { error: '没有可导入的股票' };
         }
         await storageSet(chrome.storage.local, { portfolios: combos, stockList: mirror });
@@ -510,6 +633,8 @@ export const toolExecutors = {
                 }, scheduledTime - now);
             });
         }
+        // T2：落地明细随结果一起返回（code/初始价/现价/数据时间），模型无需再调 get_stock_list 确认
+        const items = await landedItems(portfolio, added, list);
         const hintParts = [`已保存 ${added.length} 支到「${portfolio}」`];
         if (skipped.length > 0) hintParts.push(`${skipped.length} 支已在组合中`);
         if (excluded.length > 0) hintParts.push(`${excluded.length} 支 ETF 已排除（请用 6 位代码或雪球网址）`);
@@ -518,7 +643,7 @@ export const toolExecutors = {
         if (rawPrice != null) hintParts.push(`初始价已按传入价设置（行情刷新不会覆盖）`);
         if (autoMode && pageTargets.length === 0) hintParts.push('行情已按代码直接取回，未打开页面');
         else if (pageTargets.length > 0) hintParts.push(`${pageTargets.length} 支将打开页面抓取`);
-        return { ok: true, names: added.map(a => a.name), portfolio, hint: hintParts.join('，'), rejected, excluded: etfNames, unresolved };
+        return { ok: true, names: added.map(a => a.name), portfolio, hint: hintParts.join('，'), items, alreadyPresent, rejected, excluded: etfNames, unresolved };
     },
     async move_stock_to_combo(args) {
         const name = String(args.name || '').trim();
@@ -617,10 +742,21 @@ export const toolExecutors = {
         };
     },
     async load_tool_group(args) {
-        const group = String(args && args.group || '').trim();
-        if (!TOOL_GROUPS[group]) return { ok: false, error: '未知工具组', groups: Object.keys(TOOL_GROUPS) };
-        state.activeToolGroups.add(group);
-        return { ok: true, group, rule: TOOL_GROUP_RULES[group], tools: TOOL_GROUPS[group] };
+        // T4：支持一次加载多组（group 传数组），省掉「逐组 load 一轮一轮来」的往返
+        const raw = (args && (args.group !== undefined ? args.group : args.groups));
+        const wanted = (Array.isArray(raw) ? raw : [raw]).map(g => String(g || '').trim()).filter(Boolean);
+        if (wanted.length === 0) return { ok: false, error: '请提供 group：工具组名，可传数组一次加载多组', groups: Object.keys(TOOL_GROUPS) };
+        const unknown = wanted.filter(g => !TOOL_GROUPS[g]);
+        if (unknown.length > 0) return { ok: false, error: `未知工具组：${unknown.join('、')}`, groups: Object.keys(TOOL_GROUPS) };
+        wanted.forEach(g => state.activeToolGroups.add(g));
+        // 单组调用保持旧返回形状（group/rule），避免与既有多组字段重复推送两份规则文本
+        if (wanted.length === 1) return { ok: true, group: wanted[0], rule: TOOL_GROUP_RULES[wanted[0]], tools: TOOL_GROUPS[wanted[0]] };
+        return {
+            ok: true,
+            groups: wanted,
+            rules: Object.fromEntries(wanted.map(g => [g, TOOL_GROUP_RULES[g]])),
+            tools: wanted.flatMap(g => TOOL_GROUPS[g]),
+        };
     },
     async update_cron(args) {
         const operation = String(args && args.operation || '').trim();
@@ -795,13 +931,37 @@ export const toolExecutors = {
         if (isBridgeFile && !dir.handle) {
             throw new Error('桥接目录未授权，请先在设置中启用 Agent 桥接并授权 flit_bridge 目录');
         }
-        const r = await readFile(dir.handle, path);
+        const startLine = Math.max(parseInt(args && args.start_line, 10) || 0, 0);
+        const endLine = Math.max(parseInt(args && args.end_line, 10) || 0, 0);
+        const rangeMode = startLine > 0 || endLine > 0;
+        // T6：fsa.readFile 本来就会 file.text() 全读、只在返回时按字符截断（不省 IO），
+        // 所以这里取全文，用行区间决定返回量、并给出真实 totalLines——旧版只回前 20000 字，
+        // 「文件尾部/一共多少行」模型无从得知，只能反复重试或干脆放弃。
+        const r = await readFile(dir.handle, path, Number.POSITIVE_INFINITY);
+        const full = String(r.content || '');
+        const all = full.split(/\r?\n/);
+        const totalLines = all.length;
+        if (rangeMode) {
+            const from = startLine > 0 ? startLine : 1;
+            const to = endLine >= from ? Math.min(endLine, totalLines) : totalLines;
+            const slice = all.slice(from - 1, to);
+            return {
+                root: dir.name, path: r.path, size: r.size, totalLines,
+                start_line: from, end_line: to, shownLines: slice.length,
+                truncated: to < totalLines,
+                content: slice.join('\n'),
+            };
+        }
+        const truncated = full.length > READ_FILE_CHARS;
         return {
             root: dir.name,
             path: r.path,
             size: r.size,
-            truncated: r.truncated,
-            content: r.truncated ? r.content + '\n（已截断，可让 AI 分段读取）' : r.content,
+            totalLines,
+            truncated,
+            content: truncated
+                ? full.slice(0, READ_FILE_CHARS) + `\n（已截断：仅含前 ${READ_FILE_CHARS} 字／全文共 ${totalLines} 行，可传 start_line/end_line 分段读取）`
+                : full,
         };
     },
     async read_parquet(args) {
@@ -2146,9 +2306,9 @@ export function buildSystemPrompt() {
     // 数据时效：用户的“今天”与日线的“最新一天”经常不是一个日期，不把这条讲清楚就会被当成查错数据
     const eodRules = '[数据时效] 日线取数按跨度分两档：≤7 个交易日——本地库（工作目录 flit/config.json 登记，经 Agent 桥接只读查询）→ 免费渠道（东方财富/同花顺）→ 小石，桥接关闭或未选工作目录时直接走免费，不影响这一档取数；>7 个交易日——只能读本地库（保护免费渠道），库不可用时工具会给「缺前置条件（本地库）」的原因，照原样转述并给替代方案，不得改用免费/小石补齐。不再读 parquet——年文件只是某时刻全市场快照，供回测/入库用。链路：本地库 → 免费渠道（新浪/腾讯实时、东方财富/同花顺日线）→ 小石 API（只缺 1~2 个交易日且免费不可用时才兜底）。本地库通常滞后一个交易日（由用户侧定时任务发布），工具会自动用免费接口补齐，不算错误；库里缺口更大时不补，如实告知用户本地日线库待更新，不要反复重试，也不要替用户执行任何同步脚本。ETF/指数不在该库，走免费同花顺 ETF 日线（失败再小石，且只有未复权价）。工具报「工作目录不存在可用数据库」时照原样转述，不要改用别的工具硬凑 K 线。盘中（含午休）时，日线末行是工具用一次免费批量行情拼上的当日未收盘 bar（行上标 intraday/as_of）：此时末行 close 可以当「现价」，但当日成交量不满全天，量能结论要看工具返回的 实时拼接.量能说明（已接近收盘时才可当整日量比）。没拼上实时（盘前/收盘后/渠道失败）时，末行只是已收盘日线，只能称「某日收盘价」，不得写成现价/最新价，当日价格请另调 get_stock_quote（单只）或 get_portfolio_quotes（批量）。结论中必须写明数据日期与行情时间；工具返回的 接口调用 / 渠道诊断 / 本地库诊断 是真实渠道状况，报告有异就如实告知用户，不要猜测或重复重试。';
     const lines = [
-        '你是「flit stk - 量化盯盘」Chrome 扩展 AI 助手，使用中文。工具按组冷加载：需要能力时先调用 load_tool_group。全局设置只能修改 Cron，直接执行并说明修改结果。flit_stk 是 Chrome 扩展安装目录，不是 Agent 项目目录；不要把文件写入 flit_stk。写入/读取 flit/... 时使用 Agent 工作目录，多个工作目录时自行选择 root。' + wsGuide,
-        '[交易记录硬规则] 当用户要求对当前持仓做操作，或要求记忆当前持仓、买入、卖出记录时，直接使用 append_file 自行创建或修改 flit/买入卖出.md，不要调用 save_memory，也不要把这类内容写入 flit/memory.md。用户说买入或卖出股票时，必须先向 flit/买入卖出.md 追加记录，再尝试导入或从组合移除；无论一只或多只股票无法导入、ETF 被排除、股票已手动移除、或组合操作失败，都必须记录，不能因操作失败而跳过。每条至少写操作日期和股票名称；买入价格、成交金额只有用户提供时才写，未提供不要猜测、不要写占位值；用户提供了买入价/成交价/成本价时，把该价格作为 import_price 一并传给 add_stock_to_portfolio，作为该股票初始价固定写入，之后行情刷新抓取不会覆盖这个初始价；必须追加，不得覆盖历史记录。',
-        '[ETF 买入硬规则] 用户表示买入、持有或导入 ETF 时，必须把该 ETF 从按名称自动导入中排除：禁止把 ETF 名称（含「ETF」字样）传给 add_stock_to_portfolio（会被工具拦截），也禁止生成问财搜索地址。你必须自行打开 https://xueqiu.com 搜索对应 ETF，复制雪球个股网址（如 https://xueqiu.com/S/SH588000），再把该雪球网址作为 names 传给 add_stock_to_portfolio 直接新增——工具会原样保存雪球地址并从雪球页面抓取。若尚未取得准确雪球网址，不得猜代码或先用问财地址代替，应先完成雪球搜索或明确告知用户需要手动完成。普通股票仍按原流程自动导入。',
+        '你是「flit stk - 量化盯盘」Chrome 扩展 AI 助手，使用中文。工具按组冷加载：portfolio（组合/股票操作）与 workspace（工作目录文件读写）两组默认已加载，需要其它能力时调 load_tool_group（可一次传多组，如 ["bridge","market"]）。全局设置只能修改 Cron，直接执行并说明修改结果。flit_stk 是 Chrome 扩展安装目录，不是 Agent 项目目录；不要把文件写入 flit_stk。写入/读取 flit/... 时使用 Agent 工作目录，多个工作目录时自行选择 root。' + wsGuide,
+        '[交易记录硬规则] 用户说买入/卖出，或要求记忆当前持仓时：直接用 append_file 创建或修改 flit/买入卖出.md（不要 save_memory，也不要写进 flit/memory.md），且必须在导入/移出组合之前先追加记录，无论导入成功失败都不得跳过。每条至少写操作日期与股票名称；买入价格、成交金额只有用户提供时才写，未提供不要猜测、不要写占位值。用户给了买入价/成本价就同时把它作为 import_price 传给 add_stock_to_portfolio（初始价固定写入，后续行情刷新不会覆盖）。只能追加，不得覆盖历史记录。',
+        '[ETF 买入硬规则] ETF/基金（名称含「ETF」「LOF」）禁止按名称传给 add_stock_to_portfolio（本地代码表不含基金条目，按名称必被拒），也禁止改用问财搜索页。拿 ETF 代码的顺序：① 先用 find_stock 按名称跨组合查——同一只 ETF 往往已在别的组合（如「ETF」组合）里，直接就能拿到 6 位代码；② 用户给了 6 位代码就直接传代码（如 588000、510300）；③ 都拿不到就明确告知用户需要其提供 6 位代码或雪球个股网址（如 https://xueqiu.com/S/SH588000），并建议在插件里手动新增。你没有浏览网页/抓取网页的能力，绝不允许声称自己打开雪球搜过，也不许凭记忆猜代码。普通股票仍按自动模式导入。',
         '[工具组]\n' + bridgeCatalog,
         bridgeHardRules,
         dataRules,

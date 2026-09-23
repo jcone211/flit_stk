@@ -764,6 +764,51 @@ await run('C9 系统提示注入（buildSystemPrompt）', async () => {
     check('C9', 'market 工具组规则同样带「不改工具不出行情数值」强约束', /\[强制取数\]/.test(TOOL_GROUP_RULES.market) && /绝不等于可以不调工具直接回答/.test(TOOL_GROUP_RULES.market));
 });
 
+// ---------------------------------------------------------------- 4.11 C11 工具组加载（默认常驻 + 一次多组，T4）
+await run('C11 load_tool_group：默认常驻 portfolio+workspace，且支持一次传多组', async () => {
+    const { TOOL_GROUPS } = await import('../../ai/core/ai_tools.js');
+    // 默认值直接读模块初值（另开一份 module 实例，避免被本脚本前面的用例改动过）
+    const fresh = await import('../../ai/core/ai_state.js?default-tool-groups');
+    check('C11', '默认常驻 portfolio + workspace（记账/读写文件不再各花一轮 load）',
+        [...fresh.state.activeToolGroups].sort().join(',') === 'portfolio,workspace',
+        [...fresh.state.activeToolGroups].join(','));
+    const saved = state.activeToolGroups;
+    try {
+        state.activeToolGroups = new Set();
+        let r = await toolExecutors.load_tool_group({ group: 'market' });
+        check('C11', '单组调用仍是旧形状（group/rule），向后兼容', r.ok === true && r.group === 'market' && /行情工具/.test(r.rule || ''), brief({ group: r.group }));
+        r = await toolExecutors.load_tool_group({ group: ['portfolio', 'market'] });
+        check('C11', '多组调用返回 groups/rules 与合并后的工具清单',
+            r.ok === true && Array.isArray(r.groups) && r.groups.length === 2
+            && Object.keys(r.rules || {}).length === 2
+            && (r.tools || []).length === TOOL_GROUPS.portfolio.length + TOOL_GROUPS.market.length,
+            brief({ groups: r.groups, tools: (r.tools || []).length }));
+        check('C11', '多组调用把两组都激活', state.activeToolGroups.has('portfolio') && state.activeToolGroups.has('market'),
+            [...state.activeToolGroups].join(','));
+        r = await toolExecutors.load_tool_group({ group: ['market', '不存在的组'] });
+        check('C11', '含未知组时整体拒绝并回可选组', r.ok === false && /未知工具组/.test(r.error || '') && Array.isArray(r.groups), brief(r.error));
+    } finally {
+        state.activeToolGroups = saved;
+    }
+});
+
+// ---------------------------------------------------------------- 4.12 C12 read_file 行区间分段（T6：长文件不再只能读前半段）
+await run('C12 read_file start_line/end_line 能读到被字符截断挡住的尾部', async () => {
+    const ws = await useWorkspace('c12', {});
+    const filler = '填充文本'.repeat(60); // 每行约 240 字符，300 行 > 20000 字符整读上限
+    const body = Array.from({ length: 300 }, (_, i) => `第 ${i + 1} 行 ${filler}`).join('\n');
+    await fsp.writeFile(path.join(ws, 'flit', 'long.md'), body, 'utf8');
+    const whole = await toolExecutors.read_file({ path: 'flit/long.md' });
+    check('C12', '整读被字符上限截断但给出 totalLines 行数', whole.truncated === true && whole.totalLines === 300, `truncated=${whole.truncated} totalLines=${whole.totalLines}`);
+    check('C12', '截断提示告知可用 start_line/end_line 分段', /start_line\/end_line/.test(whole.content || ''), (whole.content || '').slice(-40));
+    const tail = await toolExecutors.read_file({ path: 'flit/long.md', start_line: 295, end_line: 300 });
+    check('C12', '尾部区间能取到（旧版整读截断后永远看不到）', tail.shownLines === 6 && /第 300 行/.test(tail.content) && !/第 294 行/.test(tail.content), brief({ shown: tail.shownLines, head: tail.content.slice(0, 20) }));
+    check('C12', '区间元信息：start_line/end_line/truncated', tail.start_line === 295 && tail.end_line === 300 && tail.truncated === false, brief({ s: tail.start_line, e: tail.end_line, t: tail.truncated }));
+    const mid = await toolExecutors.read_file({ path: 'flit/long.md', start_line: 100 });
+    check('C12', '只给 start_line 时读到文件末尾并标记 truncated=false', mid.start_line === 100 && mid.end_line === 300 && mid.truncated === false, brief({ s: mid.start_line, e: mid.end_line }));
+});
+
+
 // ---------------------------------------------------------------- 4.9 R 系列：跨轮上下文（账本 / 数据便签）
 await run('R1 retain_tool_data 登记与拒收口径（0 次接口）', async () => {
     const savedResults = state.turnToolResults;
@@ -888,7 +933,11 @@ await run('G3 guard 证据维度：快照不能当 K 线证据；话题词判维
         && KLINE_QUOTE_TOOLS.has('read_stock_kline') && KLINE_QUOTE_TOOLS.has('read_stocks_kline')
         && !KLINE_QUOTE_TOOLS.has('get_stock_quote') && !SNAPSHOT_QUOTE_TOOLS.has('read_stocks_kline')
         && QUOTE_TOOLS.has('get_stock_quote') && QUOTE_TOOLS.has('read_stocks_kline')
-        && QUOTE_TOOLS.has('get_stock_list') && QUOTE_TOOLS.has('query_local_database'));
+        && QUOTE_TOOLS.has('get_stock_list') && QUOTE_TOOLS.has('find_stock') && QUOTE_TOOLS.has('query_local_database'));
+    check('G3', 'find_stock 与 get_stock_list 同为「库存快照」证据（读同一份 stockList，替它扫组合不应丢证据）',
+        QUOTE_TOOLS.has('find_stock') && !KLINE_QUOTE_TOOLS.has('find_stock') && !SNAPSHOT_QUOTE_TOOLS.has('find_stock'),
+        'find_stock 在 QUOTE_TOOLS 内、不在 K 线/实时两类集合内');
+
     // debug.txt [035] 的账本形状：本轮只有 get_stock_quote 成功（实时报价）
     const onlySnapshot = [{ kind: 'tool_trace', calls: [{ name: 'get_stock_quote', ok: true }] }];
     check('G3', '只有快照证据：普通行情话题认为有证据（不拦截，体验不变）',
@@ -1040,6 +1089,32 @@ await run('H6 move_stock_to_trash：移入垃圾池', async () => {
     const s = store.local.portfolios.持仓.stockList[0];
     check('H6', 'inTrash 置 true', s && s.inTrash === true, s && s.inTrash);
 });
+
+await run('H7 find_stock：一次跨全部组合查股票/ETF（替代逐个 get_stock_list 扫组合）', async () => {
+    store.local.portfolios = {
+        持仓: { selectorName: 'wc1', stockList: [{ name: '湖南黄金', code: '002155', prefix: 'SZ', url: 'https://xueqiu.com/S/SZ002155', importPrice: 25.28, currentPrice: 24.83, lastUpdateAt: 1790146625189 }] },
+        ETF: { selectorName: 'wc1', stockList: [{ name: '科创50ETF华夏', code: '588000', prefix: 'SH', url: 'https://xueqiu.com/S/SH588000', importPrice: 1.705, currentPrice: 1.754, lastUpdateAt: 1790146625189 }] },
+        临时: { selectorName: 'wc1', stockList: [{ name: 'XD滨化股', code: '601678', prefix: 'SH', url: 'https://xueqiu.com/S/SH601678', importPrice: 5.83, inTrash: true }] },
+    };
+    if (store.local.activePortfolio) delete store.local.activePortfolio;
+    // debug.txt 真实场景：用户只说「科创50ETF华夏」没给代码，旧链路靠逐个扫组合才发现它在 ETF 组合里
+    let r = await toolExecutors.find_stock({ keyword: '科创50ETF华夏' });
+    const etf = (r.items || [])[0] || {};
+    check('H7', '按 ETF 名称查到已有条目并给出 6 位代码', r.ok === true && etf.code === 'SH:588000', brief(r));
+    check('H7', '标出所在组合与初始价', (etf.portfolios || []).some(p => p.portfolio === 'ETF' && p.importPrice === 1.705), brief(etf.portfolios));
+    r = await toolExecutors.find_stock({ keyword: '湖南黄金' });
+    const hj = (r.items || [])[0] || {};
+    check('H7', '普通股票：现价与数据时间一并返回（不用再查一次组合）', hj.code === 'SZ:002155' && hj.currentPrice === 24.83 && typeof hj.数据时间 === 'string', brief(hj));
+    r = await toolExecutors.find_stock({ keyword: '588000' });
+    check('H7', '按 6 位代码同样命中同一只', (r.items || [])[0] && r.items[0].code === 'SH:588000', brief(r.items));
+    r = await toolExecutors.find_stock({ keyword: '滨化股份' });
+    check('H7', '名称归一：XD 前缀股票用正常名也能查到', (r.items || [])[0] && r.items[0].code === 'SH:601678', brief(r.items));
+    check('H7', '垃圾池条目标记 inTrash', (r.items || [])[0] && r.items[0].inTrash === true, brief(r.items && r.items[0]));
+    check('H7', '从未更新过行情的条目不给现价（字段缺省，不猜价）', (r.items || [])[0] && (r.items[0].currentPrice ?? null) === null, brief(r.items && r.items[0]));
+    r = await toolExecutors.find_stock({ keyword: '根本没有这只股' });
+    check('H7', '查不到时 total=0 并提示用 add_stock_to_portfolio', r.ok === true && r.total === 0 && /add_stock_to_portfolio/.test(r.hint || ''), brief(r));
+});
+
 
 // 恢复 store（不影响后续用例）
 store.local.portfolios = savedPortfolios;

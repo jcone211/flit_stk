@@ -15,7 +15,10 @@ export const KLINE_QUOTE_TOOLS = new Set(['read_stock_kline', 'read_stocks_kline
 export const QUOTE_TOOLS = new Set([
     ...SNAPSHOT_QUOTE_TOOLS,
     ...KLINE_QUOTE_TOOLS,
-    'get_stock_list', 'query_local_database',
+    // 会带回「库存价格/SQL 行」的读取类工具：成功即算行情上下文（guard 短路，不把复述库存价当编造）。
+    // find_stock 与 get_stock_list 同源（都读插件 stockList 的快照字段 currentPrice/数据时间），
+    // 必须一起登记——否则「用 find_stock 替代逐组合扫」之后，记账类回复会因缺少行情上下文被误纠正。
+    'get_stock_list', 'find_stock', 'query_local_database',
 ]);
 
 // 行情名词（只当语境，不再单独构成编造证据）

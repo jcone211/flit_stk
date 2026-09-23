@@ -1850,6 +1850,10 @@ async function parseAndRecordStockTrade(raw) {
         if (buyPrice != null) args.import_price = buyPrice;
         const res = await toolExecutors.add_stock_to_portfolio(args);
         if (res && res.error) return { ok: false, text: res.error + recordNote };
+        // 已在【持仓】中（加仓/重复录入）：插件同组合内不会出现第二条记录，此处明确告知，不笼统说「已加入」
+        if (res && Array.isArray(res.alreadyPresent) && res.alreadyPresent.length > 0 && !res.names) {
+            return { ok: true, text: `「${name}」已在【持仓】组合中，未重复添加（原初始价保持不变）${recordNote}` };
+        }
         const priceNote = (buyPrice != null && !(res && res.hint)) ? `（初始价已设为 ${buyPrice}，行情刷新不会覆盖）` : '';
         return { ok: true, text: `已将「${name}」加入【持仓】组合${res && res.hint ? '（' + res.hint + '）' : priceNote}${recordNote}` };
     }
@@ -1963,7 +1967,9 @@ async function continueGeneration() {
     state.currentAssistantEl = null;
     setGenerating(true);
     try {
-        await runAgentLoop();
+        // 继续生成同样要带上已加载工具组：旧版裸调 runAgentLoop() 会把 activeToolGroups 重置为空，
+        // 于是「继续生成」那一轮模型手上没有任何工具（含默认常驻组）
+        await runAgentLoop(undefined, [...state.activeToolGroups]);
     } catch (err) {
         appendMessage('error', '发生异常：' + err.message);
     } finally {

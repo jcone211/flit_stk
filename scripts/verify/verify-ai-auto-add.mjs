@@ -9,6 +9,7 @@
 //       A2 ETF 按 6 位代码；A3 名称解析不到（不建条目）；A4 多候选；A5 混合 ETF 名称剔除
 //       A6 refresh_via_page=true 强制页面方式；A7 行情取不到时代码回退打开页面
 //       A8 传入 import_price 时行情落地不覆盖初始价
+//       A9 返回值带 items 落地明细（T2）；A10 已在组合（加仓）→ ok:true + alreadyPresent
 // 说明：fetch 只放行 file://（扩展内资源映射到仓库文件），其余一律拒绝 → 0 次外呼。
 //       代码表「读取失败 → 回退页面方式」的降级分支不在此脚本覆盖：
 //       本脚本把扩展内资源打通，而 verify-free-first.mjs 的桩打不开该资源（H1~H4 即
@@ -88,6 +89,7 @@ function landQuotes(codes) {
         s.name = q.name;
         s.currentPrice = q.price;
         s.percent = q.change_pct;
+        s.lastUpdateAt = Date.now(); // 真实 landApiQuotes 会写行情时间戳；A9 要断言「数据时间」
         if (s.importPrice == null) s.importPrice = q.price;
     }));
     return { ok: landed.length > 0, requested: codes.length, received: landed.length, landed: landed.length > 0, missing };
@@ -260,6 +262,34 @@ await run('A8 传入 import_price 时行情落地不覆盖初始价', async () =
     check('A8', '初始价保留 1400', !!s && s.importPrice === 1400, s && s.importPrice);
     check('A8', '现价仍按行情更新', !!s && s.currentPrice === 1500.5, s && s.currentPrice);
 });
+
+// ---------------------------------------------------------------- A9 落地明细随结果返回（T2：模型无需再自查一遍组合）
+await run('A9 返回值带 items 落地明细（名称/代码/初始价/现价/数据时间）', async () => {
+    reset();
+    const r = await toolExecutors.add_stock_to_portfolio({ names: ['贵州茅台'], import_price: 1400 });
+    check('A9', '返回 ok', r.ok === true, brief(r.error));
+    const it = (r.items || [])[0];
+    check('A9', 'items 含 1 只并带规范名与代码', !!it && it.name === '贵州茅台' && it.code === 'SH:600519', brief(it));
+    check('A9', '初始价 1400 不被行情覆盖', !!it && it.importPrice === 1400, it && it.importPrice);
+    check('A9', '现价与数据时间一并返回（旧版要再调 get_stock_list 才知道）',
+        !!it && it.currentPrice === 1500.5 && typeof it.数据时间 === 'string', brief(it));
+});
+
+// ---------------------------------------------------------------- A10 已在组合（加仓场景）不再是「错误」
+await run('A10 已在组合 → ok:true + alreadyPresent（不新增、不覆盖原初始价、不再取行情）', async () => {
+    reset();
+    await toolExecutors.add_stock_to_portfolio({ names: ['贵州茅台'], import_price: 1400 });
+    quotedCodes.length = 0;
+    const r = await toolExecutors.add_stock_to_portfolio({ names: ['贵州茅台'], import_price: 1300 });
+    check('A10', '返回 ok（debug.txt 里这里回的是 error，逼模型重试 + 自查）', r.ok === true && !r.error, brief(r));
+    check('A10', 'alreadyPresent 给出现有条目与原初始价 1400',
+        Array.isArray(r.alreadyPresent) && !!r.alreadyPresent[0] && r.alreadyPresent[0].importPrice === 1400, brief(r.alreadyPresent));
+    check('A10', '不新增第二条记录', list().length === 1, brief(list().length));
+    check('A10', '原初始价不被本次传入价覆盖', list()[0].importPrice === 1400, list()[0].importPrice);
+    check('A10', '未再取行情', quotedCodes.length === 0, brief(quotedCodes));
+    check('A10', 'hint 说明「已在组合中、不新增」', /已在组合/.test(r.hint || ''), r.hint);
+});
+
 
 // ---------------------------------------------------------------- 汇总
 console.log(`\n结果：通过 ${pass} 项${failures.length ? `，失败 ${failures.length} 项` : '，全部通过'}`);

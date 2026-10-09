@@ -588,7 +588,7 @@ function comboTimestamp() {
 }
 
 function validComboName(n) {
-    return typeof n === 'string' && n.trim().length > 0 && n.trim().length <= 4;
+    return typeof n === 'string' && n.trim().length > 0 && n.trim().length <= 5;
 }
 
 function nameFromFile(fileName) {
@@ -601,7 +601,7 @@ function promptComboName(message, prefilled) {
     const input = prompt(message, prefilled || '');
     if (input === null) return null;
     const name = input.trim();
-    if (!validComboName(name)) { alert('组合命名必须为1-4个字'); return null; }
+    if (!validComboName(name)) { alert('组合命名必须为1-5个字'); return null; }
     return name;
 }
 
@@ -1327,7 +1327,7 @@ confirmQuickImportComboBtnEl.addEventListener('click', () => {
     const inputName = quickImportComboInputEl.value.trim();
     let name;
     if (inputName) {
-        if (!validComboName(inputName)) { alert('组合命名必须为1-4个字'); return; }
+        if (!validComboName(inputName)) { alert('组合命名必须为1-5个字'); return; }
         if (inputName === DYNAMIC_PORTFOLIO) { alert(`「${DYNAMIC_PORTFOLIO}」为自动组合，不能导入到该组合`); return; }
         name = inputName; // 与现有组合重名时自然导入到现有组合
     } else {

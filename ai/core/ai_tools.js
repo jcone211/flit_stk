@@ -8,8 +8,9 @@ import {
     DEFAULT_AI_BASE_URL, DEFAULT_AI_MODEL,
     MAX_TOOL_RESULT_CHARS, MAX_MESSAGES, MAX_MESSAGE_CHARS,
     MAX_MEMORY_ITEMS, MEMORY_KEY,
-    MAX_RETAIN_CHARS, MAX_RETAINED_ENTRIES, MAX_RETAINED_TOTAL,
+    MAX_RETAINED_ENTRIES, MAX_RETAINED_TOTAL,
     summarizeList, pickStockView, findStockByName, stockSearchUrl,
+    toolResultLimitChars,
 } from './ai_state.js';
 import {
     readyRoot, listDir, readFile, readFileBinary, writeFile, appendFile, workspacePermission,
@@ -142,7 +143,8 @@ export const TOOL_GROUP_RULES = {
 [桥接不通时无级可降] bridge 报 config_invalid / bridge_unreachable / query_failed 时，表示数据源配置未落到 bridge 能读取的位置或桥接不在运行。**不要** docker inspect 查容器标签、不要搜 bridge 源码找 label key、不要推测 bridge 内部发现逻辑——这些是你没有源码权或权威文档的信息。正确做法：
 - 如果用户要的是 ≤7 天 K 线或实时行情 → 告知用户桥接配置问题后，直接降级走免费渠道出数据（不卡住）。
 - 如果用户要的是 >7 天 K 线 → 桥接不通就是彻底无路可走。直接告诉用户「flit/config.json 已写入工作目录，但桥接不认该配置；请确保 flit_bridge 已启动。当前无法查 30 日 K 线，可选方案：让用户只查 7 天内；或自行启动桥接后重试；或自备数据源联系项目作者」。**不要卡在桥接问题上 debug、不要 docker exec/psql 直连数据库绕过桥接、不要把 7 天保护口径扔到 >7 天查询上假装有数据**。
-[快速降级] ≤7 天 K 线或实时行情：1 次重试后仍不通，立即降级走免费渠道，不要连续超过 2 轮 debug 桥接问题。`
+[快速降级] ≤7 天 K 线或实时行情：1 次重试后仍不通，立即降级走免费渠道，不要连续超过 2 轮 debug 桥接问题。
+[写 SQL 的自律] 查询前先看 flit/memory.md、flit/workflow/ 里已登记的表结构与性能陷阱，不要重复全表探索。写多层 CTE 时，外层引用的列必须在内层先 SELECT 出来（debug.txt 同一轮连错 5 次 column does not exist，多是 CTE 漏投影）。对 a_share_daily（千万行）做 MIN/MAX/COUNT 前务必加 WHERE adjust='qfq' 与 code/date 限定，否则全表扫描必超时。百分比/比值用 ::numeric 显式转换再 ROUND，避免整数除法。SQL 尽量精简、别堆超长嵌套；报 column does not exist 时按返回里的「真实列」清单逐字核对修改，不要凭记忆换列名。`
 };
 
 // 工具名 → 定义（getLoadedToolDefs 按名字取定义用，勿删：删了会在加载工具组时抛 TOOL_BY_NAME is not defined）
@@ -841,24 +843,49 @@ export const toolExecutors = {
     },
     async discover_database_schema(args) {
         if (!state.workspaceRootPath) return { ok: false, error: { code: 'workspace_not_found', message: '尚未设置主工作目录' } };
-        return bridgeRequest('/v1/database/schema', {
-            workspace_root: state.workspaceRootPath,
-            source: args?.source,
-            timeout_ms: args?.timeout_ms || 10000,
-        }, { timeoutMs: (args?.timeout_ms || 10000) + 3000 });
+        const tables = await loadDbSchemaCompact(args?.source, args?.timeout_ms || 15000);
+        // 探测失败：把桥接原始错误透出来，别静默返回空（否则模型以为库里没表）
+        if (!tables) {
+            return { ok: false, error: { code: 'schema_failed', message: '读取数据库表结构失败（桥接不可用或未配置数据源）' } };
+        }
+        // 紧凑「每表一行」格式：彻底避免逐行 12048 字被工具上限截断、尾部字段丢失（debug.txt [052] 根因）
+        return {
+            ok: true,
+            table_count: tables.length,
+            tables: tables.map(t => ({ table: t.table, columns: t.columns.join(', ') })),
+            summary: '数据库表与字段（每表一行，列名以逗号分隔；查询请严格用这些真实列名）：\n'
+                + tables.map(t => `- ${t.table}: ${t.columns.join(', ')}`).join('\n'),
+        };
     },
     async query_local_database(args) {
         if (!state.workspaceRootPath) return { ok: false, error: { code: 'workspace_not_found', message: '尚未设置主工作目录' } };
+        // 默认 30s：模型自写 SQL（多层 CTE / 全表聚合）常超 10s，旧默认太紧（debug.txt [048] 全表聚合 10s 超时失败）
+        const timeout = args?.timeout_ms || 30000;
         const result = await bridgeRequest('/v1/database/query', {
             workspace_root: state.workspaceRootPath,
             source: args?.source,
             sql: String(args?.sql || ''),
             columns: args?.columns,
-            timeout_ms: args?.timeout_ms || 10000,
+            timeout_ms: timeout,
             debug: !!args?.debug,
-        }, { timeoutMs: (args?.timeout_ms || 10000) + 3000 });
+        }, { timeoutMs: timeout + 3000 });
         if (!result?.ok && result?.error?.code === 'sql_error') {
-            result.error.next_action = '先调用 discover_database_schema 查询真实表和字段，再修正 SQL；确认修正后调用 record_workspace_memory 记录经验。';
+            const msg = String(result.error?.message || '');
+            // 「列/表不存在」是最常见试错（debug.txt 同一轮连错 5 次 column does not exist）：
+            // 直接把涉及表的真实列清单附上报错，省掉模型再猜一轮列名、再 discover 一轮
+            const miss = msg.match(/column "([^"]+)" does not exist/i) || msg.match(/relation "([^"]+)" does not exist/i);
+            if (miss) {
+                const fromTbl = (String(args?.sql || '').match(/FROM\s+([A-Za-z0-9_."]+)/i) || [])[1] || '';
+                const bare = fromTbl.replace(/["]/g, '').toLowerCase();
+                const tables = await loadDbSchemaCompact(args?.source, 15000);
+                const t = tables && bare ? tables.find(x => x.table.toLowerCase() === bare) : null;
+                if (t && t.columns.length) {
+                    result.error.message = `${msg}\n[表 ${t.table} 的真实列] ${t.columns.join(', ')}`;
+                }
+                result.error.next_action = '按上面「真实列」把写错的列名改成本表真实存在的列（注意 CTE 里要先 SELECT 出来才能被外层引用），再重试；确认可用后调用 record_workspace_memory 记录经验。';
+            } else {
+                result.error.next_action = "先调用 discover_database_schema 核对真实表和字段，再修正 SQL；对 a_share_daily 这类大表先加 WHERE adjust='qfq' 过滤避免全表扫描。确认修正后调用 record_workspace_memory 记录经验。";
+            }
         }
         return result;
     },
@@ -1284,8 +1311,12 @@ export const toolExecutors = {
         const src = hits[hits.length - 1];
         if (!src.ok) return { error: `${tool} 本轮没有取到数据，无内容可保留`, 它的返回: String(src.text || '').slice(0, 200) };
         const note = String((args && args.note) || '').slice(0, 160);
-        const text = src.text.length > MAX_RETAIN_CHARS
-            ? src.text.slice(0, MAX_RETAIN_CHARS) + `\n（便签已截断，原长 ${src.text.length} 字）` : src.text;
+        // 发送档吃到各工具自己的上限（query_local_database 30000 / 默认 6000），不再一律压到 3000：
+        // 长查询结果常超 3000 字，压到 3000 会把尾部字段截掉、模型据此算错指标（debug.txt 第二问取证用）。
+        // 留 60 字给尾部截断说明，保证「单条 ≤ 总量预算 MAX_RETAINED_TOTAL」的不变量
+        const chars = Math.min(toolResultLimitChars(tool), MAX_RETAINED_TOTAL) - 60;
+        const text = src.text.length > chars
+            ? src.text.slice(0, chars) + `\n（便签已截断，原长 ${src.text.length} 字）` : src.text;
         const pending = (state.pendingRetains || []).filter(n => n && n.tool !== tool);
         pending.push({ tool, argsText: src.argsText, note, text, ts: src.ts || Date.now() });
         while (pending.length > 1
@@ -1470,6 +1501,37 @@ async function dbQuery(sql, columns, sourceName) {
         return { ok: false, message: (r && r.error && r.error.message) || '本地数据库查询失败', code: r && r.error && r.error.code };
     }
     return { ok: true, rows: r.rows || [] };
+}
+
+// schema 紧凑缓存：`workspace|source` → [{table, columns:[...]}]（每表一行）。
+// 桥接 /v1/database/schema 原生是逐行 {table,column,data_type,nullable}，一张 12 列的表就 12 条、
+// 8 张表 12048 字，会被工具结果上限截断到 12000、尾部字段丢失（debug.txt [052] 根因）。压成每表一行后约 800 字。
+const dbSchemaCache = new Map();
+
+/** 拉一次 /v1/database/schema 并压成「每表一行列清单」后缓存（改表不必重开窗口；失败回 null）。
+ *  discover_database_schema 用它直接给紧凑结果；query_local_database 报「列不存在」时用它附真实列清单。 */
+async function loadDbSchemaCompact(source, timeoutMs) {
+    if (!state.workspaceRootPath) return null;
+    const tmo = Math.max(3000, Number(timeoutMs) || 15000);
+    const key = state.workspaceRootPath + '|' + String(source || '');
+    const hit = dbSchemaCache.get(key);
+    if (hit) return hit;
+    const r = await bridgeRequest('/v1/database/schema', {
+        workspace_root: state.workspaceRootPath, source: source || undefined, timeout_ms: tmo,
+    }, { timeoutMs: tmo + 3000 });
+    if (!r || r.ok === false || !Array.isArray(r.tables)) return null;
+    const byTable = new Map();
+    for (const row of r.tables) {
+        const t = String((row && row.table) || '').trim();
+        if (!t) continue;
+        if (!byTable.has(t)) byTable.set(t, { table: t, columns: [] });
+        const col = String((row && row.column) || '').trim();
+        if (col && !byTable.get(t).columns.includes(col)) byTable.get(t).columns.push(col);
+    }
+    const tables = [...byTable.values()];
+    if (dbSchemaCache.size > 16) dbSchemaCache.delete(dbSchemaCache.keys().next().value);
+    dbSchemaCache.set(key, tables);
+    return tables;
 }
 
 /** 读 flit/config.json 里登记的数据源（扩展自己用 File System Access 读，不经桥接）

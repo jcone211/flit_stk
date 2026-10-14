@@ -119,6 +119,8 @@
 4. 结果按「工作目录 + 源名 + `flit/config.json` 原文指纹」缓存在 `dbPlanCache`（只留最近 16 个）：改了表名不必重开 AI 窗口，下一次查询就重新探测（用例 D16）；桥接读不到表结构又没登记表名时，仍按 `a_share_daily` 试一次让真报错浮出来，但这条表名标为「未经验证」、不会当成 `数据表` 回给用户（用例 D17）。名称 → 代码用的 `stock_basic_cache` 也由同一次探测得出（`basicTable` / `basicCodeCol` 按 `ts_code|code|symbol` 探测）。
 5. `dbQuery(sql, columns, sourceName)` → 桥接 `POST /v1/database/query`：`docker exec -i <container> psql -X -At -F '\t'`，**只允许 `SELECT/WITH/EXPLAIN`**、超 `DB_TIMEOUT_MS=12s`。psql 的 NULL 输出是空串，`dbNum` 按此收数。
 
+**模型自写 SQL 的辅助口径（debug.txt 第二问连错 5 次 column does not exist 的修复）**：① `discover_database_schema`（及报错回填）都走 `loadDbSchemaCompact`——把桥接逐行 `{table,column,...}`（8 表 12048 字）压成**每表一行列清单**（约 800 字，缓存键 `workspace|source`、最多 16 条），彻底避免 12000 字截断把尾部字段截掉；② `query_local_database` 的默认 `timeout_ms` 30s（旧默认 10s，模型自写多层 CTE / 全表聚合必超），报 `sql_error` 且消息匹配 `column "X" does not exist` / `relation "X" does not exist` 时，从 SQL 的 `FROM <表>` 取表名、附上该表**真实列清单**到 `error.message`，`next_action` 改成「按真实列改列名、注意 CTE 里要先 SELECT 才能被外层引用」，省掉模型再猜一轮列名。
+
 日线 SQL 形状（一条取完整批，实测 12 只 × 20 根 0.4s）：
 
 ```sql

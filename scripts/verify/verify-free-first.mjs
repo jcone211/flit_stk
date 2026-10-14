@@ -846,7 +846,8 @@ await run('R1 retain_tool_data 登记与拒收口径（0 次接口）', async ()
         state.turnToolResults.push({ name: 'query_local_database', argsText: '{"sql":"SELECT 1"}', text: 'x'.repeat(9000), ok: true, ts: now });
         await toolExecutors.retain_tool_data({ tool: 'query_local_database' });
         const total = state.pendingRetains.reduce((n, x) => n + x.text.length, 0);
-        check('R1', '单条超 MAX_RETAIN_CHARS 会截断', state.pendingRetains.every(n => n.text.length <= 3100),
+        check('R1', '发送档按工具各自上限截断（query_local_database 30000，不再一律 3000）',
+            state.pendingRetains.every(n => n.text.length <= Math.min(30000, 6000) + 100),
             state.pendingRetains.map(n => n.text.length).join(','));
         check('R1', '总量超 MAX_RETAINED_TOTAL 丢最旧、最新一份必在',
             total <= 6000 && state.pendingRetains.some(n => n.tool === 'query_local_database'), `total=${total}`);

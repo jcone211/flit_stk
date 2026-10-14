@@ -60,7 +60,8 @@ export const MAX_TRACE_CALLS = 12;            // 单轮账本最多列出的调�
 export const MAX_KEEP_TRACES = 2;             // 上下文里保留最近几轮的账本（更早的没有参考价值，还压预算）
 // 「跨轮数据便签」：模型自己判断某份工具原始数据关键时调 retain_tool_data 登记，
 // 不占用可见正文、不进 UI 气泡，只在下一轮起作为隐藏上下文回灌（不再要求「把数据抄进回复正文」）
-export const MAX_RETAIN_CHARS = 3000;         // 单条便签正文上限（超出截断）
+export const MAX_RETAIN_CHARS = 3000;         // 【已停用】单条便签正文上限：现由 retain_tool_data 按各工具发送档
+                                              // 截断（toolResultLimitChars，再受 MAX_RETAINED_TOTAL 约束），保留仅为兼容
 export const MAX_RETAINED_ENTRIES = 3;        // 同时保留几条便签（满了丢最旧）
 export const MAX_RETAINED_TOTAL = 6000;       // 便签总字数量上限（相对模型上下文（默认 256k/1M token），给对话本身留位）
 export const MAX_TURN_TOOL_RESULTS = 8;       // 本轮可被登记的工具原始返回缓存条数
@@ -71,8 +72,10 @@ export const COMPACT_PREVIEW_TOKENS = 1000;
 // 故每收到一个 delta（正文或思考）就重置空闲计时；空闲满 45s 判无响应，300s 为硬上限兜底。
 export const REQUEST_IDLE_TIMEOUT_MS = 45000;
 export const REQUEST_MAX_TIMEOUT_MS = 300000;
-// SW keepalive：请求在途时定时 ping 后台，port 消息本身即重置 MV3 service worker 的 30s 空闲回收计时
-export const KEEPALIVE_INTERVAL_MS = 20000;
+// SW keepalive：请求在途 / 工具执行期间定时 ping 后台，port 消息本身即重置 MV3 service worker 的 30s 空闲回收计时
+// 15s 一 ping：本地桥接的库查询常跑 16~30s，工具执行期（sendRound 已返回、pending 为空）必须靠这里吊住 SW，
+// 20s 间隔遇到整点 30s 回收会被打掉（debug.txt [094] 请求孤儿化）；工具执行期间由 toolBusy 标记保持 ping
+export const KEEPALIVE_INTERVAL_MS = 15000;
 // 思考过程面板只渲染尾部字符，长思考不拖慢 DOM（完整文本进 DEBUG 日志）
 export const THINKING_TAIL_CHARS = 1200;
 export const CHAT_KEY = 'aiChats';

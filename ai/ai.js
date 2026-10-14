@@ -167,15 +167,26 @@ const pending = new Map();
 // ============== SW keepalive ==============
 
 let keepAliveTimer = null;
+// agent 轮进行中标志：工具执行期间没有在途请求（pending 空），但长查询（本地库 psql 可达 30s）
+// 期间 SW 仍可能被 MV3 按 30s 空闲回收，导致工具跑完后下一轮请求孤儿化（debug.txt 末尾）。
+// 置位后 keepalive 在无在途请求时也持续发占位 ping 吊住 SW。
+let agentLoopBusy = false;
 
 // 请求在途期间每 KEEPALIVE_INTERVAL_MS 发一次 ping（SW 回 pong）：
 // MV3 下 long-lived port 单独不足以吊住 SW，靠消息活动重置 30s 空闲回收计时
 function startKeepAlive() {
     if (keepAliveTimer) return;
     keepAliveTimer = setInterval(() => {
-        if (pending.size === 0 || !state.portAlive) { stopKeepAlive(); return; }
-        for (const requestId of pending.keys()) {
-            try { state.port.postMessage({ action: 'aiChatPing', requestId }); } catch { /* 断开由 onDisconnect 统一收尾 */ }
+        if (!state.portAlive) { stopKeepAlive(); return; }
+        if (pending.size === 0 && !agentLoopBusy) { stopKeepAlive(); return; }
+        // 有在途请求逐个 touch；无在途请求但 agent 轮进行中（工具执行期）也发一个占位 ping——
+        // SW 侧 port.onMessage 收到消息即重置 30s 空闲回收计时（找不到 entry 也无妨，只为吊住 SW）
+        if (pending.size > 0) {
+            for (const requestId of pending.keys()) {
+                try { state.port.postMessage({ action: 'aiChatPing', requestId }); } catch { /* 断开由 onDisconnect 统一收尾 */ }
+            }
+        } else {
+            try { state.port.postMessage({ action: 'aiChatPing', requestId: 0 }); } catch { /* 断开由 onDisconnect 统一收尾 */ }
         }
     }, KEEPALIVE_INTERVAL_MS);
 }
@@ -240,7 +251,7 @@ async function sendRound(apiMessages, tools, { stream = true, provider = activeP
             pending.delete(requestId);
             clearTimeout(idleTimer);
             clearTimeout(maxTimer);
-            if (pending.size === 0) stopKeepAlive();
+            if (pending.size === 0 && !agentLoopBusy) stopKeepAlive();
             resolve({ ...r, content, reasoningChars });
         };
         const expire = (label) => {
@@ -341,9 +352,15 @@ async function runAgentLoop(initialMessages, initialToolGroups = []) {
     // 本轮的工具原始返回缓存与待落库便签逐轮重置（retain_tool_data 只能登记本轮的东西）
     state.turnToolResults = [];
     state.pendingRetains = [];
+    // 整个 agent 轮（含中间工具执行）期间保持 keepalive：长查询跑在页面侧、不经 SW，
+    // 期间 SW 空闲计时照样在走，不 ping 会被 MV3 回收、工具跑完的下一轮请求就孤儿化
+    agentLoopBusy = true;
+    startKeepAlive();
     try {
         await runAgentLoopBody(initialMessages, initialToolGroups, turnCalls);
     } finally {
+        agentLoopBusy = false;
+        if (pending.size === 0) stopKeepAlive();
         pushToolTrace(turnCalls);
         pushRetainedNotes();
     }
@@ -358,6 +375,9 @@ async function runAgentLoopBody(initialMessages, initialToolGroups, turnCalls) {
     let quoteEvidenceKline = false;
     let quoteRefused = false;
     let guardRetried = false;
+    // 失败预算：`工具|错误签名` → 连续失败次数。小模型易在同一 SQL 上反复试错（debug.txt 同一轮连错 5 次
+    // column does not exist），连续 TOOL_FAIL_STREAK_LIMIT 次同因失败就注入一次「停手」提醒，别烧光 maxToolIterations。
+    const toolFailStreak = new Map();
     const requestProvider = selectRequestProvider(apiMessages);
     if (!String(requestProvider.apiKey || '').trim()) {
         appendMessage('error', '请设置一个供应商 API Key');
@@ -429,7 +449,29 @@ async function runAgentLoopBody(initialMessages, initialToolGroups, turnCalls) {
                     function: { name: tc.function?.name || tc.name, arguments: tc.arguments },
                 })),
             });
+            const beforeCalls = turnCalls.length;
             apiMessages.push(...await executeToolCalls(sanitizedCalls, turnCalls));
+            // —— 失败预算：累计本轮新增调用里「同工具同错误」的连续失败，达到阈值注入一次停手提醒 ——
+            for (const c of turnCalls.slice(beforeCalls)) {
+                if (c.ok) {
+                    for (const k of [...toolFailStreak.keys()]) if (k.startsWith(c.name + '|')) toolFailStreak.delete(k);
+                } else {
+                    const sig = toolFailSignature(c);
+                    if (sig) {
+                        const key = c.name + '|' + sig;
+                        toolFailStreak.set(key, (toolFailStreak.get(key) || 0) + 1);
+                    }
+                }
+            }
+            const hot = [...toolFailStreak.entries()].find(([, n]) => n >= TOOL_FAIL_STREAK_LIMIT);
+            if (hot) {
+                const hotName = hot[0].split('|')[0];
+                const hotSig = hot[0].split('|').slice(1).join('|');
+                record('fail_budget', { 工具: hotName, 连续失败: hot[1], 错误签名: hotSig });
+                appendMessage('system', `「${hotName}」已连续 ${hot[1]} 次因同一原因失败，已暂停自动重试`);
+                apiMessages.push({ role: 'system', content: `你连续 ${hot[1]} 次调用 ${hotName} 因同一原因失败（${hotSig}）。停止原样重发：先核对表/字段（用 discover_database_schema 或报错里的「真实列」清单），或改用 read_stock_kline 等现成工具；仍不行就把当前障碍如实告诉用户，不要继续盲改。` });
+                toolFailStreak.clear();
+            }
             quoteEvidence = turnCalls.some(c => QUOTE_TOOLS.has(c.name) && c.ok);
             quoteEvidenceKline = turnCalls.some(c => KLINE_QUOTE_TOOLS.has(c.name) && c.ok);
             quoteRefused = turnCalls.some(c => QUOTE_TOOLS.has(c.name) && c.refusal === true);
@@ -572,6 +614,18 @@ function summarizeToolCall(name, argsText, resultText, ms, truncated, failed) {
         bits.push((t ? '目标 ' + clipText(t, 24) + '，' : '') + '失败：' + clipText(errText || resultText, 120) + (diag ? '（' + clipText(diag, 80) + '）' : ''));
     }
     return { name, ok, refusal, ms, text: `- ${name}(${clipText(argsText, 120)}) ${ms}ms → ${bits.join('，')}` };
+}
+
+// 失败预算阈值：同一工具因同一错误连续失败这么多次，就注入一次「停手」提醒，避免小模型烧光轮数盲改
+const TOOL_FAIL_STREAK_LIMIT = 3;
+
+/** 失败预算用的错误签名：把「同一类错误」归一成一个 key——column/relation 不存在取精确名，其余取前 40 字 */
+function toolFailSignature(trace) {
+    const text = String((trace && trace.text) || '');
+    const m = text.match(/column "([^"]+)" does not exist/i) || text.match(/relation "([^"]+)" does not exist/i);
+    if (m) return m[0].toLowerCase();
+    if (!text) return '';
+    return text.replace(/\s+/g, ' ').slice(0, 40).toLowerCase();
 }
 
 /**
